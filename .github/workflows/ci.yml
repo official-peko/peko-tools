@@ -30,7 +30,9 @@ jobs:
       - name: Install Linux system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev
+          zstd_a="$(dpkg -L libzstd-dev | grep -m1 '/libzstd\.a$')"
+          echo "ZSTD_LIB_PREFIX=$(dirname "$zstd_a")" >> "$GITHUB_ENV"
 
       - name: Fetch LLVM dist
         env:

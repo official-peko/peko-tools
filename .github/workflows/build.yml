@@ -56,7 +56,27 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev
+          zstd_a="$(dpkg -L libzstd-dev | grep -m1 '/libzstd\.a$')"
+          echo "ZSTD_LIB_PREFIX=$(dirname "$zstd_a")" >> "$GITHUB_ENV"
+
+      - name: Install macOS system deps
+        if: runner.os == 'macOS'
+        run: |
+          brew install zstd
+          echo "ZSTD_LIB_PREFIX=$(brew --prefix zstd)/lib" >> "$GITHUB_ENV"
+
+      - name: Install Windows system deps
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install zstd:x64-windows-static-md
+          $lib = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md\lib"
+          if (-not (Test-Path "$lib\libzstd.lib")) {
+            $src = Get-ChildItem $lib -Filter 'zstd*.lib' | Select-Object -First 1
+            if ($src) { Copy-Item $src.FullName "$lib\libzstd.lib" }
+          }
+          "ZSTD_LIB_PREFIX=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Fetch LLVM dist (unix)
         if: runner.os != 'Windows'
