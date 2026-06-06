@@ -1,0 +1,19 @@
+peko test [OPTIONS] <FILE>
+
+Type-checks a single Pekoscript source file and prints any diagnostics
+it finds. This command does not produce an object file or a binary. It
+runs the parser and the semantic simulator and stops.
+
+If --os and --arch are not provided, the host platform is used. The
+target only affects which platform-specific imports the type checker
+walks; nothing is codegen'd.
+
+OPTIONS
+    --os=<OS>             target operating system (android, ios, linux,
+                          macos, or windows). Defaults to the host OS.
+    --arch=<ARCH>         target CPU architecture (arm or x86_64).
+                          Defaults to the host architecture.
+
+EXAMPLES
+    peko test main.peko
+    peko test src/lib.peko --os=windows --arch=x86_64

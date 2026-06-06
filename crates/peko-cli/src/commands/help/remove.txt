@@ -1,0 +1,15 @@
+peko remove [OPTIONS] <PACKAGE>
+
+Uninstalls a package from the current project (or from the global
+package store when --global is set).
+
+OPTIONS
+    --global              remove the package from the global store
+                          rather than from the current project
+    --version=<VERSION>   remove a specific version instead of all
+                          installed versions of the package
+
+EXAMPLES
+    peko remove some_pkg
+    peko remove some_pkg --version=1.2.0
+    peko remove some_pkg --global

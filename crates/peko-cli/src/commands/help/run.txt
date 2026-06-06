@@ -1,0 +1,17 @@
+peko run [OPTIONS]
+
+Builds the current project and runs it. For CLI projects this is a
+single-shot compile-then-execute. For UI projects this enters a hot
+reload loop: source changes are detected, the appserver is rebuilt,
+and the running app is updated without a full restart. SCSS source
+changes are recompiled and pushed to the running app over a local
+update channel.
+
+OPTIONS
+    --release             build with release optimizations
+    --quiet               suppress per-change reload notifications in
+                          the console
+
+EXAMPLES
+    peko run
+    peko run --quiet

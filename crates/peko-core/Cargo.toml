@@ -1,0 +1,19 @@
+[package]
+name = "peko-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core lexer, parser, type system, diagnostics, and static analyzer for the Pekoscript compiler."
+readme = "README.md"
+keywords = ["compiler", "language", "pekoscript", "parser", "lexer"]
+categories = ["compilers", "parser-implementations"]
+
+[dependencies]
+derive-new = { workspace = true }
+indexmap = { workspace = true }
+itertools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

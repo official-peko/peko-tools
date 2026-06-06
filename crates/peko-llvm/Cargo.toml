@@ -1,0 +1,18 @@
+[package]
+name = "peko-llvm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLVM IR code generation for the Pekoscript toolchain"
+
+[dependencies]
+peko-core = { workspace = true }
+llvm-sys-180 = { package = "llvm-sys", version = "180" }
+uuid = { version = "1.23.1", features = ["v4"] }
+
+derive-new = { workspace = true }
+indexmap = { workspace = true }
+itertools = { workspace = true }
+grass = { workspace = true }

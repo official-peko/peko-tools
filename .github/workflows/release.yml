@@ -1,0 +1,42 @@
+# Release build. Triggered by pushing a version tag. Builds all targets and
+# publishes a GitHub release with the tagged archives. Tags in the 0.x series
+# or carrying a SemVer prerelease suffix are marked as prereleases; a 1.0.0 or
+# later tag without a suffix publishes as a normal release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      version: ${{ github.ref_name }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" == *-* || "$TAG" == v0.* ]]; then
+            PRE="--prerelease"
+          else
+            PRE=""
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRE

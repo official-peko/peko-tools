@@ -1,0 +1,3340 @@
+//! # Expression AST simulators
+//!
+//! [`PekoValueSimulator`] implementations for expression-level AST
+//! nodes — anything that produces a value when simulated:
+//!
+//! * **Literals** — array ([`ArrayAST`]), map ([`MapAST`]), XML tag
+//!   ([`PekoXTagAST`]), range ([`RangeAST`]).
+//! * **References** — variable ([`VariableReferenceAST`]), module
+//!   access ([`ModuleAccessAST`]), object access ([`ObjectAccessAST`]),
+//!   array access ([`ArrayAccessAST`]).
+//! * **Calls and constructions** — function call ([`FunctionCallAST`]),
+//!   object construction ([`ObjectConstructionAST`]).
+//! * **Operators** — unary ([`UnaryExpressionAST`]), binary
+//!   ([`BinaryExpressionAST`]).
+//! * **Conversions** — cast ([`CastAST`]), unwrap ([`UnwrapAST`]).
+//!
+//! The function-call impl is by far the largest — it handles three
+//! distinct syntaxes (normal call, expression call, object
+//! construction), overload resolution, and generic type inference,
+//! all behind a single [`FunctionCallAST`] node produced by the parser.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use indexmap::IndexMap;
+
+use crate::asts::data_structures::{ClassMethod, PositionData, PositionedValue, VisibilityData};
+use crate::asts::expressions::*;
+use crate::asts::values::StringAST;
+use crate::asts::PekoAST;
+use crate::diagnostics;
+use crate::execution::ExecutionContextAlgorithms;
+use crate::simulator::data_structures::{pointee_type, FunctionCall};
+use crate::types::{self, PekoType};
+
+use super::context::PekoSimulatorContext;
+use super::data_structures::{DefinedObject, SimulatorArg, SimulatorVariable};
+use super::value::SimulatorValue;
+use super::PekoValueSimulator;
+
+/// Simulates an array literal `[a, b, c]`.
+///
+/// All elements must share the first element's type. The result is
+/// constructed by delegating to [`ObjectConstructionAST`] with the
+/// `Array` class and the inferred element type as the generic.
+impl PekoValueSimulator for ArrayAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Empty array literals can't have their element type inferred.
+        if self.values.is_empty() {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "array literal must contain at least one value. The element type is inferred from the first value, so an empty array literal cannot be type-checked. Add at least one element, or declare an explicit type and use `Array<T>()` instead".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+
+            return SimulatorValue::Value(types::PekoType::error_type());
+        }
+
+        // Type-check subsequent values against the first.
+        let first_value_type = self.values[0].simulate(simulator_context).get_type();
+
+        for value in self.values.iter().skip(1) {
+            let current_value_type = value.simulate(simulator_context).get_type();
+
+            if !simulator_context.types_similar(&current_value_type, &first_value_type) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        value.get_start().clone(),
+                        value.get_end().clone(),
+                        format!(
+                            "array element has type `{}` but the array's element type is `{}`. All elements of an array literal must have the same type as the first element",
+                            current_value_type,
+                            first_value_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        // Construct as a standard::Array via ObjectConstructionAST.
+        ObjectConstructionAST::new(
+            self.start.clone(),
+            self.end.clone(),
+            PositionedValue::create_no_position(String::from("Array")),
+            vec![first_value_type],
+            Vec::new(),
+        )
+        .simulate(simulator_context)
+    }
+}
+
+/// Simulates a map literal `{k: v, k: v, ...}`.
+///
+/// Keys must share a type and values must share a type; both are
+/// inferred from the first pair.
+impl PekoValueSimulator for MapAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        if self.key_values.is_empty() {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "map literal must contain at least one key-value pair. The key and value types are inferred from the first pair, so an empty map literal cannot be type-checked".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+
+            return SimulatorValue::Value(types::PekoType::error_type());
+        }
+
+        let key_type = self.key_values[0].0.simulate(simulator_context).get_type();
+        let value_type = self.key_values[0].1.simulate(simulator_context).get_type();
+
+        for (key, value) in self.key_values.iter().skip(1) {
+            let current_key_type = key.simulate(simulator_context).get_type();
+            let current_value_type = value.simulate(simulator_context).get_type();
+
+            if !simulator_context.types_similar(&current_key_type, &key_type) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        value.get_start().clone(),
+                        value.get_end().clone(),
+                        format!(
+                            "map key has type `{}` but the map's key type is `{}`. All keys of a map literal must have the same type as the first key",
+                            current_key_type,
+                            key_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+
+            // Check the current value's type against the map value type.
+            if !simulator_context.types_similar(&current_value_type, &value_type) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        value.get_start().clone(),
+                        value.get_end().clone(),
+                        format!(
+                            "map value has type `{}` but the map's value type is `{}`. All values of a map literal must have the same type as the first value",
+                            current_value_type,
+                            value_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        ObjectConstructionAST::new(
+            self.start.clone(),
+            self.end.clone(),
+            PositionedValue::create_no_position(String::from("Map")),
+            vec![key_type, value_type],
+            Vec::new(),
+        )
+        .simulate(simulator_context)
+    }
+}
+
+/// Simulates a PekoX (XML-style) tag literal `<Tag attr="...">...</Tag>`.
+///
+/// Builds the equivalent `ui::Element` object: tag name + string map of
+/// attributes + array of children + inner text + empty events map.
+impl PekoValueSimulator for PekoXTagAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Build (attribute_name, attribute_value) pairs, each as
+        // SimulatorValues, to feed into a string-to-string map.
+        let mut attribute_key_value_pairs = Vec::new();
+
+        for (attribute_name, attribute_value) in &self.attributes {
+            let attribute_name = simulator_context
+                .create_standard_string_ast(attribute_name.clone())
+                .simulate(simulator_context);
+
+            attribute_key_value_pairs
+                .push((attribute_name, attribute_value.simulate(simulator_context)));
+        }
+
+        let element_attributes = simulator_context.create_standard_map(
+            &types::PekoType::simple_type("String"),
+            &types::PekoType::simple_type("String"),
+            attribute_key_value_pairs,
+        );
+
+        let element_attributes = if let Some(attrs) = element_attributes {
+            attrs
+        } else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.attributes_start.clone(),
+                    self.attributes_end.clone(),
+                    "one or more values assigned to this tag's attributes are not convertible to strings. All XML attribute values must be `String`-compatible".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+
+            SimulatorValue::Value(types::PekoType::error_type())
+        };
+
+        let current_file = simulator_context.get_current_file();
+
+        // Simulate the children, requiring each to be a ui::Element.
+        let mut children = Vec::new();
+
+        for child in &self.children {
+            let child_value = child.clone().simulate(simulator_context);
+
+            if simulator_context.types_equal(
+                &child_value.get_type(),
+                &types::PekoType::from_string("ui::Element", &current_file),
+            ) {
+                children.push(child_value);
+            } else {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        child.get_start().clone(),
+                        child.get_end().clone(),
+                        "only XML tags can be interpolated with `{}` syntax inside another tag. Consider using `${}` syntax for non-element interpolation instead".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        let element_children = simulator_context
+            .create_standard_array(
+                &types::PekoType::from_string("ui::Element", &current_file),
+                children,
+            )
+            .unwrap();
+
+        // Build the inner-text String value.
+        let element_inner_text = ObjectConstructionAST::new(
+            PositionData::default(),
+            PositionData::default(),
+            PositionedValue::create_no_position(String::from("String")),
+            Vec::new(),
+            vec![(
+                None,
+                PekoAST::String(StringAST::new(
+                    PositionData::default(),
+                    PositionData::default(),
+                    true,
+                    self.inner_text.clone(),
+                )),
+            )],
+        )
+        .simulate(simulator_context);
+
+        let tag_string = simulator_context.create_standard_string_ast(self.tag.clone());
+        let tag_string = tag_string.simulate(simulator_context);
+
+        let events_map = simulator_context
+            .create_standard_map(
+                &types::PekoType::simple_type("String"),
+                &types::PekoType::from_string("closure(ui::Event)", &current_file),
+                Vec::new(),
+            )
+            .unwrap();
+
+        // Build the final ui::Element object.
+        let pekox_tag_object = simulator_context.create_object(
+            &types::PekoType::from_string("ui::Element", &current_file),
+            vec![
+                tag_string,
+                element_attributes,
+                element_children,
+                element_inner_text,
+                events_map,
+            ],
+        );
+
+        if let Some(obj) = pekox_tag_object {
+            obj
+        } else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "internal error: failed to construct `ui::Element` for this XML tag. The standard library may not be properly linked".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+
+            SimulatorValue::Value(types::PekoType::error_type())
+        }
+    }
+}
+
+/// Simulates a range expression `start..end`.
+///
+/// Both endpoints must be `int`-compatible. The result is a
+/// `standard::RangeIterator`.
+impl PekoValueSimulator for RangeAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let range_start = self.range_from.clone().simulate(simulator_context);
+        if !simulator_context.types_similar(
+            &range_start.get_type(),
+            &types::PekoType::simple_type("int"),
+        ) {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.range_from.get_start().clone(),
+                    self.range_from.get_end().clone(),
+                    format!(
+                        "range start expression has type `{}` but must be `int`-compatible. Range expressions iterate over integers",
+                        range_start.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        }
+
+        let range_end = self.range_to.clone().simulate(simulator_context);
+        if !simulator_context
+            .types_similar(&range_end.get_type(), &types::PekoType::simple_type("int"))
+        {
+            // Bug fix vs original: the original referenced
+            // `self.range_from` for both endpoints' diagnostics, so a
+            // bad range_to would highlight the range_from expression.
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.range_to.get_start().clone(),
+                    self.range_to.get_end().clone(),
+                    format!(
+                        "range end expression has type `{}` but must be `int`-compatible. Range expressions iterate over integers",
+                        range_end.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        }
+
+        SimulatorValue::Value(types::PekoType::from_string("standard::RangeIterator", ""))
+    }
+}
+
+/// Simulates a variable reference.
+///
+/// Handles four cases in order:
+///
+/// 1. The pseudo-identifiers `None` and `Default`, which produce
+///    values whose type is taken from the surrounding inference
+///    context.
+/// 2. Local variables in the current block's scoped-variable map.
+/// 3. Attribute references on the current `this`.
+/// 4. Global variables and global functions in the current module's
+///    hierarchy. (When the reference resolves to a function name,
+///    the result is a function-typed value usable in expressions.)
+impl PekoValueSimulator for VariableReferenceAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // --- None pseudo-identifier --- //
+        if self.variable_name.value == "None" {
+            // None needs a type hint to know which Option<T> it is.
+            if simulator_context.current_expected_type_options.is_none() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.variable_name.start.clone(),
+                        self.variable_name.end.clone(),
+                        "cannot determine the type of `None`. `None` requires a type hint from the surrounding context, such as a variable declaration with a declared `Option<T>` type".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+
+                return SimulatorValue::Value(types::PekoType::error_type());
+            }
+
+            for expected_type in &simulator_context
+                .current_expected_type_options
+                .clone()
+                .unwrap()
+            {
+                let expand_option = simulator_context.expand_type(expected_type);
+                let expand_option = expand_option.unwrap();
+
+                // Only Option<T> can hold None.
+                if expand_option.type_name == "Option" && expand_option.generic_types.len() == 1 {
+                    simulator_context.defined_objects.push(DefinedObject::new(
+                        false,
+                        expand_option.clone(),
+                        self.variable_name.end.clone(),
+                    ));
+
+                    return SimulatorValue::Value(expand_option);
+                }
+            }
+
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.variable_name.start.clone(),
+                    self.variable_name.end.clone(),
+                    "cannot create a `None` value when the inferred type is not `Option<T>`. `None` is only valid where an `Option` is expected".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+
+            return SimulatorValue::Value(types::PekoType::error_type());
+        }
+
+        // --- Default pseudo-identifier --- //
+        if self.variable_name.value == "Default" {
+            if simulator_context.current_expected_type_options.is_none() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.variable_name.start.clone(),
+                        self.variable_name.end.clone(),
+                        "cannot determine the type of `Default`. `Default` requires a type hint from the surrounding context, such as a variable declaration with an explicit type".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return SimulatorValue::Value(types::PekoType::error_type());
+            }
+
+            let main_expected_type = simulator_context
+                .current_expected_type_options
+                .clone()
+                .unwrap()[0]
+                .clone();
+
+            // Built-in types have built-in default values.
+            let default_value = if main_expected_type.is_builtin_type() {
+                match main_expected_type.to_string().as_str() {
+                    "int" => SimulatorValue::Value(types::PekoType::simple_type("int")),
+                    "int16" => SimulatorValue::Value(types::PekoType::simple_type("int16")),
+                    "int128" => SimulatorValue::Value(types::PekoType::simple_type("int128")),
+                    "int64" => SimulatorValue::Value(types::PekoType::simple_type("int64")),
+                    "float" => SimulatorValue::Value(types::PekoType::simple_type("float")),
+                    "double" => SimulatorValue::Value(types::PekoType::simple_type("double")),
+                    "char" => SimulatorValue::Value(types::PekoType::simple_type("char")),
+                    "string" => SimulatorValue::Value(types::PekoType::simple_type("string")),
+                    _ => SimulatorValue::Value(types::PekoType::simple_type("bool")),
+                }
+            } else {
+                // Otherwise the inferred type must exist for Default
+                // to produce a value of that type.
+                if !simulator_context.type_exists(&main_expected_type)
+                    && !main_expected_type.is_error_type
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.variable_name.start.clone(),
+                            self.variable_name.end.clone(),
+                            format!(
+                                "cannot create a `Default` value for type `{}` because that type is not defined",
+                                main_expected_type,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    return simulator_context.create_error_value();
+                }
+
+                SimulatorValue::Value(main_expected_type)
+            };
+
+            if simulator_context
+                .get_class_by_type(&default_value.get_type())
+                .is_some()
+            {
+                simulator_context.defined_objects.push(DefinedObject::new(
+                    false,
+                    default_value.get_type(),
+                    self.variable_name.start.clone(),
+                ));
+            }
+
+            return default_value;
+        }
+
+        // --- Normal variable lookup --- //
+        // First: scoped (local) variables, then attributes on `this`,
+        // then globals and functions in the module hierarchy.
+        let variable_reference = if simulator_context
+            .scoped_variables
+            .contains_key(&self.variable_name.value)
+        {
+            simulator_context.scoped_variables[&self.variable_name.value].clone()
+        } else if simulator_context.current_this.is_some()
+            && simulator_context
+                .get_class_by_type(
+                    &simulator_context
+                        .current_this
+                        .clone()
+                        .unwrap()
+                        .variable_type,
+                )
+                .is_some()
+            && simulator_context
+                .get_class_by_type(
+                    &simulator_context
+                        .current_this
+                        .clone()
+                        .unwrap()
+                        .variable_type,
+                )
+                .unwrap()
+                .attributes
+                .contains_key(&self.variable_name.value)
+        {
+            // Resolve as an attribute on `this`.
+            let attribute = simulator_context
+                .get_object_attribute(
+                    &simulator_context
+                        .current_this
+                        .clone()
+                        .unwrap()
+                        .variable_value,
+                    self.variable_name.value.clone(),
+                    false,
+                )
+                .unwrap();
+
+            simulator_context.previous_was_this = true;
+
+            // Drop one level of reference depth so the value reads
+            // as a non-reference attribute.
+            let mut value_type = attribute.get_type();
+            if value_type.reference_depth > 0 {
+                value_type.reference_depth -= 1;
+            } else if value_type.pointer_depth > 0 {
+                value_type.pointer_depth -= 1;
+            }
+
+            SimulatorVariable::new(
+                PositionData::default(),
+                VisibilityData::open_visibility(),
+                value_type.clone(),
+                SimulatorValue::Value(value_type),
+                simulator_context.module_context.current_module().clone(),
+            )
+        } else {
+            // Globals — and if not a variable, try resolving as a
+            // function reference (functions are first-class values).
+            let find_global = match simulator_context
+                .find_global_variable_in_current(&self.variable_name.value)
+            {
+                Some(global) => global,
+                None => {
+                    match simulator_context.find_function_in_current(&self.variable_name.value) {
+                        Some(global_function) => {
+                            let mut function_argument_types = Vec::new();
+
+                            for (_, arg) in &global_function[0].arguments {
+                                function_argument_types.push(arg.argument_type.clone());
+                            }
+
+                            let function_type = types::PekoType::new(
+                                Vec::new(),
+                                String::new(),
+                                function_argument_types,
+                                0,
+                                0,
+                                0,
+                                Some(global_function[0].return_type.clone()),
+                                false,
+                                PositionData::default(),
+                                PositionData::default(),
+                            );
+
+                            return SimulatorValue::Value(function_type);
+                        }
+                        _ => {
+                            simulator_context.diagnostics.report_diagnostic(
+                                diagnostics::PekoDiagnostic::new(
+                                    self.variable_name.start.clone(),
+                                    self.variable_name.end.clone(),
+                                    format!(
+                                        "cannot find symbol `{}` in the current scope. Check the spelling, that the symbol is declared, and that it is imported into this module",
+                                        self.variable_name.value,
+                                    ),
+                                    diagnostics::DiagnosticType::Error,
+                                    simulator_context.get_current_file(),
+                                ),
+                            );
+                            return simulator_context.create_error_value();
+                        }
+                    }
+                }
+            };
+
+            if find_global.variable_visibility.private
+                && simulator_context.module_context.accessing_current_module()
+            {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.variable_name.start.clone(),
+                        self.variable_name.end.clone(),
+                        format!(
+                            "cannot access private global variable `{}` of module `{}` from outside that module. Mark the variable `pub` or access it from within its declaring module",
+                            self.variable_name.value,
+                            simulator_context
+                                .module_context
+                                .current_module()
+                                .read()
+                                .unwrap()
+                                .name
+                                .clone(),
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+
+            find_global
+        };
+
+        // Mark class-typed references as defined objects for IDE
+        // tooling.
+        if simulator_context
+            .get_class_by_type(&variable_reference.variable_type)
+            .is_some()
+        {
+            simulator_context.defined_objects.push(DefinedObject::new(
+                self.variable_name.value == "this",
+                variable_reference.variable_type.clone(),
+                self.variable_name.end.clone(),
+            ));
+        }
+
+        // Reference context: return a reference-depth-increased type
+        // for mutable contexts, after checking constness.
+        if simulator_context.return_references {
+            if variable_reference.variable_visibility.constant {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.variable_name.start.clone(),
+                        self.variable_name.end.clone(),
+                        format!(
+                            "cannot mutate constant variable `{}`. Constants cannot be reassigned or used in mutable reference contexts",
+                            self.variable_name.value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+
+            let mut reference_type = variable_reference.variable_value.get_type();
+            reference_type.reference_depth += 1;
+
+            return SimulatorValue::Value(reference_type);
+        }
+
+        variable_reference.variable_value
+    }
+}
+
+/// Simulates a function call.
+///
+/// This is the most complex AST simulator — [`FunctionCallAST`]
+/// represents three distinct surface syntaxes that the parser
+/// produces with the same node shape:
+///
+/// 1. **Identifier calls** — `name(args)` where `name` is a
+///    declared function.
+/// 2. **Expression calls** — `expr(args)` where `expr` evaluates to
+///    a function-typed value (e.g. `closures[0](x)`).
+/// 3. **Object constructions** — `ClassName(args)`, identical at
+///    parse time to identifier calls. This impl detects the class
+///    case and re-delegates to [`ObjectConstructionAST`].
+///
+/// On top of those three syntaxes, function calls can be generic
+/// (with inference from arguments and/or the surrounding expected
+/// type), and non-generic functions can be overloaded — which
+/// requires running the overload-selection algorithm on every call.
+///
+/// The flow is:
+///
+/// 1. Build a `FunctionCall` trace record for IDE signature help.
+/// 2. Handle built-in functions (`sizeof`, `Error`) directly.
+/// 3. Collect the function identifier and locate the declaring
+///    module by walking up the module hierarchy.
+/// 4. If the name resolves to a class, delegate to
+///    [`ObjectConstructionAST`].
+/// 5. Otherwise, infer generic type parameters from the arguments
+///    and/or expected type, then resolve the overload.
+/// 6. Type-check the arguments against the chosen signature and
+///    return the function's declared return type.
+impl PekoValueSimulator for FunctionCallAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Build a trace record for IDE signature help. This is
+        // populated as the function is resolved and added to the
+        // simulator's function_calls list once we know we're not
+        // re-delegating to ObjectConstructionAST.
+        let function_call_info = Arc::new(RwLock::new(FunctionCall::new(
+            self.start.clone(),
+            self.end.clone(),
+            None,
+            String::new(),
+            Vec::new(),
+            IndexMap::new(),
+            PekoType::simple_type("void"),
+        )));
+
+        let mut argument_positions = Vec::new();
+        for (_, argument) in &self.arguments {
+            argument_positions.push((argument.get_start().clone(), argument.get_end().clone()));
+        }
+        function_call_info.write().unwrap().argument_positions = argument_positions;
+
+        // --- Function identifier collection (step 2 in module doc) --- //
+        // Detect built-in pseudo-functions first.
+        let function_name = match self.function_reference.as_ref() {
+            PekoAST::VariableReference(variable_reference) => {
+                Some(variable_reference.variable_name.clone())
+            }
+            _ => None,
+        };
+
+        // --- Built-in functions: sizeof, Error, __rt_peko_alloc, cstring --- //
+        if function_name.is_some()
+            && (function_name.clone().unwrap().value == "sizeof"
+                || function_name.clone().unwrap().value == "Error"
+                || function_name.clone().unwrap().value == "__rt_peko_alloc"
+                || function_name.clone().unwrap().value == "cstring")
+        {
+            // Save and reset the function call context. Arguments
+            // simulate in the call module (which may differ from the
+            // module being called into via module access).
+            let previous_function_call = simulator_context.current_function_call.clone();
+            let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+            while topmost_module.read().unwrap().parent.is_some() {
+                let parent = topmost_module
+                    .read()
+                    .unwrap()
+                    .parent
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                topmost_module = parent;
+            }
+
+            if simulator_context.in_main() {
+                simulator_context.current_function_call = Some(Arc::clone(&function_call_info));
+            }
+
+            // Simulate arguments in the call module's context.
+            let mut arguments = Vec::new();
+            let mut argument_types = Vec::new();
+            let mut keyword_args = HashMap::new();
+            let mut keyword_arg_types = HashMap::new();
+            let post_stack = simulator_context.module_context.step_back();
+
+            for (argument_name, argument) in &self.arguments {
+                let generated_argument = argument.simulate(simulator_context);
+
+                arguments.push(generated_argument.clone());
+                argument_types.push(generated_argument.get_type());
+
+                if argument_name.is_some() {
+                    keyword_args.insert(
+                        argument_name.clone().unwrap().value.clone(),
+                        generated_argument.clone(),
+                    );
+                    keyword_arg_types.insert(
+                        argument_name.clone().unwrap().value.clone(),
+                        generated_argument.get_type(),
+                    );
+                }
+            }
+
+            simulator_context.module_context.step_forward(post_stack);
+            simulator_context.current_function_call = previous_function_call;
+
+            // sizeof<T>() returns int64 — size of T in bytes, used
+            // for low-level allocations.
+            if function_name.is_some() && function_name.clone().unwrap().value == "sizeof" {
+                if self.function_generics.len() != 1 {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "`sizeof` requires exactly one type as a generic parameter, e.g. `sizeof<int>()`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                if !simulator_context.type_exists(&self.function_generics[0]) {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.function_generics[0].start_position.clone(),
+                            self.function_generics[0].end_position.clone(),
+                            format!(
+                                "type `{}` is not defined. Check the type name and that the type is in scope",
+                                self.function_generics[0],
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                return SimulatorValue::Value(types::PekoType::simple_type("int64"));
+
+            // __rt_peko_alloc<T>(count) allocates `count` elements of
+            // type `T` on the gc heap and returns a `Pointer<T>`. It
+            // requires exactly one generic type and one `int`-compatible
+            // count argument.
+            } else if function_name.is_some()
+                && function_name.clone().unwrap().value == "__rt_peko_alloc"
+            {
+                if self.function_generics.len() != 1 {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "`__rt_peko_alloc` requires exactly one type as a generic parameter, e.g. `__rt_peko_alloc<int>(count)`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                if !simulator_context.type_exists(&self.function_generics[0]) {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.function_generics[0].start_position.clone(),
+                            self.function_generics[0].end_position.clone(),
+                            format!(
+                                "type `{}` is not defined. Check the type name and that the type is in scope",
+                                self.function_generics[0],
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                // Require exactly one count argument that is int-compatible.
+                if arguments.len() != 1
+                    || !simulator_context.types_similar(
+                        &arguments[0].get_type(),
+                        &types::PekoType::simple_type("int"),
+                    )
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "`__rt_peko_alloc` requires exactly one `int` argument for the element count, e.g. `__rt_peko_alloc<int>(8)`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                // Build the managed pointer type `Pointer<T>`.
+                let mut allocated_type = types::PekoType::simple_type("Pointer");
+                allocated_type
+                    .generic_types
+                    .push(self.function_generics[0].clone());
+
+                return SimulatorValue::Value(allocated_type);
+
+            // cstring("literal") wraps a raw string literal as a `cstr`.
+            // For the simulator we only verify that the first argument is
+            // present and is a string literal, then return a `cstr` value.
+            } else if function_name.is_some() && function_name.clone().unwrap().value == "cstring" {
+                let first_argument_is_string_literal = self
+                    .arguments
+                    .first()
+                    .is_some_and(|(_, argument)| matches!(argument, PekoAST::String(_)));
+
+                if !first_argument_is_string_literal {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "`cstring` requires a string literal as its first argument, e.g. `cstring(\"text\")`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                return SimulatorValue::Value(types::PekoType::simple_type("cstr"));
+
+            // Error("msg") returns an error optional. Bug fix vs
+            // original: the original `!arguments.len() == 1` parsed
+            // as a bitwise-NOT and never fired correctly; corrected
+            // to `arguments.len() != 1`.
+            } else if function_name.is_some() && function_name.unwrap().value == "Error" {
+                if arguments.len() != 1
+                    || !simulator_context.types_similar(
+                        &arguments[0].get_type(),
+                        &types::PekoType::simple_type("string"),
+                    )
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "`Error` requires exactly one `string` argument as the error message, e.g. `Error(\"failed to parse\")`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return simulator_context.create_error_value();
+                }
+
+                if simulator_context.current_expected_type_options.is_none() {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "cannot determine the type of `Error(...)`. `Error` requires a type hint from the surrounding context, such as a variable declaration with a declared `Option<T>` type".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return SimulatorValue::Value(types::PekoType::error_type());
+                }
+
+                for expected_type in &simulator_context
+                    .current_expected_type_options
+                    .clone()
+                    .unwrap()
+                {
+                    let expand_option = simulator_context.expand_type(expected_type).unwrap();
+
+                    // The inference type must be an Option with one
+                    // generic parameter to hold the error.
+                    if expand_option.type_name == "Option" && expand_option.generic_types.len() == 1
+                    {
+                        simulator_context.defined_objects.push(DefinedObject::new(
+                            false,
+                            expand_option.clone(),
+                            self.end.clone(),
+                        ));
+
+                        return SimulatorValue::Value(expand_option);
+                    }
+                }
+
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        "cannot create an `Error` value when the inferred type is not `Option<T>`. `Error(...)` is only valid where an `Option` is expected".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+
+                return SimulatorValue::Value(types::PekoType::error_type());
+            }
+        }
+
+        // --- Resolve function reference and locate declaring module --- //
+        let function_type: types::PekoType;
+        let function_visibility: VisibilityData;
+        let function_var_args_type: Option<types::PekoType>;
+        let function_argument_types: IndexMap<String, SimulatorArg>;
+
+        let mut function_from_expression = false;
+        let mut function_full_name = String::new();
+        let mut function_base_name = String::new();
+
+        // Step 2b: pull the function name if it's an identifier
+        // reference. Anything else means we're in case 2 (expression
+        // call) and the reference will need to be simulated.
+        match self.function_reference.as_ref() {
+            PekoAST::VariableReference(variable_reference) => {
+                function_base_name = variable_reference.variable_name.value.clone();
+                function_full_name = variable_reference.variable_name.value.clone();
+            }
+            _ => {
+                function_from_expression = true;
+            }
+        }
+
+        function_call_info.write().unwrap().name = function_full_name.clone();
+
+        // Walk up the module hierarchy looking for the function /
+        // class / generic. Also tracks whether the name is actually
+        // an in-scope variable (case 2 — the function reference is a
+        // variable holding a function value).
+        let mut function_module = simulator_context.module_context.current_module().clone();
+        let mut no_parent = false;
+
+        if !function_full_name.is_empty() {
+            let mut function_is_valid_variable = false;
+
+            while !function_module
+                .read()
+                .unwrap()
+                .functions
+                .contains_key(&function_full_name)
+                && !function_module
+                    .read()
+                    .unwrap()
+                    .classes
+                    .contains_key(&function_full_name)
+                && !function_module
+                    .read()
+                    .unwrap()
+                    .function_generics
+                    .contains_key(&function_base_name)
+                && !function_module
+                    .read()
+                    .unwrap()
+                    .class_generics
+                    .contains_key(&function_base_name)
+            {
+                // Remember if the name matches a variable so we can
+                // later treat this AST as case 2.
+                if function_module
+                    .read()
+                    .unwrap()
+                    .variables
+                    .contains_key(&function_full_name)
+                {
+                    function_is_valid_variable = true;
+                }
+
+                let parent = function_module.read().unwrap().parent.clone();
+                if let Some(p) = parent {
+                    function_module = p;
+                } else {
+                    no_parent = true;
+                    break;
+                }
+            }
+
+            // Couldn't find a function, class, or variable with this
+            // name in the module hierarchy.
+            if no_parent
+                && !function_is_valid_variable
+                && !simulator_context
+                    .scoped_variables
+                    .contains_key(&function_full_name)
+            {
+                // Last chance: if we're inside a method, try calling
+                // the name as a method on `this`.
+                if simulator_context.current_this.is_some() {
+                    let this_class = simulator_context
+                        .get_class_by_type(
+                            &simulator_context
+                                .current_this
+                                .clone()
+                                .unwrap()
+                                .variable_type,
+                        )
+                        .unwrap();
+
+                    if this_class
+                        .main_virtual_table
+                        .methods
+                        .contains_key(&function_full_name)
+                    {
+                        let method_options =
+                            this_class.main_virtual_table.methods[&function_full_name].clone();
+                        let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
+
+                        for method_option in method_options {
+                            // Only add type options for the correct number of arguments.
+                            if method_option.arguments.len() != self.arguments.len()
+                                || (self.arguments.len() > method_option.arguments.len()
+                                    && method_option.var_args_type.is_none())
+                            {
+                                continue;
+                            }
+
+                            for (idx, (_, argument)) in method_option.arguments.iter().enumerate() {
+                                argument_type_options[idx].push(argument.argument_type.clone());
+                            }
+
+                            if self.arguments.len() > method_option.arguments.len()
+                                && method_option.var_args_type.is_some()
+                            {
+                                for i in method_option.arguments.len()..self.arguments.len() {
+                                    argument_type_options[i]
+                                        .push(method_option.var_args_type.clone().unwrap());
+                                }
+                            }
+                        }
+
+                        let previous_function_call =
+                            simulator_context.current_function_call.clone();
+                        let mut topmost_module =
+                            simulator_context.module_context.current_module().clone();
+
+                        while topmost_module.read().unwrap().parent.is_some() {
+                            let parent = topmost_module
+                                .read()
+                                .unwrap()
+                                .parent
+                                .as_ref()
+                                .unwrap()
+                                .clone();
+                            topmost_module = parent;
+                        }
+
+                        if simulator_context.in_main() {
+                            simulator_context.current_function_call =
+                                Some(Arc::clone(&function_call_info));
+                        }
+
+                        let mut arguments = Vec::new();
+                        let mut argument_types = Vec::new();
+                        let mut keyword_args = HashMap::new();
+                        let mut keyword_arg_types = HashMap::new();
+
+                        let post_stack = simulator_context.module_context.step_back();
+                        for ((argument_name, argument), expected_type_options) in
+                            self.arguments.iter().zip(&argument_type_options)
+                        {
+                            let current_expected_types =
+                                simulator_context.current_expected_type_options.clone();
+
+                            simulator_context.current_expected_type_options =
+                                Some(expected_type_options.clone());
+
+                            let generated_argument = argument.simulate(simulator_context);
+
+                            arguments.push(generated_argument.clone());
+                            argument_types.push(generated_argument.get_type());
+
+                            simulator_context.current_expected_type_options =
+                                current_expected_types;
+
+                            if argument_name.is_some() {
+                                keyword_args.insert(
+                                    argument_name.clone().unwrap().value.clone(),
+                                    generated_argument.clone(),
+                                );
+                                keyword_arg_types.insert(
+                                    argument_name.clone().unwrap().value.clone(),
+                                    generated_argument.get_type(),
+                                );
+                            }
+                        }
+                        simulator_context.module_context.step_forward(post_stack);
+
+                        simulator_context.current_function_call = previous_function_call;
+
+                        let call_on_this = simulator_context.call_object_method(
+                            &simulator_context
+                                .current_this
+                                .as_ref()
+                                .unwrap()
+                                .variable_value
+                                .clone(),
+                            function_full_name.clone(),
+                            arguments.clone(),
+                            if !keyword_args.is_empty() {
+                                Some(keyword_args.clone())
+                            } else {
+                                None
+                            },
+                        );
+
+                        if let Ok(call_result) = call_on_this {
+                            return call_result;
+                        }
+                    }
+
+                    // If the name is an attribute on `this`, treat
+                    // it as case 2 (the attribute is a callable
+                    // value).
+                    let object_class = simulator_context.get_class_by_type(
+                        &simulator_context
+                            .current_this
+                            .as_ref()
+                            .unwrap()
+                            .variable_value
+                            .get_type(),
+                    );
+                    if object_class.is_some()
+                        && object_class
+                            .unwrap()
+                            .attributes
+                            .contains_key(&function_full_name)
+                    {
+                        function_from_expression = true;
+                    }
+                }
+
+                if !function_from_expression {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.function_reference.get_start().clone(),
+                            self.function_reference.get_end().clone(),
+                            format!(
+                                "cannot find function `{function_full_name}`. Check the function name, that the function is declared, and that it is imported into this module"
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    return simulator_context.create_error_value();
+                }
+            }
+
+            // If the name resolves to a variable, mark as expression-call.
+            function_from_expression = function_from_expression
+                || (function_is_valid_variable
+                    || simulator_context
+                        .scoped_variables
+                        .contains_key(&function_full_name));
+        }
+
+        // --- Generic type inference --- //
+        let mut function_generics = self.function_generics.clone();
+
+        // If this names a generic function/class with no explicit type
+        // parameters, attempt to infer them: first from the argument
+        // types, then from the expected return/binding type.
+        if !no_parent
+            && (function_module
+                .read()
+                .unwrap()
+                .function_generics
+                .contains_key(&function_base_name)
+                || function_module
+                    .read()
+                    .unwrap()
+                    .class_generics
+                    .contains_key(&function_base_name))
+            && self.function_generics.is_empty()
+        {
+            let previous_function_call = simulator_context.current_function_call.clone();
+            let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+            while topmost_module.read().unwrap().parent.is_some() {
+                let parent = topmost_module
+                    .read()
+                    .unwrap()
+                    .parent
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                topmost_module = parent;
+            }
+
+            if simulator_context.in_main() {
+                simulator_context.current_function_call = Some(Arc::clone(&function_call_info));
+            }
+
+            // Simulate arguments in the call module's context.
+            let mut arguments = Vec::new();
+            let mut argument_types = Vec::new();
+            let mut keyword_args = HashMap::new();
+            let mut keyword_arg_types = HashMap::new();
+
+            let post_stack = simulator_context.module_context.step_back();
+            for (argument_name, argument) in &self.arguments {
+                let generated_argument = argument.simulate(simulator_context);
+
+                arguments.push(generated_argument.clone());
+                argument_types.push(generated_argument.get_type());
+
+                if argument_name.is_some() {
+                    keyword_args.insert(
+                        argument_name.clone().unwrap().value.clone(),
+                        generated_argument.clone(),
+                    );
+                    keyword_arg_types.insert(
+                        argument_name.clone().unwrap().value.clone(),
+                        generated_argument.get_type(),
+                    );
+                }
+            }
+            simulator_context.module_context.step_forward(post_stack);
+
+            simulator_context.current_function_call = previous_function_call;
+
+            // Collect the generic type-parameter names from the
+            // declaration.
+            let needed_generics = if function_module
+                .read()
+                .unwrap()
+                .function_generics
+                .contains_key(&function_full_name)
+            {
+                function_module.read().unwrap().function_generics[&function_base_name]
+                    .generic_typenames
+                    .iter()
+                    .map(|arg_type| arg_type.value.clone())
+                    .collect::<Vec<String>>()
+            } else {
+                function_module.read().unwrap().class_generics[&function_base_name]
+                    .generic_typenames
+                    .iter()
+                    .map(|arg_type| arg_type.value.clone())
+                    .collect::<Vec<String>>()
+            };
+
+            let function_module_reference = function_module.read().unwrap();
+            // Pull the argument-declaration iterator from either the
+            // function's parameter list or the matching constructor.
+            let argument_declarations_iter = if function_module
+                .read()
+                .unwrap()
+                .function_generics
+                .contains_key(&function_full_name)
+            {
+                function_module_reference.function_generics[&function_base_name]
+                    .function
+                    .arguments
+                    .iter()
+            } else {
+                let find_matching_constructor = function_module_reference.class_generics
+                    [&function_base_name]
+                    .class
+                    .methods
+                    .iter()
+                    .find(|method| match method {
+                        ClassMethod::Constructor(constructor_info, _) => {
+                            constructor_info.arguments.len() == argument_types.len()
+                        }
+                        _ => false,
+                    });
+
+                if find_matching_constructor.is_none() {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            format!(
+                                "no constructor of generic class `{function_full_name}` accepts `{}` arguments. Check the argument count against the class's declared constructors",
+                                argument_types.len(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    return simulator_context.create_error_value();
+                }
+
+                let matching_constructor = find_matching_constructor.unwrap();
+
+                match matching_constructor {
+                    ClassMethod::Constructor(constructor_info, _) => {
+                        constructor_info.arguments.iter()
+                    }
+                    _ => panic!("matching constructor must be a Constructor variant"),
+                }
+            };
+
+            let mut needed_generics_count = needed_generics.len();
+
+            // Map of generic typename -> inferred concrete type.
+            let mut collected_generic_types = IndexMap::new();
+
+            // Walk the provided argument types against the declared
+            // parameter types, collecting any generic-type matches.
+            argument_types
+                .iter()
+                .zip(argument_declarations_iter)
+                .for_each(|(provided_argument_type, (_, argument_declaration_info))| {
+                    let generic_typename = argument_declaration_info.argument_type.to_string();
+
+                    if !needed_generics.contains(&generic_typename)
+                        || collected_generic_types.contains_key(&generic_typename)
+                    {
+                        return;
+                    }
+
+                    collected_generic_types
+                        .insert(generic_typename, provided_argument_type.clone());
+                    needed_generics_count -= 1;
+                });
+
+            // Fallback: try to fill remaining generics from the
+            // expected type (e.g. `var x: Array<int> = Array()` —
+            // the `int` is inferred from the binding's type).
+            let find_expected_type = if needed_generics_count == 0
+                || simulator_context.current_expected_type_options.is_none()
+            {
+                None
+            } else {
+                simulator_context
+                    .current_expected_type_options
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|expected| {
+                        expected.type_name == function_base_name
+                            && expected.generic_types.len() == needed_generics_count
+                    })
+            };
+
+            if find_expected_type.is_some() {
+                function_generics = find_expected_type.unwrap().generic_types.clone();
+            } else if needed_generics_count == 0 {
+                needed_generics.iter().for_each(|generic_typename| {
+                    function_generics.push(collected_generic_types[generic_typename].clone());
+                });
+            } else {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        format!(
+                            "could not infer type parameters for generic `{function_full_name}`. Provide explicit type parameters with `{function_full_name}<T, U, ...>`"
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+        }
+
+        // --- Step 2c: class construction --- //
+        // If the name resolves to a class (generic or otherwise),
+        // re-delegate as an ObjectConstructionAST.
+        if !no_parent
+            && (function_module
+                .read()
+                .unwrap()
+                .class_generics
+                .contains_key(&function_base_name)
+                || function_module
+                    .read()
+                    .unwrap()
+                    .classes
+                    .contains_key(&function_full_name))
+        {
+            return ObjectConstructionAST::new(
+                self.start.clone(),
+                self.end.clone(),
+                PositionedValue::create_no_position(function_base_name),
+                function_generics,
+                self.arguments.clone(),
+            )
+            .simulate(simulator_context);
+        }
+
+        // --- Argument simulation in call module's context --- //
+        let previous_function_call = simulator_context.current_function_call.clone();
+        let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+        while topmost_module.read().unwrap().parent.is_some() {
+            let parent = topmost_module
+                .read()
+                .unwrap()
+                .parent
+                .as_ref()
+                .unwrap()
+                .clone();
+            topmost_module = parent;
+        }
+
+        if simulator_context.in_main() {
+            simulator_context.current_function_call = Some(Arc::clone(&function_call_info));
+        }
+
+        let mut arguments = Vec::new();
+        let mut argument_types = Vec::new();
+        let mut keyword_args = HashMap::new();
+        let mut keyword_arg_types = HashMap::new();
+
+        let post_stack = simulator_context.module_context.step_back();
+        for (argument_name, argument) in &self.arguments {
+            let generated_argument = argument.simulate(simulator_context);
+
+            arguments.push(generated_argument.clone());
+            argument_types.push(generated_argument.get_type());
+
+            if argument_name.is_some() {
+                keyword_args.insert(
+                    argument_name.clone().unwrap().value.clone(),
+                    generated_argument.clone(),
+                );
+                keyword_arg_types.insert(
+                    argument_name.clone().unwrap().value.clone(),
+                    generated_argument.get_type(),
+                );
+            }
+        }
+        simulator_context.module_context.step_forward(post_stack);
+
+        simulator_context.current_function_call = previous_function_call;
+
+        // Record this call into the trace (either as a sub-call or
+        // as a top-level call).
+        let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+        while topmost_module.read().unwrap().parent.is_some() {
+            let parent = topmost_module
+                .read()
+                .unwrap()
+                .parent
+                .as_ref()
+                .unwrap()
+                .clone();
+            topmost_module = parent;
+        }
+
+        let current_fcall = simulator_context.current_function_call.is_some();
+
+        if simulator_context.in_main() {
+            if current_fcall {
+                simulator_context
+                    .current_function_call
+                    .as_mut()
+                    .unwrap()
+                    .write()
+                    .unwrap()
+                    .subcalls
+                    .push(Arc::clone(&function_call_info));
+            } else {
+                simulator_context
+                    .function_calls
+                    .push(Arc::clone(&function_call_info));
+            }
+        }
+
+        // Append `<T, U, ...>` to function_full_name for generic
+        // overload lookup.
+        if !function_generics.is_empty() {
+            function_full_name.push('<');
+            for generic in &function_generics {
+                let expand_generic = simulator_context.expand_type(generic);
+
+                let expand_generic = if let Some(g) = expand_generic {
+                    g
+                } else {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            generic.start_position.clone(),
+                            generic.end_position.clone(),
+                            format!(
+                                "type `{}` is not defined. Check the type name and that the type is in scope",
+                                generic,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    types::PekoType::error_type()
+                };
+
+                function_full_name.push_str(expand_generic.to_string().as_str());
+                function_full_name.push(',');
+            }
+            function_full_name.pop();
+            function_full_name.push('>');
+        }
+
+        // --- Step 2a: expression call --- //
+        if function_from_expression {
+            let function_from_expression =
+                self.function_reference.as_ref().simulate(simulator_context);
+
+            if function_from_expression.get_type().function_type.is_none() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.function_reference.get_start().clone(),
+                        self.function_reference.get_end().clone(),
+                        "value is not callable. The expression's type is not a function or closure type, so it cannot be called".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+
+            function_call_info.write().unwrap().return_type =
+                if function_from_expression.get_type().function_type.is_none() {
+                    PekoType::simple_type("void")
+                } else {
+                    function_from_expression
+                        .get_type()
+                        .function_type
+                        .unwrap()
+                        .as_ref()
+                        .clone()
+                };
+
+            for argument_type in &function_from_expression.get_type().generic_types {
+                function_call_info
+                    .write()
+                    .unwrap()
+                    .signature_arguments
+                    .insert(String::new(), argument_type.clone());
+            }
+
+            function_type = function_from_expression.get_type();
+            function_visibility = VisibilityData::open_visibility();
+            function_var_args_type = None;
+            function_argument_types = IndexMap::new();
+        } else {
+            // --- Step 2b: identifier call — overload resolution --- //
+
+            // Lazily instantiate a generic function if needed.
+            if function_module
+                .read()
+                .unwrap()
+                .function_generics
+                .contains_key(&function_base_name)
+                && !function_module
+                    .read()
+                    .unwrap()
+                    .functions
+                    .contains_key(&function_full_name)
+            {
+                let function_reference =
+                    function_module.read().unwrap().function_generics[&function_base_name].clone();
+                let generated_function = simulator_context
+                    .create_generic_function(&function_reference, function_generics);
+
+                if generated_function.is_none() {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            format!(
+                                "could not instantiate generic `{function_full_name}` with the provided type parameters. Check that the type parameters match the generic's declared bounds"
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    return simulator_context.create_error_value();
+                }
+            }
+
+            let function_choices =
+                function_module.read().unwrap().functions[&function_full_name].clone();
+
+            let post_stack = simulator_context.module_context.step_back();
+            let function_choice = simulator_context.choose_function(
+                function_choices.clone(),
+                argument_types.clone(),
+                if !keyword_arg_types.is_empty() {
+                    Some(keyword_arg_types.clone())
+                } else {
+                    None
+                },
+                false,
+            );
+            simulator_context.module_context.step_forward(post_stack);
+
+            if function_choice.is_none() {
+                // Diagnostic recovery: surface the best partial match
+                // so the IDE can still show a signature.
+                let best_signature_choice = simulator_context.choose_most_similar_function(
+                    function_choices,
+                    argument_types.clone(),
+                    if !keyword_arg_types.is_empty() {
+                        Some(keyword_arg_types.clone())
+                    } else {
+                        None
+                    },
+                    false,
+                );
+
+                if best_signature_choice.is_none() {
+                    return simulator_context.create_error_value();
+                }
+
+                let best_signature_choice = best_signature_choice.unwrap();
+
+                function_call_info.write().unwrap().return_type =
+                    best_signature_choice.return_type.clone();
+                for (argument_name, argument_info) in &best_signature_choice.arguments {
+                    function_call_info
+                        .write()
+                        .unwrap()
+                        .signature_arguments
+                        .insert(argument_name.clone(), argument_info.argument_type.clone());
+                }
+                function_call_info.write().unwrap().docinfo = best_signature_choice.docinfo.clone();
+
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        format!(
+                            "no overload of `{function_full_name}` matches the supplied argument types. Check the argument types against the declared overloads"
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+
+            let function_choice = function_choice.unwrap();
+
+            // Reject illegal accesses to private functions.
+            if function_choice.visibility.private
+                && simulator_context.module_context.accessing_current_module()
+            {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.function_reference.get_start().clone(),
+                        self.function_reference.get_end().clone(),
+                        format!(
+                            "cannot access private function `{function_full_name}` from outside its declaring module"
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+
+            function_call_info.write().unwrap().return_type = function_choice.return_type.clone();
+            for (argument_name, argument_info) in &function_choice.arguments {
+                function_call_info
+                    .write()
+                    .unwrap()
+                    .signature_arguments
+                    .insert(argument_name.clone(), argument_info.argument_type.clone());
+            }
+            function_call_info.write().unwrap().docinfo = function_choice.docinfo.clone();
+
+            function_type = {
+                let mut new_type = types::PekoType::simple_type("");
+                new_type.function_type = Some(Box::new(function_choice.return_type.clone()));
+
+                for (_, arg) in &function_choice.arguments {
+                    new_type.generic_types.push(arg.argument_type.clone());
+                }
+
+                new_type
+            };
+
+            function_visibility = function_choice.visibility.clone();
+            function_var_args_type = function_choice.var_args_type.clone();
+            function_argument_types = function_choice.arguments.clone();
+        }
+
+        // --- Step 3: type-check arguments and produce return value --- //
+        let post_stack = simulator_context.module_context.step_back();
+
+        // Keyword-call mode: only allowed when every parameter has a
+        // default value. Otherwise we fall through to positional
+        // type-checking below.
+        let mut all_args_keywords = !function_argument_types.is_empty();
+        for (_, argument) in &function_argument_types {
+            if !argument.default_value {
+                all_args_keywords = false;
+                break;
+            }
+        }
+
+        let return_type = function_type.function_type.unwrap().as_mut().clone();
+
+        // Variadic-argument type-check: if extras were passed, they
+        // all need to fit into an Array<varargs_type>.
+        if function_var_args_type.is_some()
+            && function_type.generic_types.len() - 1 < arguments.len()
+        {
+            let mut variable_arguments = Vec::new();
+            for i in (function_type.generic_types.len() - 1)..arguments.len() {
+                variable_arguments.push(arguments[i].clone());
+            }
+
+            let create_array = simulator_context.create_standard_array(
+                function_var_args_type.as_ref().unwrap(),
+                variable_arguments,
+            );
+
+            if create_array.is_none() {
+                let index = function_type.generic_types.len() - 1;
+
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.arguments[index].1.get_start().clone(),
+                        self.arguments.last().unwrap().1.get_end().clone(),
+                        format!(
+                            "variadic arguments have incorrect types. All variadic arguments must have type `{}`",
+                            function_var_args_type.as_ref().unwrap(),
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        // If the return type names a class, record this as a
+        // defined-object site for IDE tooling.
+        if simulator_context.get_class_by_type(&return_type).is_some() {
+            simulator_context.defined_objects.push(DefinedObject::new(
+                false,
+                return_type.clone(),
+                self.end.clone(),
+            ));
+        }
+
+        // Keyword-arguments call: type-check each parameter by name.
+        if all_args_keywords
+            && (!keyword_args.is_empty()
+                || (arguments.len() != function_argument_types.len() && arguments.is_empty()))
+        {
+            for (index, (argument_name, arg)) in function_argument_types.iter().enumerate() {
+                let argument_value = if keyword_args.contains_key(argument_name) {
+                    keyword_args[argument_name].clone()
+                } else {
+                    SimulatorValue::Value(arg.argument_type.clone())
+                };
+
+                if !simulator_context.types_similar(&argument_value.get_type(), &arg.argument_type)
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.arguments[index].1.get_start().clone(),
+                            self.arguments[index].1.get_end().clone(),
+                            format!(
+                                "argument of type `{}` does not match expected type `{}`",
+                                argument_value.get_type(),
+                                arg.argument_type,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                }
+            }
+
+            return SimulatorValue::Value(return_type);
+        }
+
+        // Positional-arguments call: zip arguments against the
+        // function's declared types and type-check each pair.
+        for (index, (argument, argument_type)) in arguments
+            .iter()
+            .zip(function_type.generic_types.iter())
+            .enumerate()
+        {
+            if function_var_args_type.is_some() && index == function_type.generic_types.len() - 1 {
+                break;
+            }
+
+            if !simulator_context.types_similar(&argument.get_type(), argument_type) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.arguments[index].1.get_start().clone(),
+                        self.arguments[index].1.get_end().clone(),
+                        format!(
+                            "argument of type `{}` does not match expected type `{}`",
+                            argument.get_type(),
+                            argument_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        simulator_context.module_context.step_forward(post_stack);
+
+        if function_visibility.private
+            && simulator_context.module_context.accessing_current_module()
+        {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.function_reference.get_start().clone(),
+                    self.function_reference.get_end().clone(),
+                    format!(
+                        "cannot call private function `{function_full_name}` from outside its declaring module"
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        }
+
+        SimulatorValue::Value(return_type)
+    }
+}
+
+/// Simulates a module access `mod::sub::expr`.
+///
+/// Walks the module chain (starting from either the current module's
+/// children or the top-level imported modules), reporting "module not
+/// found" or "module is private" diagnostics as appropriate. Once the
+/// terminal module is reached, the accessor expression is simulated
+/// under that module's context.
+impl PekoValueSimulator for ModuleAccessAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Resolve the first module in the chain — try the current
+        // module's children first, then top-level imports.
+        let next_module = if simulator_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .modules
+            .contains_key(&self.module_names[0].value)
+        {
+            Some(
+                simulator_context
+                    .module_context
+                    .current_module()
+                    .read()
+                    .unwrap()
+                    .modules[&self.module_names[0].value]
+                    .clone(),
+            )
+        } else if simulator_context
+            .module_context
+            .top_level_modules
+            .contains_key(&self.module_names[0].value)
+            && (simulator_context.module_context.top_level_modules[&self.module_names[0].value]
+                .read()
+                .unwrap()
+                .is_imported_by(simulator_context.module_context.current_module().clone())
+                || self.module_names[0].value == "extern")
+        {
+            Some(Arc::clone(
+                &simulator_context.module_context.top_level_modules[&self.module_names[0].value],
+            ))
+        } else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.module_names[0].start.clone(),
+                    self.module_names[0].end.clone(),
+                    format!(
+                        "cannot find module `{}` in the current scope. Check the module name, that the module is declared, and that it is imported",
+                        &self.module_names[0].value,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            None
+        };
+
+        let Some(mut next_module) = next_module else {
+            return simulator_context.create_error_value();
+        };
+
+        // Walk the remaining names in the chain. A name matching the
+        // current module's own name terminates the walk early.
+        for i in 1..self.module_names.len() {
+            if !next_module
+                .read()
+                .unwrap()
+                .modules
+                .contains_key(&self.module_names[i].value)
+            {
+                if next_module.read().unwrap().name == self.module_names[i].value {
+                    break;
+                }
+
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.module_names[i].start.clone(),
+                        self.module_names[i].end.clone(),
+                        format!(
+                            "cannot find module `{}` in the current scope. Check the module name, that the module is declared, and that it is imported",
+                            &self.module_names[i].value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+
+                return simulator_context.create_error_value();
+            }
+
+            let next = next_module.read().unwrap().modules[&self.module_names[i].value].clone();
+            next_module = next;
+
+            // Private modules still resolve (so the rest of the
+            // expression can simulate), but the access is reported
+            // as a diagnostic.
+            if next_module.as_ref().read().unwrap().visibility.private {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.module_names[i].start.clone(),
+                        self.module_names[i].end.clone(),
+                        format!(
+                            "cannot access private module `{}` from outside its parent module",
+                            &self.module_names[i].value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        // Switch to the resolved module's context, simulate the
+        // accessor expression, then switch back.
+        simulator_context
+            .module_context
+            .move_to_module(next_module, true, false);
+
+        let accessor = self.accessor.as_ref().simulate(simulator_context);
+
+        simulator_context.module_context.move_out_of_module();
+
+        accessor
+    }
+}
+
+/// Simulates an object construction `ClassName(args)` (or
+/// `ClassName<T>(args)`).
+///
+/// Resolves the class, simulates each argument under the union of
+/// the constructor overloads' parameter types (so each argument has
+/// the maximum possible inference context), then resolves the
+/// constructor overload and type-checks. Falls back to attribute-
+/// list-based construction for classes without declared
+/// constructors.
+impl PekoValueSimulator for ObjectConstructionAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let mut class_name_to_type =
+            types::PekoType::from_string(self.class_name.value.as_str(), "");
+        class_name_to_type
+            .generic_types
+            .extend(self.object_generics.clone());
+        let class_to_create = simulator_context.get_class_by_type(&class_name_to_type);
+
+        let Some(class_to_create) = class_to_create else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    format!(
+                        "cannot find class `{}`. Check the class name, that the class is declared, and that it is imported",
+                        class_name_to_type,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        };
+
+        // Build a trace record for IDE signature help.
+        let function_call_info = Arc::new(RwLock::new(FunctionCall::new(
+            self.start.clone(),
+            self.end.clone(),
+            None,
+            class_name_to_type.to_string(),
+            Vec::new(),
+            IndexMap::new(),
+            PekoType::simple_type("void"),
+        )));
+
+        let previous_function_call = simulator_context.current_function_call.clone();
+        let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+        while topmost_module.read().unwrap().parent.is_some() {
+            let parent = topmost_module
+                .read()
+                .unwrap()
+                .parent
+                .as_ref()
+                .unwrap()
+                .clone();
+            topmost_module = parent;
+        }
+
+        let current_fcall = simulator_context.current_function_call.is_some();
+
+        if simulator_context.in_main() {
+            if current_fcall {
+                simulator_context
+                    .current_function_call
+                    .as_mut()
+                    .unwrap()
+                    .write()
+                    .unwrap()
+                    .subcalls
+                    .push(Arc::clone(&function_call_info));
+            } else {
+                simulator_context
+                    .function_calls
+                    .push(Arc::clone(&function_call_info));
+            }
+
+            simulator_context.current_function_call = Some(Arc::clone(&function_call_info));
+        }
+
+        // Build a per-argument list of candidate types from every
+        // constructor overload (used as expected-type options for
+        // argument simulation, enabling better inference for nested
+        // literals like `Array()`).
+        let method_options = class_to_create.main_virtual_table.methods["constructor"].clone();
+        let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
+
+        for method_option in method_options {
+            // Only add type options for the correct number of arguments.
+            if method_option.arguments.len() != self.arguments.len()
+                || (self.arguments.len() > method_option.arguments.len()
+                    && method_option.var_args_type.is_none())
+            {
+                continue;
+            }
+
+            for (idx, (_, argument)) in method_option.arguments.iter().enumerate() {
+                argument_type_options[idx].push(argument.argument_type.clone());
+            }
+
+            if self.arguments.len() > method_option.arguments.len()
+                && method_option.var_args_type.is_some()
+            {
+                for i in method_option.arguments.len()..self.arguments.len() {
+                    argument_type_options[i].push(method_option.var_args_type.clone().unwrap());
+                }
+            }
+        }
+
+        // Simulate the arguments under the union of overload types.
+        let mut argument_types = Vec::new();
+        let mut keyword_types = HashMap::new();
+
+        let post_stack = simulator_context.module_context.step_back();
+        for ((argument_name, argument), expected_type_options) in
+            self.arguments.iter().zip(&argument_type_options)
+        {
+            function_call_info
+                .write()
+                .unwrap()
+                .argument_positions
+                .push((argument.get_start().clone(), argument.get_end().clone()));
+
+            let current_expected_types = simulator_context.current_expected_type_options.clone();
+            simulator_context.current_expected_type_options = Some(expected_type_options.clone());
+
+            let generated_argument = argument.simulate(simulator_context);
+            argument_types.push(generated_argument.get_type());
+
+            simulator_context.current_expected_type_options = current_expected_types;
+
+            if argument_name.is_some() {
+                keyword_types.insert(
+                    argument_name.clone().unwrap().value,
+                    generated_argument.get_type(),
+                );
+            }
+        }
+        simulator_context.module_context.step_forward(post_stack);
+
+        simulator_context.current_function_call = previous_function_call;
+
+        if !class_to_create.main_virtual_table.methods.is_empty() {
+            // Try the strict overload selector first.
+            let post_stack = simulator_context.module_context.step_back();
+            let constructor_choice = simulator_context.choose_function(
+                class_to_create.main_virtual_table.methods["constructor"].clone(),
+                argument_types.clone(),
+                if keyword_types.is_empty() {
+                    None
+                } else {
+                    Some(keyword_types.clone())
+                },
+                true,
+            );
+            simulator_context.module_context.step_forward(post_stack);
+
+            if constructor_choice.is_none() {
+                // Fall back to the diagnostic-recovery selector so
+                // the IDE can still surface a signature.
+                let best_signature_choice = simulator_context.choose_most_similar_function(
+                    class_to_create.main_virtual_table.methods["constructor"].clone(),
+                    argument_types,
+                    if keyword_types.is_empty() {
+                        None
+                    } else {
+                        Some(keyword_types)
+                    },
+                    true,
+                );
+
+                let Some(best_signature_choice) = best_signature_choice else {
+                    return simulator_context.create_error_value();
+                };
+
+                for (argument_name, argument_info) in &best_signature_choice.arguments {
+                    function_call_info
+                        .write()
+                        .unwrap()
+                        .signature_arguments
+                        .insert(argument_name.clone(), argument_info.argument_type.clone());
+                }
+
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        format!(
+                            "no constructor of class `{}` matches the supplied argument types. Check the argument types against the class's declared constructors",
+                            class_to_create.class_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            } else {
+                for (argument_name, argument_info) in &constructor_choice.unwrap().arguments {
+                    function_call_info
+                        .write()
+                        .unwrap()
+                        .signature_arguments
+                        .insert(argument_name.clone(), argument_info.argument_type.clone());
+                }
+            }
+        } else {
+            // No declared constructor — use the implicit
+            // attribute-list constructor.
+            for (attribute_name, attribute) in &class_to_create.attributes {
+                function_call_info
+                    .write()
+                    .unwrap()
+                    .signature_arguments
+                    .insert(attribute_name.clone(), attribute.attribute_type.clone());
+            }
+
+            // The implicit constructor needs exactly as many
+            // arguments as there are attributes.
+            if argument_types.len() != class_to_create.attributes.len() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        format!(
+                            "wrong number of arguments to implicit constructor of class `{}`. The implicit constructor takes one argument per attribute, in declaration order",
+                            class_to_create.class_type,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return SimulatorValue::Value(class_to_create.class_type.clone());
+            }
+
+            // Positional implicit-constructor type-check.
+            let post_stack = simulator_context.module_context.step_back();
+            if keyword_types.is_empty() {
+                for (idx, ((_, attribute), attribute_value_type)) in class_to_create
+                    .attributes
+                    .iter()
+                    .zip(&argument_types)
+                    .enumerate()
+                {
+                    if !simulator_context
+                        .types_similar(&attribute.attribute_type, attribute_value_type)
+                    {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.arguments[idx].1.get_start().clone(),
+                                self.arguments[idx].1.get_end().clone(),
+                                format!(
+                                    "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
+                                    attribute_value_type,
+                                    attribute.attribute_type,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                    }
+                }
+                simulator_context.module_context.step_forward(post_stack);
+            } else {
+                // Keyword implicit-constructor type-check.
+                let post_stack = simulator_context.module_context.step_back();
+                for (idx, (attribute_name, attribute)) in
+                    class_to_create.attributes.iter().enumerate()
+                {
+                    let value_to_set_type = if keyword_types.contains_key(attribute_name) {
+                        &keyword_types[attribute_name]
+                    } else {
+                        &attribute.attribute_type
+                    };
+
+                    if !simulator_context
+                        .types_similar(&attribute.attribute_type, value_to_set_type)
+                    {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.arguments[idx].1.get_start().clone(),
+                                self.arguments[idx].1.get_end().clone(),
+                                format!(
+                                    "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
+                                    value_to_set_type,
+                                    attribute.attribute_type,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                    }
+                }
+                simulator_context.module_context.step_forward(post_stack);
+            }
+        }
+
+        simulator_context.defined_objects.push(DefinedObject::new(
+            false,
+            class_to_create.class_type.clone(),
+            self.end.clone(),
+        ));
+
+        SimulatorValue::Value(class_to_create.class_type.clone())
+    }
+}
+
+/// Simulates an object access `object.access`.
+///
+/// Three cases dispatched on the kind of access:
+///
+/// * **Method call** (`object.method(args)`) — resolves and calls
+///   the method, with special handling for attribute fields that
+///   hold function-typed values.
+/// * **Attribute read** (`object.attr`) — resolves and returns the
+///   attribute's value, with special handling for the `function` and
+///   `context` pseudo-attributes on closures.
+/// * **Attribute write** (`object.attr = value`) — type-checks the
+///   assignment, with support for compound assignment operators.
+impl PekoValueSimulator for ObjectAccessAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // The object expression must simulate as a value, not a
+        // reference — references are introduced only at the final
+        // step of access if needed.
+        let return_references = simulator_context.return_references;
+        simulator_context.return_references = false;
+
+        let object = self.object.as_ref().simulate(simulator_context);
+
+        simulator_context.return_references = return_references;
+
+        match self.access.as_ref() {
+            // --- Method invocation --- //
+            PekoAST::FunctionCall(function_call) => {
+                // The method name must be an identifier (no
+                // arbitrary expression here).
+                let function_name = match function_call.function_reference.as_ref() {
+                    PekoAST::VariableReference(variable_reference) => {
+                        variable_reference.variable_name.value.clone()
+                    }
+                    _ => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                function_call.function_reference.get_start().clone(),
+                                function_call.function_reference.get_end().clone(),
+                                "expected an identifier for the method name. Method calls must use the form `object.method(...)`".to_string(),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+                };
+
+                let function_call_info = Arc::new(RwLock::new(FunctionCall::new(
+                    self.access.get_start().clone(),
+                    self.access.get_end().clone(),
+                    None,
+                    function_name.clone(),
+                    Vec::new(),
+                    IndexMap::new(),
+                    PekoType::simple_type("void"),
+                )));
+
+                let previous_function_call = simulator_context.current_function_call.clone();
+                let mut topmost_module = simulator_context.module_context.current_module().clone();
+
+                while topmost_module.read().unwrap().parent.is_some() {
+                    let parent = topmost_module
+                        .read()
+                        .unwrap()
+                        .parent
+                        .as_ref()
+                        .unwrap()
+                        .clone();
+                    topmost_module = parent;
+                }
+
+                let current_fcall = simulator_context.current_function_call.is_some();
+
+                if simulator_context.in_main() {
+                    if current_fcall {
+                        simulator_context
+                            .current_function_call
+                            .as_mut()
+                            .unwrap()
+                            .write()
+                            .unwrap()
+                            .subcalls
+                            .push(Arc::clone(&function_call_info));
+                    } else {
+                        simulator_context
+                            .function_calls
+                            .push(Arc::clone(&function_call_info));
+                    }
+
+                    simulator_context.current_function_call = Some(Arc::clone(&function_call_info));
+                }
+
+                let class = simulator_context.get_class_by_type(&object.get_type());
+                let Some(class) = class else {
+                    return simulator_context.create_error_value();
+                };
+
+                // Attribute-as-function path: if the method name
+                // matches an attribute whose type is a function or
+                // closure, call it as a function value.
+                if class.attributes.contains_key(&function_name)
+                    && (class.attributes[&function_name].attribute_type.is_closure
+                        || class.attributes[&function_name]
+                            .attribute_type
+                            .function_type
+                            .is_some())
+                {
+                    let attribute_function = simulator_context
+                        .get_object_attribute(&object, function_name.clone(), true)
+                        .unwrap();
+
+                    function_call_info.write().unwrap().return_type =
+                        if attribute_function.get_type().function_type.is_some() {
+                            attribute_function
+                                .get_type()
+                                .function_type
+                                .unwrap()
+                                .as_ref()
+                                .clone()
+                        } else {
+                            PekoType::simple_type("void")
+                        };
+
+                    for argument_type in &attribute_function.get_type().generic_types {
+                        function_call_info
+                            .write()
+                            .unwrap()
+                            .signature_arguments
+                            .insert(String::new(), argument_type.clone());
+                    }
+
+                    let argument_types = attribute_function.get_type().generic_types.clone();
+
+                    // Attribute-functions don't support variadic
+                    // parameters, so the argument count must match.
+                    if function_call.arguments.len() != argument_types.len() {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.access.get_start().clone(),
+                                self.access.get_end().clone(),
+                                format!(
+                                    "wrong number of arguments to attribute function. The attribute's function type declares `{}` parameters but `{}` arguments were provided",
+                                    argument_types.len(),
+                                    function_call.arguments.len(),
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+
+                        return simulator_context.create_error_value();
+                    }
+
+                    // Simulate the call's arguments under the
+                    // expected parameter types.
+                    let mut arguments = Vec::new();
+                    let mut keyword_values = HashMap::new();
+                    let post_stack = simulator_context.module_context.step_back();
+                    for ((argument_name, argument), expected_type) in
+                        function_call.arguments.iter().zip(&argument_types)
+                    {
+                        let current_expected_types =
+                            simulator_context.current_expected_type_options.clone();
+                        simulator_context.current_expected_type_options =
+                            Some(vec![expected_type.clone()]);
+
+                        arguments.push(argument.simulate(simulator_context));
+                        function_call_info
+                            .write()
+                            .unwrap()
+                            .argument_positions
+                            .push((argument.get_start().clone(), argument.get_end().clone()));
+
+                        simulator_context.current_expected_type_options = current_expected_types;
+
+                        if argument_name.is_some() {
+                            keyword_values.insert(
+                                argument_name.clone().unwrap().value,
+                                arguments.last().unwrap().clone(),
+                            );
+                        }
+                    }
+                    simulator_context.current_function_call = previous_function_call;
+
+                    for (argument_index, (argument, argument_type)) in
+                        arguments.iter().zip(argument_types.iter()).enumerate()
+                    {
+                        if !simulator_context.types_similar(argument_type, &argument.get_type()) {
+                            simulator_context.diagnostics.report_diagnostic(
+                                diagnostics::PekoDiagnostic::new(
+                                    function_call.arguments[argument_index]
+                                        .1
+                                        .get_start()
+                                        .clone(),
+                                    function_call.arguments[argument_index].1.get_end().clone(),
+                                    format!(
+                                        "argument of type `{}` does not match expected type `{}`",
+                                        argument.get_type(),
+                                        argument_type,
+                                    ),
+                                    diagnostics::DiagnosticType::Error,
+                                    simulator_context.get_current_file(),
+                                ),
+                            );
+                        }
+                    }
+                    simulator_context.module_context.step_forward(post_stack);
+
+                    let function_return_type = attribute_function
+                        .get_type()
+                        .function_type
+                        .unwrap()
+                        .as_ref()
+                        .clone();
+
+                    if simulator_context
+                        .get_class_by_type(&function_return_type)
+                        .is_some()
+                    {
+                        simulator_context.defined_objects.push(DefinedObject::new(
+                            false,
+                            function_return_type.clone(),
+                            self.access.get_end().clone(),
+                        ));
+                    }
+
+                    return SimulatorValue::Value(function_return_type);
+
+                // Method-not-found error.
+                } else if !class
+                    .main_virtual_table
+                    .methods
+                    .contains_key(&function_name)
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.access.get_start().clone(),
+                            self.access.get_end().clone(),
+                            format!(
+                                "no method named `{}` on class `{}`. Check the method name and that it is declared on this class or a parent",
+                                function_name,
+                                class.class_type,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+
+                    return SimulatorValue::Value(types::PekoType::error_type());
+                }
+
+                // Build per-argument expected-type options from the
+                // method's overload set.
+                let method_options = class.main_virtual_table.methods[&function_name].clone();
+                let mut argument_type_options = vec![Vec::new(); function_call.arguments.len()];
+
+                for method_option in method_options {
+                    // Only add type options for the correct number of arguments.
+                    if method_option.arguments.len() != function_call.arguments.len()
+                        || (function_call.arguments.len() > method_option.arguments.len()
+                            && method_option.var_args_type.is_none())
+                    {
+                        continue;
+                    }
+
+                    for (idx, (_, argument)) in method_option.arguments.iter().enumerate() {
+                        argument_type_options[idx].push(argument.argument_type.clone());
+                    }
+
+                    if function_call.arguments.len() > method_option.arguments.len()
+                        && method_option.var_args_type.is_some()
+                    {
+                        for i in method_option.arguments.len()..function_call.arguments.len() {
+                            argument_type_options[i]
+                                .push(method_option.var_args_type.clone().unwrap());
+                        }
+                    }
+                }
+
+                let mut arguments = Vec::new();
+                let mut keyword_arguments = HashMap::new();
+                let post_stack = simulator_context.module_context.step_back();
+                for ((argument_name, argument), expected_type_options) in
+                    function_call.arguments.iter().zip(&argument_type_options)
+                {
+                    let current_expected_types =
+                        simulator_context.current_expected_type_options.clone();
+
+                    simulator_context.current_expected_type_options =
+                        Some(expected_type_options.clone());
+                    arguments.push(argument.simulate(simulator_context));
+
+                    simulator_context.current_expected_type_options = current_expected_types;
+
+                    if argument_name.is_some() {
+                        keyword_arguments.insert(
+                            argument_name.clone().unwrap().value,
+                            arguments.last().unwrap().clone(),
+                        );
+                    }
+                }
+
+                let keyword_values = if keyword_arguments.is_empty() {
+                    None
+                } else {
+                    Some(keyword_arguments)
+                };
+
+                let mut argument_types = Vec::new();
+                for argument in &arguments {
+                    argument_types.push(argument.get_type());
+                }
+
+                let provided_function_argument_types = if let Some(kv) = &keyword_values {
+                    let mut arguments = HashMap::new();
+
+                    for (argument_name, argument_value) in kv {
+                        arguments.insert(argument_name.clone(), argument_value.get_type());
+                    }
+
+                    Some(arguments)
+                } else {
+                    None
+                };
+
+                // Always populate signature info via the
+                // diagnostic-recovery selector (always returns Some).
+                let best_signature_choice = simulator_context.choose_most_similar_function(
+                    class.main_virtual_table.methods[&function_name].clone(),
+                    argument_types,
+                    provided_function_argument_types,
+                    true,
+                );
+
+                if let Some(signature_function) = best_signature_choice {
+                    function_call_info.write().unwrap().return_type =
+                        signature_function.return_type.clone();
+                    for (argument_name, argument_info) in &signature_function.arguments {
+                        function_call_info
+                            .write()
+                            .unwrap()
+                            .signature_arguments
+                            .insert(argument_name.clone(), argument_info.argument_type.clone());
+                    }
+                    function_call_info.write().unwrap().docinfo =
+                        signature_function.docinfo.clone();
+                }
+                simulator_context.module_context.step_forward(post_stack);
+
+                // Dispatch to the actual method call.
+                let method_call = simulator_context.call_object_method(
+                    &object,
+                    function_name.clone(),
+                    arguments,
+                    keyword_values,
+                );
+
+                // call_object_method's Err carries the user-facing
+                // diagnostic message it produced.
+                let method_call = match method_call {
+                    Ok(value) => value,
+                    Err(message) => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.object.get_start().clone(),
+                                self.access.get_end().clone(),
+                                message,
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+
+                        return simulator_context.create_error_value();
+                    }
+                };
+
+                if simulator_context
+                    .get_class_by_type(&method_call.get_type())
+                    .is_some()
+                {
+                    simulator_context.defined_objects.push(DefinedObject::new(
+                        false,
+                        method_call.get_type(),
+                        function_call.end.clone(),
+                    ));
+                }
+
+                method_call
+            }
+
+            // --- Attribute read --- //
+            PekoAST::VariableReference(variable_reference) => {
+                let variable_name = variable_reference.variable_name.value.clone();
+
+                // Closures have two pseudo-attributes: `function`
+                // (the function pointer) and `context` (the
+                // captured-variables blob). Both are opaque.
+                if object.get_type().is_closure {
+                    let mut context_type = types::PekoType::simple_type("Pointer");
+                    context_type
+                        .generic_types
+                        .push(types::PekoType::simple_type("void"));
+
+                    match variable_name.as_str() {
+                        "function" => {
+                            let mut function_type = object.get_type();
+                            function_type.is_closure = false;
+                            function_type.generic_types.insert(0, context_type);
+
+                            return SimulatorValue::Value(function_type);
+                        }
+                        "context" => {
+                            // The closure's captured-context pointer. This
+                            // is a managed `Pointer<void>` in codegen, so
+                            // the simulator reports the same type to keep
+                            // overload resolution consistent across backends.
+                            return SimulatorValue::Value(context_type);
+                        }
+                        _ => {
+                            simulator_context.diagnostics.report_diagnostic(
+                                diagnostics::PekoDiagnostic::new(
+                                    variable_reference.variable_name.start.clone(),
+                                    variable_reference.variable_name.end.clone(),
+                                    format!(
+                                        "`{variable_name}` is not a valid attribute of a closure. Closures only have `function` and `context` attributes"
+                                    ),
+                                    diagnostics::DiagnosticType::Error,
+                                    simulator_context.get_current_file(),
+                                ),
+                            );
+
+                            return SimulatorValue::Value(types::PekoType::error_type());
+                        }
+                    }
+                }
+
+                let class = simulator_context.get_class_by_type(&object.get_type());
+                let Some(class) = class else {
+                    return simulator_context.create_error_value();
+                };
+
+                // Methods accessed without invocation surface as
+                // opaque function pointers.
+                if class
+                    .main_virtual_table
+                    .methods
+                    .contains_key(&variable_name)
+                {
+                    return SimulatorValue::Value(types::PekoType::simple_type("opaque"));
+                }
+
+                let reference = simulator_context.get_object_attribute(
+                    &object,
+                    variable_name.clone(),
+                    !simulator_context.return_references,
+                );
+
+                let reference = match reference {
+                    Ok(value) => value,
+                    Err(message) => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                variable_reference.variable_name.start.clone(),
+                                variable_reference.variable_name.end.clone(),
+                                message,
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+                };
+
+                if simulator_context
+                    .get_class_by_type(&reference.get_type())
+                    .is_some()
+                {
+                    simulator_context.defined_objects.push(DefinedObject::new(
+                        false,
+                        reference.get_type(),
+                        variable_reference.variable_name.end.clone(),
+                    ));
+                }
+
+                reference
+            }
+
+            // --- Attribute write --- //
+            PekoAST::VariableReassignment(variable_reassignment) => {
+                let variable_name = match variable_reassignment.variable_reference.as_ref() {
+                    PekoAST::VariableReference(variable_reference) => {
+                        variable_reference.variable_name.value.clone()
+                    }
+                    _ => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                variable_reassignment.variable_reference.get_start().clone(),
+                                variable_reassignment.variable_reference.get_end().clone(),
+                                "expected an identifier for the attribute name. Attribute assignments must use the form `object.attribute = value`".to_string(),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+                };
+
+                // If we're setting an attribute on `this` and that
+                // attribute was in the "must-set" list, mark it done.
+                let object_name = match self.object.as_ref() {
+                    PekoAST::VariableReference(variable_reference) => {
+                        Some(variable_reference.variable_name.value.clone())
+                    }
+                    _ => None,
+                };
+
+                if object_name.is_some()
+                    && object_name.unwrap() == "this"
+                    && simulator_context.attributes_to_set.contains(&variable_name)
+                {
+                    simulator_context.attributes_to_set.remove(
+                        simulator_context
+                            .attributes_to_set
+                            .iter()
+                            .position(|key| key.as_str() == variable_name)
+                            .unwrap(),
+                    );
+                }
+
+                let class = simulator_context.get_class_by_type(&object.get_type());
+                let Some(class) = class else {
+                    return simulator_context.create_error_value();
+                };
+
+                let previous_expected_type =
+                    simulator_context.current_expected_type_options.clone();
+                if class.attributes.contains_key(&variable_name) {
+                    simulator_context.current_expected_type_options = Some(vec![class.attributes
+                        [&variable_name]
+                        .attribute_type
+                        .clone()]);
+                }
+
+                let variable_value = variable_reassignment
+                    .variable_value
+                    .simulate(simulator_context);
+
+                let attribute =
+                    simulator_context.get_object_attribute(&object, variable_name.clone(), true);
+
+                let attribute = match attribute {
+                    Ok(value) => value,
+                    Err(message) => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                variable_reassignment.variable_reference.get_start().clone(),
+                                variable_reassignment.variable_reference.get_end().clone(),
+                                message,
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+                };
+
+                // Compound-assignment: apply the operator and bail.
+                if variable_reassignment.assignment_operator.is_some() {
+                    let try_operator = simulator_context.apply_operator(
+                        variable_reassignment
+                            .clone()
+                            .assignment_operator
+                            .unwrap()
+                            .as_str(),
+                        &attribute,
+                        &variable_value,
+                    );
+
+                    if try_operator.is_none() {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                variable_reassignment.variable_reference.get_start().clone(),
+                                variable_reassignment.variable_reference.get_end().clone(),
+                                format!(
+                                    "cannot apply operator `{}` between attribute of type `{}` and value of type `{}`. There is no operator overload that accepts these two operand types",
+                                    variable_reassignment.clone().assignment_operator.unwrap(),
+                                    attribute.get_type(),
+                                    variable_value.get_type(),
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+
+                    return SimulatorValue::Null;
+                }
+
+                simulator_context.current_expected_type_options = previous_expected_type;
+
+                // Direct assignment type-check.
+                if !simulator_context
+                    .types_similar(&variable_value.get_type(), &attribute.get_type())
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            variable_reassignment.variable_reference.get_start().clone(),
+                            variable_reassignment.variable_reference.get_end().clone(),
+                            format!(
+                                "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
+                                variable_value.get_type(),
+                                attribute.get_type(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                }
+
+                SimulatorValue::Null
+            }
+
+            _ => SimulatorValue::Value(types::PekoType::error_type()),
+        }
+    }
+}
+
+/// Simulates a unary expression `op operand`. Three operators are
+/// recognized: `!` (logical not), `&` (address-of/reference), and
+/// `-` (negation, implemented as `operand * (-1)`).
+impl PekoValueSimulator for UnaryExpressionAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        match self.operator.as_str() {
+            "!" => {
+                let negate = self.get_operand().simulate(simulator_context);
+
+                if !simulator_context
+                    .types_similar(&negate.get_type(), &types::PekoType::simple_type("bool"))
+                {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.operand.get_start().clone(),
+                            self.operand.get_end().clone(),
+                            format!(
+                                "the `!` (logical not) operator requires a `bool`-compatible operand, but the operand has type `{}`",
+                                negate.get_type(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                }
+
+                SimulatorValue::Value(types::PekoType::simple_type("bool"))
+            }
+            "*" => {
+                // Dereference a pointer. Mirrors `ptr[0]` indexing but
+                // expresses the operation as a unary prefix; emits a
+                // single load on the operand value.
+                let value = self.operand.simulate(simulator_context);
+                let value_type = simulator_context.expand_type(&value.get_type()).unwrap();
+
+                if value_type.pointer_depth == 0
+                    && value_type.reference_depth == 0
+                    && value_type.type_name != "Pointer"
+                {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.operand.get_start().clone(),
+                            self.operand.get_end().clone(),
+                            format!(
+                                "cannot dereference value of type `{}` with the unary `*` operator. Only pointer or reference types can be dereferenced",
+                                value_type.to_string(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file().to_path_buf(),
+                        ));
+                    return simulator_context.create_error_value();
+                }
+
+                SimulatorValue::Value(pointee_type(&value_type))
+            }
+            "&" => {
+                // Take a reference — simulate the operand in
+                // reference-returning mode.
+                let return_references = simulator_context.return_references;
+                simulator_context.return_references = true;
+
+                let value = self.operand.simulate(simulator_context);
+
+                simulator_context.return_references = return_references;
+
+                if simulator_context
+                    .get_class_by_type(&value.get_type())
+                    .is_some()
+                {
+                    simulator_context.defined_objects.push(DefinedObject::new(
+                        false,
+                        value.get_type(),
+                        self.operand.get_end().clone(),
+                    ));
+                }
+
+                value
+            }
+            "-" => {
+                // Negate via `operand * -1`, leveraging the operator
+                // overload for `*`.
+                let negative_value = SimulatorValue::Value(types::PekoType::simple_type("int"));
+                let value = self.operand.simulate(simulator_context);
+
+                let evaluated = simulator_context.apply_operator("*", &value, &negative_value);
+
+                let Some(evaluated) = evaluated else {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.operand.get_start().clone(),
+                            self.operand.get_end().clone(),
+                            format!(
+                                "cannot negate value of type `{}` with the unary `-` operator. The type does not implement the `*` operator with an `int` operand",
+                                value.get_type(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    return simulator_context.create_error_value();
+                };
+
+                if simulator_context
+                    .get_class_by_type(&evaluated.get_type())
+                    .is_some()
+                {
+                    simulator_context.defined_objects.push(DefinedObject::new(
+                        false,
+                        evaluated.get_type(),
+                        self.operand.get_end().clone(),
+                    ));
+                }
+
+                evaluated
+            }
+            _ => {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.operand.get_start().clone(),
+                        self.operand.get_end().clone(),
+                        format!(
+                            "operator `{}` is not a unary operator. Only `!`, `&`, and `-` can be used as unary operators",
+                            self.operator,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+
+                simulator_context.create_error_value()
+            }
+        }
+    }
+}
+
+/// Simulates a binary expression `lhs op rhs`.
+///
+/// The `..` operator is re-routed to [`RangeAST`] since the parser
+/// produces a [`BinaryExpressionAST`] for range expressions too.
+/// Other operators are dispatched through [`apply_operator`] which
+/// consults the type's declared operator overloads.
+///
+/// [`apply_operator`]: ExecutionContextAlgorithms::apply_operator
+impl PekoValueSimulator for BinaryExpressionAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        if self.operator == ".." {
+            return PekoAST::Range(RangeAST::new(self.lhs.clone(), self.rhs.clone()))
+                .simulate(simulator_context);
+        }
+
+        let lhs = self.get_lhs().simulate(simulator_context);
+        let rhs = self.get_rhs().simulate(simulator_context);
+
+        let evaluated = simulator_context.apply_operator(self.operator.as_str(), &lhs, &rhs);
+
+        let evaluated = if let Some(e) = evaluated {
+            e
+        } else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.lhs.get_start().clone(),
+                    self.rhs.get_end().clone(),
+                    format!(
+                        "cannot apply binary operator `{}` to values of type `{}` and `{}`. There is no operator overload that accepts these two operand types",
+                        self.operator,
+                        lhs.get_type(),
+                        rhs.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        };
+
+        if simulator_context
+            .get_class_by_type(&evaluated.get_type())
+            .is_some()
+        {
+            simulator_context.defined_objects.push(DefinedObject::new(
+                false,
+                evaluated.get_type(),
+                self.rhs.get_end().clone(),
+            ));
+        }
+
+        evaluated
+    }
+}
+
+/// Simulates an array access `array[index]`.
+///
+/// If the array's type is a class with an `[operator []]` overload,
+/// the access is dispatched through that overload. Otherwise the
+/// array must be a pointer/reference type, and the index must be
+/// `int64`-compatible.
+impl PekoValueSimulator for ArrayAccessAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // The array and index expressions simulate as values, not
+        // references.
+        let return_references = simulator_context.return_references;
+        simulator_context.return_references = false;
+
+        let array = self.array.simulate(simulator_context);
+        let access = self.access.simulate(simulator_context);
+
+        simulator_context.return_references = return_references;
+
+        // Class-with-indexing-overload path.
+        if (array.get_type().pointer_depth == 0 && array.get_type().reference_depth == 0)
+            && simulator_context
+                .get_class_by_type(&array.get_type())
+                .is_some()
+        {
+            // Pick the mutable or immutable overload depending on
+            // the surrounding context.
+            let operator = if simulator_context.return_references {
+                String::from("[operator []=]")
+            } else {
+                String::from("[operator []]")
+            };
+
+            let access_call =
+                simulator_context.call_object_method(&array, operator, vec![access.clone()], None);
+
+            if access_call.is_err() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.array.get_start().clone(),
+                        self.array.get_end().clone(),
+                        format!(
+                            "cannot index into value of type `{}`. The type does not implement the `[operator []]` overload",
+                            array.get_type(),
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+
+            return access_call.unwrap();
+        } else if !array.get_type().is_pointer() {
+            // No indexing overload and not a pointer — can't be
+            // indexed.
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.array.get_start().clone(),
+                    self.array.get_end().clone(),
+                    format!(
+                        "cannot index into value of type `{}` with `[]`. The value is not an array, pointer, or class with an indexing operator",
+                        array.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        }
+
+        if !simulator_context
+            .types_similar(&access.get_type(), &types::PekoType::simple_type("int64"))
+        {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.access.get_start().clone(),
+                    self.access.get_end().clone(),
+                    format!(
+                        "cannot use value of type `{}` as an array index. Array indices must be `int`-compatible",
+                        access.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        }
+
+        // Compute the item type: one pointer/reference depth less
+        // than the array, except for strings/opaque values which
+        // produce `char`.
+        let mut value_type = pointee_type(&array.get_type());
+
+        if simulator_context.get_class_by_type(&value_type).is_some() {
+            simulator_context.defined_objects.push(DefinedObject::new(
+                false,
+                value_type.clone(),
+                self.end.clone(),
+            ));
+        }
+
+        if simulator_context.return_references {
+            value_type.reference_depth += 1;
+            SimulatorValue::Value(value_type)
+        } else {
+            SimulatorValue::Value(value_type)
+        }
+    }
+}
+
+/// Simulates a value cast `(value as Type)`.
+impl PekoValueSimulator for CastAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let value = self.value.simulate(simulator_context);
+        let value_type = value.get_type();
+
+        let box_value = simulator_context.box_value_to_type(&self.cast_to, &value);
+
+        let Some(boxed) = box_value else {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.value.get_start().clone(),
+                    self.value.get_end().clone(),
+                    format!(
+                        "value of type `{}` cannot be cast to type `{}`. The cast is not defined between these types",
+                        value_type,
+                        self.cast_to,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        };
+
+        boxed
+    }
+}
+
+/// Simulates an unwrap expression `optional?`. The optional's
+/// `[operator ?]` overload is invoked to produce the unwrapped
+/// value; non-optionals produce a diagnostic.
+impl PekoValueSimulator for UnwrapAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let optional = self.optional.simulate(simulator_context);
+
+        let unwrap_call = simulator_context.call_object_method(
+            &optional,
+            String::from("[operator ?]"),
+            Vec::new(),
+            None,
+        );
+
+        if unwrap_call.is_err() {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.optional.get_start().clone(),
+                    self.optional.get_end().clone(),
+                    format!(
+                        "cannot unwrap value of type `{}` with `?`. The value is not an `Option<T>`; only optional values can be unwrapped",
+                        optional.get_type(),
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        }
+
+        let unwrap_call = unwrap_call.unwrap();
+
+        if simulator_context
+            .get_class_by_type(&unwrap_call.get_type())
+            .is_some()
+        {
+            simulator_context.defined_objects.push(DefinedObject::new(
+                false,
+                unwrap_call.get_type(),
+                self.end.clone(),
+            ));
+        }
+
+        unwrap_call
+    }
+}

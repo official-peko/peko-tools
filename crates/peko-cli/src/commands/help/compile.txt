@@ -1,0 +1,29 @@
+peko compile [OPTIONS] <FILE>
+
+Compiles a single Pekoscript source file to a binary executable. If no
+operating system or architecture is provided, the host's defaults are
+used. For multi-file projects use 'peko build' instead.
+
+OPTIONS
+    --os=<OS>             (optional) target operating system
+                          (android, ios, linux, macos, or windows)
+    --arch=<ARCH>         (optional) target CPU architecture
+                          (arm or x86_64)
+
+    --output=<PATH>       path for the output file. For binary mode,
+                          this is the linker output. For --object
+                          mode, this is the output object file
+    --object              stop after producing the object file; do not
+                          link
+    --shared              produce a shared library instead of a normal
+                          executable
+
+    --emit-ir             also write the LLVM IR alongside the output
+    --print-linked        print every file linked into the binary on
+                          stdout, one space-separated line
+
+EXAMPLES
+    peko compile main.peko
+    peko compile main.peko --os=linux --arch=arm
+    peko compile main.peko --object --output=main.o
+    peko compile main.peko --shared --output=libfoo.so

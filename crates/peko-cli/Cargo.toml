@@ -1,0 +1,53 @@
+[package]
+name = "peko-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Console interface for the Pekoscript toolchain"
+
+[[bin]]
+name = "peko"
+path = "src/main.rs"
+
+[dependencies]
+peko-core = { workspace = true }
+peko-llvm = { workspace = true }
+
+tokio = { workspace = true, features = ["full"] }
+thiserror = { workspace = true }
+derive-new = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+itertools = { workspace = true }
+
+console = "0.16"
+indicatif = "0.18"
+rustyline = "15"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+open = "5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+image = "0.25"
+tempfile = "3"
+icns = "0.3"
+ico = "0.4"
+lzfse = "0.2"
+backhand = { version = "0.23", default-features = false, features = ["zstd", "gzip"] }
+merkle_hash = "3"
+md5 = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+grass = "0.13"
+ctrlc = "3"
+apple-codesign = "0.29.0"
+keyring-core = "1.0.0"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }

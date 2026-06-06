@@ -1,0 +1,5 @@
+peko version
+
+Prints the cli version and exits.
+
+This command takes no options.

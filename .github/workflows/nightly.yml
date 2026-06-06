@@ -1,0 +1,65 @@
+# Nightly build. Runs daily and on manual dispatch. Builds all targets and
+# publishes them to a rolling "nightly" prerelease whose tag moves to the
+# latest commit each run. The guard job skips scheduled runs when the most
+# recent commit is older than 24 hours so empty nightlies are not produced.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          if [ $((now - last)) -lt 86400 ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      version: nightly
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish rolling nightly
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create nightly dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes "Automated nightly build from commit ${GITHUB_SHA:0:7}. Prerelease, not for production use." \
+            --prerelease \
+            --target "$GITHUB_SHA"

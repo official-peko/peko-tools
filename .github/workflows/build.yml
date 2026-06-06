@@ -1,0 +1,111 @@
+# Reusable matrix build for all Peko targets. Callers pass a version string
+# used in archive names. Each target runs on its native runner, fetches the
+# matching prebuilt LLVM 18 dist, builds the workspace, and uploads one
+# archive artifact per target.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version string used in archive names"
+        required: true
+        type: string
+
+env:
+  LLVM_REPO: official-peko/peko-llvm-dist
+  LLVM_TAG: llvm-18.1.8
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            llvm_asset: llvm-18-x86_64-linux.tar.xz
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            llvm_asset: llvm-18-aarch64-linux.tar.xz
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            llvm_asset: llvm-18-aarch64-macos.tar.xz
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            llvm_asset: llvm-18-x86_64-macos.tar.xz
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            llvm_asset: llvm-18-x86_64-windows.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Fetch LLVM dist (unix)
+        if: runner.os != 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/llvm"
+          gh release download "$LLVM_TAG" -R "$LLVM_REPO" -p "${{ matrix.llvm_asset }}" -O /tmp/llvm.tar.xz
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm" --strip-components=1
+          echo "LLVM_SYS_180_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
+
+      - name: Fetch LLVM dist (windows)
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release download $env:LLVM_TAG -R $env:LLVM_REPO -p "${{ matrix.llvm_asset }}" -O llvm.zip
+          Expand-Archive llvm.zip -DestinationPath "$env:USERPROFILE\llvm-extract"
+          $root = (Get-ChildItem "$env:USERPROFILE\llvm-extract" -Directory | Select-Object -First 1).FullName
+          "LLVM_SYS_180_PREFIX=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          ver="${{ inputs.version }}"
+          ver="${ver#v}"
+          out="peko-${ver}-${{ matrix.target }}"
+          mkdir "$out"
+          cp target/release/peko target/release/peko-lsp "$out"/
+          tar -C "$out" -cJf "${out}.tar.xz" .
+          echo "ASSET=${out}.tar.xz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.version }}".TrimStart("v")
+          $out = "peko-$ver-${{ matrix.target }}"
+          New-Item -ItemType Directory $out | Out-Null
+          Copy-Item target/release/peko.exe,target/release/peko-lsp.exe $out
+          Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
+          "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          retention-days: 7

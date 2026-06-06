@@ -1,0 +1,16 @@
+peko add [OPTIONS] <PACKAGE>
+
+Installs a package from the registry into the current project. When the
+--global flag is set, the package is installed to the user-wide package
+store instead of the project.
+
+OPTIONS
+    --global              install the package globally rather than into
+                          the current project
+    --version=<VERSION>   install a specific version of the package
+                          (defaults to the latest published version)
+
+EXAMPLES
+    peko add some_pkg
+    peko add some_pkg --version=1.2.0
+    peko add some_pkg --global

@@ -1,0 +1,158 @@
+Peko Source Available License 1.0
+
+Copyright (c) 2026 Peko UI Technologies LLC
+
+Parameters
+
+Licensor:             Peko UI Technologies LLC
+Licensed Work:        Peko and associated tools and libraries
+                      The Licensed Work is (c) 2026 Peko UI Technologies LLC
+Additional Use Grant: Individual, non-commercial use of the Licensed Work
+                      is permitted free of charge. Any commercial use,
+                      including but not limited to use by a company,
+                      organization, or for revenue-generating purposes,
+                      requires a separate commercial license obtained
+                      from the Licensor.
+
+-----------------------------------------------------------------------------
+
+Terms
+
+The Licensor hereby grants you the right to copy and make non-production,
+non-commercial use of the Licensed Work, subject to the Additional Use Grant
+above.
+
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliated entities, or authorized
+resellers, or you must refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works
+of the Licensed Work, are subject to this License. This License applies
+separately for each version of the Licensed Work.
+
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or
+modified form from a third party, the terms and conditions set forth in this
+License apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other
+versions of the Licensed Work.
+
+This License does not grant you any right in any trademark, logo, or brand
+of the Licensor or its affiliates.
+
+This License does not grant you the right to:
+
+  1. Modify, adapt, translate, or create derivative works based upon the
+     Licensed Work without explicit written permission from the Licensor.
+
+  2. Redistribute, sublicense, sell, rent, lease, or otherwise transfer
+     the Licensed Work or any portion thereof to any third party without
+     explicit written permission from the Licensor.
+
+  3. Remove or obscure any copyright, trademark, or other proprietary
+     notices contained in the Licensed Work.
+
+  4. Use the Licensed Work for any commercial purpose without obtaining
+     a separate commercial license from the Licensor.
+
+The rights granted under this License are perpetual and irrevocable for
+users in compliance with its terms. There is no Change Date and no
+conversion to any other license. This License governs the Licensed Work
+permanently unless superseded by a written agreement with the Licensor.
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
+AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
+TITLE. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE LICENSED WORK OR THE USE
+OR OTHER DEALINGS IN THE LICENSED WORK.
+
+-----------------------------------------------------------------------------
+
+Section E -- IDE and Editor Plugin Exception
+
+Notwithstanding the commercial use restrictions set forth in this License,
+the Licensor hereby grants a limited, non-exclusive, royalty-free exception
+to the commercial use prohibition solely under the following conditions:
+
+E.1 Scope of Exception.
+
+This exception applies exclusively to IDE extensions and editor plugins
+(collectively, "Covered Extensions") that meet all of the following
+criteria:
+
+  (a) The Covered Extension is created, developed, owned, or officially
+      published by Peko UI Technologies LLC; and
+
+  (b) The Covered Extension's primary purpose is to provide editor or IDE
+      integration for the PekoScript language, including but not limited
+      to syntax highlighting, code completion, language server protocol
+      (LSP) support, debugging integration, formatting, or linting within
+      a text editor or integrated development environment; and
+
+  (c) The Covered Extension is distributed through an official editor or
+      IDE marketplace or extension registry (such as the Visual Studio
+      Code Marketplace, JetBrains Marketplace, or equivalent).
+
+E.2 Explicit Exclusions.
+
+This exception does not apply to, and the commercial use restrictions of
+this License remain in full force with respect to:
+
+  (a) Command-line interface tools, terminal utilities, or shell
+      integrations of any kind, including but not limited to the Peko
+      CLI, build tools, package managers, compilers, or any tool invoked
+      outside of an editor or IDE environment;
+
+  (b) Software development kits (SDKs), libraries, frameworks, language
+      bindings, or API wrappers intended for use by third-party developers
+      in their own software;
+
+  (c) Any extension, plugin, or tool created, owned, or published by a
+      third party that is not Peko UI Technologies LLC;
+
+  (d) Any product or service that incorporates the Licensed Work as part
+      of a commercial offering, subscription service, or revenue-generating
+      product, even if such product includes editor or IDE functionality;
+
+  (e) Any extension or plugin that competes directly with the Licensed Work
+      or any Peko product or service.
+
+E.3 Conditions of Exception.
+
+Covered Extensions qualifying under Section E.1 must:
+
+  (a) Include a notice in their documentation or marketplace listing
+      stating that the extension utilizes software licensed under the
+      Peko Source Available License 1.0; and
+
+  (b) Not remove or obscure any copyright, trademark, or proprietary
+      notices contained in the Licensed Work.
+
+E.4 Revocation.
+
+The Licensor reserves the right to revoke this exception at any time by
+publishing an updated version of this License. Revocation shall not apply
+retroactively to Covered Extensions already distributed prior to the
+revocation date.
+
+E.5 No Sublicensing.
+
+This exception does not grant the right to sublicense the Licensed Work or
+this exception to any third party.
+
+-----------------------------------------------------------------------------
+
+Contact
+
+For licensing inquiries, commercial license requests, or questions about
+this License, contact:
+
+Peko UI Technologies LLC
+connect@pekoui.com
+San Diego, California, United States

@@ -1,0 +1,49 @@
+# Lint and test on pull requests and pushes to main. Runs on Linux only to
+# keep PR turnaround fast; the full multi-target build runs on nightly and on
+# release tags through build.yml.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_REPO: official-peko/peko-llvm-dist
+  LLVM_TAG: llvm-18.1.8
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Fetch LLVM dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/llvm"
+          gh release download "$LLVM_TAG" -R "$LLVM_REPO" -p llvm-18-x86_64-linux.tar.xz -O /tmp/llvm.tar.xz
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm" --strip-components=1
+          echo "LLVM_SYS_180_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all --locked

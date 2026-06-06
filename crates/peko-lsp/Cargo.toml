@@ -1,0 +1,24 @@
+[package]
+name = "peko-lsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language Server Protocol implementation for Pekoscript"
+
+[[bin]]
+name = "peko-ls"
+path = "src/main.rs"
+
+[dependencies]
+peko-core          = { workspace = true }
+tokio              = { workspace = true, features = ["full"] }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+
+tower-lsp-server   = "0.23"
+ropey              = "1.6"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap            = "6"

@@ -1,0 +1,12 @@
+peko update [OPTIONS] <PACKAGE>
+
+Updates an installed package to its latest published version. The
+package must already be installed.
+
+OPTIONS
+    --global              update the package in the global store rather
+                          than in the current project
+
+EXAMPLES
+    peko update some_pkg
+    peko update some_pkg --global

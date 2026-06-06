@@ -1,0 +1,30 @@
+peko build [OPTIONS]
+
+Builds the current project. The project type determines what gets
+produced. CLI projects build a single binary for the host platform. UI
+projects build a bundle for each platform listed in the project's
+declared target_platforms (Android APK, iOS .app, Linux AppImage,
+macOS .app, Windows .exe). Use --platform to build a single platform
+instead, overriding the declared list.
+
+On first build the bundling configuration files in
+.peko/bundling/configfiles/ are generated automatically. They are not
+regenerated after that unless --regenconfig is passed.
+
+OPTIONS
+    --release             build with release optimizations and run the
+                          release signing step for each platform
+    --platform=<PLATFORM> build only the given platform, overriding the
+                          project's declared target_platforms (android,
+                          ios, linux, macos, windows)
+    --regenconfig         regenerate the per-platform configuration
+                          file templates (overwrites any local edits)
+    --clean               wipe the project's incremental build cache
+                          and exit without building
+EXAMPLES
+    peko build
+    peko build --release
+    peko build --platform=android
+    peko build --release --platform=ios
+    peko build --regenconfig
+    peko build --clean
