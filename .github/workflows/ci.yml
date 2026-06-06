@@ -27,6 +27,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Fetch LLVM dist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

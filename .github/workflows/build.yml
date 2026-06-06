@@ -52,6 +52,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Fetch LLVM dist (unix)
         if: runner.os != 'Windows'
         env:

@@ -1,5 +1,7 @@
 /target/
 **/target/
+!/crates/peko-core/target/
+!/crates/peko-core/target/**
 *.rs.bk
 *.pdb
 **/*/Cargo.lock
