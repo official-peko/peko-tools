@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
@@ -17,9 +18,9 @@ use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMContextRef, LLVMModuleRef, LLVMTypeRef, LLVMValueRef};
 use llvm_sys_180::target_machine::LLVMTargetRef;
 
+use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
 use peko_core::asts::declarations::{ClassAST, FunctionDeclarationAST};
-use peko_core::asts::PekoAST;
 use peko_core::execution::data_structures::{
     ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
     ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
@@ -1026,7 +1027,7 @@ impl TopLevelModuleInfo {
             llvm_sys_180::target_machine::LLVMTargetMachineEmitToFile(
                 target_machine,
                 self.llvm_module,
-                output_c.as_ptr() as *mut i8,
+                output_c.as_ptr() as *mut c_char,
                 llvm_sys_180::target_machine::LLVMCodeGenFileType::LLVMObjectFile,
                 &mut error_llvm,
             )

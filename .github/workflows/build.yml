@@ -56,9 +56,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev
+          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev libncurses-dev
           zstd_a="$(dpkg -L libzstd-dev | grep -m1 '/libzstd\.a$')"
           echo "ZSTD_LIB_PREFIX=$(dirname "$zstd_a")" >> "$GITHUB_ENV"
+          # The prebuilt llvm-config is linked against libtinfo.so.5, which is
+          # not shipped on ubuntu 24.04. Point a .so.5 name at the installed
+          # .so.6; llvm-config only needs the loader to resolve the name.
+          t6="$(ldconfig -p | awk '/libtinfo\.so\.6/{print $NF; exit}')"
+          if [ -n "$t6" ]; then sudo ln -sf "$t6" "$(dirname "$t6")/libtinfo.so.5"; fi
 
       - name: Install macOS system deps
         if: runner.os == 'macOS'
@@ -130,7 +135,7 @@ jobs:
           ver="${ver#v}"
           out="peko-${ver}-${{ matrix.target }}"
           mkdir "$out"
-          cp target/release/peko target/release/peko-lsp "$out"/
+          cp target/release/peko target/release/peko-ls "$out"/
           tar -C "$out" -cJf "${out}.tar.xz" .
           echo "ASSET=${out}.tar.xz" >> "$GITHUB_ENV"
 
@@ -141,7 +146,7 @@ jobs:
           $ver = "${{ inputs.version }}".TrimStart("v")
           $out = "peko-$ver-${{ matrix.target }}"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item target/release/peko.exe,target/release/peko-lsp.exe $out
+          Copy-Item target/release/peko.exe,target/release/peko-ls.exe $out
           Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
           "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 

@@ -30,9 +30,11 @@ jobs:
       - name: Install Linux system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev
+          sudo apt-get install -y libdbus-1-dev pkg-config libzstd-dev libncurses-dev
           zstd_a="$(dpkg -L libzstd-dev | grep -m1 '/libzstd\.a$')"
           echo "ZSTD_LIB_PREFIX=$(dirname "$zstd_a")" >> "$GITHUB_ENV"
+          t6="$(ldconfig -p | awk '/libtinfo\.so\.6/{print $NF; exit}')"
+          if [ -n "$t6" ]; then sudo ln -sf "$t6" "$(dirname "$t6")/libtinfo.so.5"; fi
 
       - name: Fetch LLVM dist
         env:

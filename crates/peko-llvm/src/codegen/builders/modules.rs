@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
@@ -800,7 +801,7 @@ impl ModuleManager for PekoCodegenContext {
             unsafe { llvm_sys_180::target_machine::LLVMGetFirstTarget() };
 
         let mut errors = String::new();
-        let mut error_llvm = errors.as_mut_ptr() as *mut i8;
+        let mut error_llvm = errors.as_mut_ptr() as *mut c_char;
 
         // Convert the triple string into a C string.
         let mut triple_string = target.to_triple();
@@ -879,7 +880,7 @@ impl ModuleManager for PekoCodegenContext {
             llvm_sys_180::target_machine::LLVMTargetMachineEmitToFile(
                 target_machine,
                 linked_module,
-                output_path_cstring.as_ptr() as *mut i8,
+                output_path_cstring.as_ptr() as *mut c_char,
                 llvm_sys_180::target_machine::LLVMCodeGenFileType::LLVMObjectFile,
                 &mut error_llvm,
             )
