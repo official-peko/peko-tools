@@ -38,8 +38,17 @@ jobs:
         run: |
           mkdir -p "$HOME/llvm"
           gh release download "$LLVM_TAG" -R "$LLVM_REPO" -p llvm-18-x86_64-linux.tar.xz -O /tmp/llvm.tar.xz
-          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm" --strip-components=1
-          echo "LLVM_SYS_180_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm"
+          cfg="$(find "$HOME/llvm" -type f -name llvm-config | head -n1)"
+          if [ -z "$cfg" ]; then
+            echo "llvm-config not found in the LLVM dist. Extracted layout:"
+            find "$HOME/llvm" -maxdepth 3 | head -50
+            exit 1
+          fi
+          chmod +x "$cfg" || true
+          prefix="$(cd "$(dirname "$cfg")/.." && pwd)"
+          echo "LLVM_SYS_180_PREFIX=$prefix" >> "$GITHUB_ENV"
+          "$cfg" --version
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2

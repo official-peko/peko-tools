@@ -65,8 +65,17 @@ jobs:
         run: |
           mkdir -p "$HOME/llvm"
           gh release download "$LLVM_TAG" -R "$LLVM_REPO" -p "${{ matrix.llvm_asset }}" -O /tmp/llvm.tar.xz
-          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm" --strip-components=1
-          echo "LLVM_SYS_180_PREFIX=$HOME/llvm" >> "$GITHUB_ENV"
+          tar -xf /tmp/llvm.tar.xz -C "$HOME/llvm"
+          cfg="$(find "$HOME/llvm" -type f -name llvm-config | head -n1)"
+          if [ -z "$cfg" ]; then
+            echo "llvm-config not found in the LLVM dist. Extracted layout:"
+            find "$HOME/llvm" -maxdepth 3 | head -50
+            exit 1
+          fi
+          chmod +x "$cfg" || true
+          prefix="$(cd "$(dirname "$cfg")/.." && pwd)"
+          echo "LLVM_SYS_180_PREFIX=$prefix" >> "$GITHUB_ENV"
+          "$cfg" --version
 
       - name: Fetch LLVM dist (windows)
         if: runner.os == 'Windows'
@@ -76,8 +85,15 @@ jobs:
         run: |
           gh release download $env:LLVM_TAG -R $env:LLVM_REPO -p "${{ matrix.llvm_asset }}" -O llvm.zip
           Expand-Archive llvm.zip -DestinationPath "$env:USERPROFILE\llvm-extract"
-          $root = (Get-ChildItem "$env:USERPROFILE\llvm-extract" -Directory | Select-Object -First 1).FullName
-          "LLVM_SYS_180_PREFIX=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $cfg = Get-ChildItem "$env:USERPROFILE\llvm-extract" -Recurse -Filter llvm-config.exe | Select-Object -First 1
+          if (-not $cfg) {
+            Write-Host "llvm-config.exe not found in the LLVM dist. Extracted layout:"
+            Get-ChildItem "$env:USERPROFILE\llvm-extract" -Recurse -Depth 3 | Select-Object FullName | Format-Table -AutoSize
+            exit 1
+          }
+          $prefix = Split-Path (Split-Path $cfg.FullName -Parent) -Parent
+          "LLVM_SYS_180_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $cfg.FullName --version
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
