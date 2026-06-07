@@ -129,12 +129,6 @@ The multi-target matrix is factored into a reusable `build.yml` that both the
 nightly and release workflows call. Each target builds natively on its own
 runner and fetches the matching LLVM 18 distribution at build time.
 
-## Conventions
-
-Source files use ASCII only. Functions and variables are snake_case; classes
-and globals are PascalCase. See the per-crate READMEs for details specific to
-each component.
-
 ## License
 
 Licensed under PSAL-1.0. See [LICENSE](LICENSE) for the full text.
