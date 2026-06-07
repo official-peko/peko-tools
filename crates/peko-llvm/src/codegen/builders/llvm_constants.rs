@@ -108,7 +108,7 @@ pub trait LlvmConstantBuilder {
     /// `{ i32, i32, [offset_count x i64] }` type that matches the
     /// definition.
     fn declare_class_descriptor(&mut self, mangled_name: &str, offset_count: usize)
-        -> CodegenValue;
+    -> CodegenValue;
 
     /// Emit a static array (kind 1) GC type descriptor as a private
     /// constant global and return a pointer to it (typed `opaque`).

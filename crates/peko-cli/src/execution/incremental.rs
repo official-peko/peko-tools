@@ -38,10 +38,10 @@ use peko_core::diagnostics::{DiagnosticList, DiagnosticType};
 use peko_core::error::{PekoError, PekoResult};
 use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::target::PekoTarget;
+use peko_llvm::codegen::PekoValueBuilder;
 use peko_llvm::codegen::builders::prelude::GlobalBuilder;
 use peko_llvm::codegen::context::PekoCodegenContext;
 use peko_llvm::codegen::data_structures::CodegenModule;
-use peko_llvm::codegen::PekoValueBuilder;
 
 use crate::cli::reporting::ProgressSink;
 use crate::project::{self, PekoProject};

@@ -27,7 +27,7 @@ pub mod values;
 use derive_new::new;
 
 pub use data_structures::Spanned;
-use data_structures::{placeholder_position, PositionData};
+use data_structures::{PositionData, placeholder_position};
 
 /// A placeholder AST used by the parser during error recovery/expression parsing
 /// (as the operator in an op stack) and by the simulator as a default value.

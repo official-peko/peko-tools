@@ -17,9 +17,9 @@ use peko_core::target::{Architecture, OperatingSystem, PekoTarget};
 use zip::write::{ExtendedFileOptions, FileOptions};
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::bundler::{io_at, recursive_zip_add, signing, BundleError, BundleResult, CleanupGuard};
-use crate::cli::reporting::ProgressSink;
+use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, recursive_zip_add, signing};
 use crate::cli::CLIInfo;
+use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 

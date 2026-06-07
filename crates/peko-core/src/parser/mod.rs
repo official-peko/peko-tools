@@ -47,7 +47,7 @@ use indexmap::IndexMap;
 
 use crate::asts::data_structures::*;
 use crate::asts::{
-    declarations::*, expressions::*, statements::*, values::*, PekoAST, PlaceholderAST,
+    PekoAST, PlaceholderAST, declarations::*, expressions::*, statements::*, values::*,
 };
 use crate::diagnostics;
 use crate::lexer;

@@ -19,7 +19,7 @@ use indexmap::IndexMap;
 use crate::lexer;
 use crate::types::{self, PekoType};
 
-use super::{expressions::FunctionCallAST, PekoAST};
+use super::{PekoAST, expressions::FunctionCallAST};
 
 // ----- Spanned trait -------------------------------------------------------
 

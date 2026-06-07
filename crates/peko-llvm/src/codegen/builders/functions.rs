@@ -25,7 +25,7 @@ use crate::codegen::builders::llvm_memory::LlvmMemoryBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::cstr;
-use crate::codegen::data_structures::{managed_pointer_type, CodegenValue};
+use crate::codegen::data_structures::{CodegenValue, managed_pointer_type};
 use crate::codegen::symbol::SymbolName;
 
 /// Function-definition and direct-call construction.

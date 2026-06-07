@@ -29,7 +29,7 @@ use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::builders::modules::ModuleManager;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{
-    is_managed_pointer, managed_pointer_type, CodegenClass, CodegenValue,
+    CodegenClass, CodegenValue, is_managed_pointer, managed_pointer_type,
 };
 
 /// High-level codegen orchestrators that span lower layers.

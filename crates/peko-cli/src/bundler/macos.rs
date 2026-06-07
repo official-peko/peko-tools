@@ -15,9 +15,9 @@ use std::path::PathBuf;
 
 use peko_core::target::{Architecture, OperatingSystem, PekoTarget};
 
-use crate::bundler::{io_at, signing, BundleError, BundleResult, CleanupGuard};
-use crate::cli::reporting::ProgressSink;
+use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, signing};
 use crate::cli::CLIInfo;
+use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 

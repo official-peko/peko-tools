@@ -24,6 +24,7 @@ use llvm_sys_180::core;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::types::PekoType;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::functions::FunctionBuilder;
 use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_instructions::LlvmInstructionBuilder;
@@ -32,7 +33,6 @@ use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::cstr;
 use crate::codegen::data_structures::{CodegenModule, CodegenValue};
 use crate::codegen::symbol::SymbolName;
-use crate::codegen::PekoValueBuilder;
 
 /// Global-variable construction and module-init wiring.
 pub trait GlobalBuilder {

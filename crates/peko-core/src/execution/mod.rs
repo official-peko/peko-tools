@@ -35,12 +35,12 @@ use data_structures::{
 };
 use indexmap::IndexMap;
 
+use crate::ExternalModuleInfo;
+use crate::asts::PekoAST;
 use crate::asts::data_structures::{PositionData, PositionedValue, StringChunk};
 use crate::asts::expressions::ObjectConstructionAST;
 use crate::asts::values::StringAST;
-use crate::asts::PekoAST;
 use crate::types::PekoType;
-use crate::ExternalModuleInfo;
 
 /// One frame of the module-resolution stack.
 ///

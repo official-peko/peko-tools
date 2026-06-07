@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{read_to_string, PekoError, PekoResult};
 use crate::ExternalModuleInfo;
+use crate::error::{PekoError, PekoResult, read_to_string};
 
 /// Entry-point file name expected inside every package version directory.
 const ENTRY_FILE_NAME: &str = "main.peko";

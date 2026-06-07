@@ -23,14 +23,14 @@ use std::sync::{Arc, RwLock};
 use indexmap::IndexMap;
 use itertools::Itertools;
 
+use crate::ExternalModuleInfo;
 use crate::asts::data_structures::{PositionData, PositionedValue, UnpackItem, VisibilityData};
 use crate::diagnostics;
 use crate::execution::{ExecutionContextAlgorithms, ExecutionModuleContext};
-use crate::simulator::data_structures::FunctionCall;
 use crate::simulator::PekoValueSimulator;
+use crate::simulator::data_structures::FunctionCall;
 use crate::target;
 use crate::types::{self, PekoType};
-use crate::ExternalModuleInfo;
 
 use super::data_structures::{
     DefinedObject, Scope, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,

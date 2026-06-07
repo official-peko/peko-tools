@@ -26,10 +26,10 @@ use zip::write::{ExtendedFileOptions, FileOptions};
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::bundler::{
-    io_at, java_tool, recursive_zip_add, run_tool, signing, BundleError, BundleResult, CleanupGuard,
+    BundleError, BundleResult, CleanupGuard, io_at, java_tool, recursive_zip_add, run_tool, signing,
 };
-use crate::cli::reporting::ProgressSink;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 

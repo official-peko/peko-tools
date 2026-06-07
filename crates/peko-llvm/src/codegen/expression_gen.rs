@@ -9,6 +9,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use llvm_sys_180::prelude::LLVMValueRef;
+use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{
     ClassMethod, PositionData, PositionedValue, VisibilityData,
 };
@@ -18,19 +19,18 @@ use peko_core::asts::expressions::{
     UnaryExpressionAST, UnwrapAST, VariableReferenceAST,
 };
 use peko_core::asts::values::StringAST;
-use peko_core::asts::PekoAST;
 use peko_core::diagnostics;
-use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::ExecutionContextAlgorithms;
+use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::types::PekoType;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{
-    is_managed_pointer, managed_pointer_type, BooleanOperation, CodegenArg, CodegenValue,
-    NumericalOperation,
+    BooleanOperation, CodegenArg, CodegenValue, NumericalOperation, is_managed_pointer,
+    managed_pointer_type,
 };
-use crate::codegen::PekoValueBuilder;
 
 impl PekoValueBuilder for ArrayAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
@@ -1020,10 +1020,11 @@ impl PekoValueBuilder for ObjectAccessAST {
 
                 let previous_expected_type = codegen_context.current_expected_type_options.clone();
                 if object_class.attributes.contains_key(&variable_name) {
-                    codegen_context.current_expected_type_options = Some(vec![object_class
-                        .attributes[&variable_name]
-                        .attribute_type
-                        .clone()]);
+                    codegen_context.current_expected_type_options = Some(vec![
+                        object_class.attributes[&variable_name]
+                            .attribute_type
+                            .clone(),
+                    ]);
                 }
 
                 let mut variable_value = variable_reassignment

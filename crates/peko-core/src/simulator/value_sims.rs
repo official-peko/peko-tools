@@ -18,10 +18,10 @@ use crate::diagnostics;
 use crate::execution::ExecutionContextAlgorithms;
 use crate::types;
 
+use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::Scope;
 use super::value::SimulatorValue;
-use super::PekoValueSimulator;
 
 /// Booleans simulate as a fresh `bool`-typed value.
 impl PekoValueSimulator for BooleanAST {

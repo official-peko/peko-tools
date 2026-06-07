@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 
 use llvm_sys_180::prelude::LLVMBasicBlockRef;
-use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::ExecutionModuleContext;
+use peko_core::execution::data_structures::ExecutionModule;
 
 use crate::codegen::builders::modules::ModuleManager;
 use crate::codegen::builders::prelude::{LlvmConstantBuilder, LlvmInstructionBuilder};

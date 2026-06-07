@@ -16,13 +16,13 @@ use peko_core::asts::PekoAST;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::types::PekoType;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_instructions::LlvmInstructionBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::builders::prelude::HighLevelCodegen;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{BooleanOperation, CodegenValue, NumericalOperation};
-use crate::codegen::PekoValueBuilder;
 
 /// Arithmetic, comparison, and boolean operation emitters.
 pub trait LlvmArithmeticBuilder {

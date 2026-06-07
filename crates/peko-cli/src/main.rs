@@ -14,8 +14,8 @@ pub mod commands;
 
 use std::process::ExitCode;
 
-use crate::cli::reporting::{IndicatifSink, Reporter, Verbosity};
 use crate::cli::CLIInfo;
+use crate::cli::reporting::{IndicatifSink, Reporter, Verbosity};
 
 #[tokio::main]
 async fn main() -> ExitCode {

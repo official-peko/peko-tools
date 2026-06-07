@@ -29,13 +29,13 @@ use crate::simulator::data_structures::{
 };
 use crate::types::{self, PekoType};
 
+use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{
     DefinedObject, Scope, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,
     SimulatorFunction, SimulatorFunctionGeneric, SimulatorModule, SimulatorVariable,
 };
 use super::value::SimulatorValue;
-use super::PekoValueSimulator;
 
 /// Simulates a variable declaration.
 ///
@@ -55,9 +55,11 @@ impl PekoValueSimulator for NewVariableAST {
         if self.variable_type.is_some()
             && simulator_context.type_exists(self.variable_type.as_ref().unwrap())
         {
-            simulator_context.current_expected_type_options = Some(vec![simulator_context
-                .expand_type(self.variable_type.as_ref().unwrap())
-                .unwrap()]);
+            simulator_context.current_expected_type_options = Some(vec![
+                simulator_context
+                    .expand_type(self.variable_type.as_ref().unwrap())
+                    .unwrap(),
+            ]);
         }
 
         // Local-scope declarations: simulate value, type-check, register.
@@ -1376,10 +1378,12 @@ impl PekoValueSimulator for ClassAST {
                             break;
                         }
 
-                        for (argument_name, argument_info) in
-                            &parent_class.as_ref().unwrap().main_virtual_table.methods
-                                ["constructor"][0]
-                                .arguments
+                        for (argument_name, argument_info) in &parent_class
+                            .as_ref()
+                            .unwrap()
+                            .main_virtual_table
+                            .methods["constructor"][0]
+                            .arguments
                         {
                             constructor_arguments
                                 .insert(argument_name.clone(), argument_info.argument_type.clone());

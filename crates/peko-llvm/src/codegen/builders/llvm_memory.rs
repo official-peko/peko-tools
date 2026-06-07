@@ -21,7 +21,7 @@ use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::builders::prelude::LlvmInstructionBuilder;
 use crate::codegen::context::PekoCodegenContext;
-use crate::codegen::data_structures::{managed_pointer_type, CodegenValue};
+use crate::codegen::data_structures::{CodegenValue, managed_pointer_type};
 
 /// Memory allocation and object-layout access.
 pub trait LlvmMemoryBuilder {

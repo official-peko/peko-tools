@@ -14,11 +14,12 @@ use llvm_sys_180::core;
 use llvm_sys_180::prelude::{
     LLVMBasicBlockRef, LLVMBuilderRef, LLVMContextRef, LLVMModuleRef, LLVMValueRef,
 };
+use peko_core::ExternalModuleInfo;
 use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::{ExecutionContextAlgorithms, ExecutionModuleContext};
 use peko_core::types::PekoType;
-use peko_core::ExternalModuleInfo;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::cstr;
 use crate::codegen::data_structures::{
@@ -26,7 +27,6 @@ use crate::codegen::data_structures::{
     CodegenFunction, CodegenFunctionGeneric, CodegenModule, CodegenValue, CodegenVariable,
     CodegenVirtualTable, NumericalOperation,
 };
-use crate::codegen::PekoValueBuilder;
 
 #[derive(Clone)]
 pub struct PekoCodegenContext {
@@ -1092,18 +1092,19 @@ impl
         {
             // Positional call.
             for (argument, (_, arg)) in itertools::izip!(&arguments, &method.arguments) {
-                let boxed_argument_value =
-                    match self.box_value_to_type(&arg.argument_type, argument) {
-                        Some(value) => value,
-                        None => {
-                            return Err(format!(
+                let boxed_argument_value = match self
+                    .box_value_to_type(&arg.argument_type, argument)
+                {
+                    Some(value) => value,
+                    None => {
+                        return Err(format!(
                             "incorrect argument types for method '{}' (expected '{}' but got '{}')",
                             method_name_str,
                             arg.argument_type.to_string(),
                             argument.value_type.to_string()
                         ));
-                        }
-                    };
+                    }
+                };
                 boxed_arguments.push(boxed_argument_value);
             }
 

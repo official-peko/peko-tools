@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use derive_new::new;
 
-use super::data_structures::{PositionData, PositionedValue, Spanned, StringChunk};
 use super::PekoAST;
+use super::data_structures::{PositionData, PositionedValue, Spanned, StringChunk};
 use crate::types;
 
 /// An array literal: `#[item1, item2, ...]`.

@@ -21,20 +21,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use indexmap::IndexMap;
+use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, UnpackItem};
 use peko_core::asts::statements::ImportStatementAST;
-use peko_core::asts::PekoAST;
 use peko_core::diagnostics::DiagnosticList;
 use peko_core::error::PekoResult;
 use peko_core::lexer::TokenList;
 use peko_core::parser::PekoParser;
-use peko_core::simulator::context::PekoSimulatorContext;
 use peko_core::simulator::PekoValueSimulator;
+use peko_core::simulator::context::PekoSimulatorContext;
 use peko_core::target::PekoTarget;
+use peko_llvm::codegen::PekoValueBuilder;
 use peko_llvm::codegen::builders::prelude::{GlobalBuilder, ModuleManager};
 use peko_llvm::codegen::context::PekoCodegenContext;
 use peko_llvm::codegen::data_structures::CodegenModule;
-use peko_llvm::codegen::PekoValueBuilder;
 
 pub mod incremental;
 

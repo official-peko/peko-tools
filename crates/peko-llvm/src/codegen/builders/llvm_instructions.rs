@@ -17,7 +17,7 @@ use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::cstr;
 use crate::codegen::data_structures::{
-    is_managed_pointer, pointee_type, reference_into, CodegenValue,
+    CodegenValue, is_managed_pointer, pointee_type, reference_into,
 };
 
 /// Basic-block control and the instructions that depend on it.

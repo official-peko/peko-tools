@@ -24,19 +24,19 @@ use std::sync::{Arc, RwLock};
 
 use indexmap::IndexMap;
 
+use crate::asts::PekoAST;
 use crate::asts::data_structures::{ClassMethod, PositionData, PositionedValue, VisibilityData};
 use crate::asts::expressions::*;
 use crate::asts::values::StringAST;
-use crate::asts::PekoAST;
 use crate::diagnostics;
 use crate::execution::ExecutionContextAlgorithms;
-use crate::simulator::data_structures::{pointee_type, FunctionCall};
+use crate::simulator::data_structures::{FunctionCall, pointee_type};
 use crate::types::{self, PekoType};
 
+use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{DefinedObject, SimulatorArg, SimulatorVariable};
 use super::value::SimulatorValue;
-use super::PekoValueSimulator;
 
 /// Simulates an array literal `[a, b, c]`.
 ///
@@ -2871,10 +2871,9 @@ impl PekoValueSimulator for ObjectAccessAST {
                 let previous_expected_type =
                     simulator_context.current_expected_type_options.clone();
                 if class.attributes.contains_key(&variable_name) {
-                    simulator_context.current_expected_type_options = Some(vec![class.attributes
-                        [&variable_name]
-                        .attribute_type
-                        .clone()]);
+                    simulator_context.current_expected_type_options = Some(vec![
+                        class.attributes[&variable_name].attribute_type.clone(),
+                    ]);
                 }
 
                 let variable_value = variable_reassignment

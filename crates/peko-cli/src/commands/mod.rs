@@ -25,8 +25,8 @@ use std::process::ExitCode;
 
 use peko_core::target::OperatingSystem;
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 
 /// One subcommand: identifier, one-line summary, full help text, and
 /// the async function that runs it.

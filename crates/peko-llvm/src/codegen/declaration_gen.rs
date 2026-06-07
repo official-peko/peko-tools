@@ -12,19 +12,19 @@ use peko_core::asts::declarations::{
     ClassAST, ClosureAST, FunctionDeclarationAST, ModuleCreationAST, NewVariableAST,
 };
 use peko_core::diagnostics;
-use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::ExecutionContextAlgorithms;
+use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::types::PekoType;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{
-    is_managed_pointer, managed_pointer_type, CodegenArg, CodegenClass, CodegenClassAttribute,
-    CodegenClassGeneric, CodegenFunction, CodegenFunctionGeneric, CodegenModule, CodegenValue,
-    CodegenVariable, CodegenVirtualTable, GlobalVariable,
+    CodegenArg, CodegenClass, CodegenClassAttribute, CodegenClassGeneric, CodegenFunction,
+    CodegenFunctionGeneric, CodegenModule, CodegenValue, CodegenVariable, CodegenVirtualTable,
+    GlobalVariable, is_managed_pointer, managed_pointer_type,
 };
 use crate::codegen::symbol::SymbolName;
-use crate::codegen::PekoValueBuilder;
 
 impl PekoValueBuilder for NewVariableAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
@@ -34,9 +34,11 @@ impl PekoValueBuilder for NewVariableAST {
         if self.variable_type.is_some()
             && codegen_context.type_exists(self.variable_type.as_ref().unwrap())
         {
-            codegen_context.current_expected_type_options = Some(vec![codegen_context
-                .expand_type(self.variable_type.as_ref().unwrap())
-                .unwrap()]);
+            codegen_context.current_expected_type_options = Some(vec![
+                codegen_context
+                    .expand_type(self.variable_type.as_ref().unwrap())
+                    .unwrap(),
+            ]);
         }
 
         // Local-scope path: stack-alloc, store, and add to the scope.
@@ -487,11 +489,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                         break;
                     }
                 }
-                if all_types_equal {
-                    Some(found)
-                } else {
-                    None
-                }
+                if all_types_equal { Some(found) } else { None }
             }
             None => None,
         };

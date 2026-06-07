@@ -9,10 +9,10 @@ use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::types::PekoType;
 
+use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::context::PekoCodegenContext;
-use crate::codegen::data_structures::{managed_pointer_type, CodegenValue};
-use crate::codegen::PekoValueBuilder;
+use crate::codegen::data_structures::{CodegenValue, managed_pointer_type};
 
 impl PekoValueBuilder for BooleanAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {

@@ -7,8 +7,8 @@
 
 use derive_new::new;
 
-use super::data_structures::{ConditionBody, PositionData, PositionedValue, Spanned, UnpackItem};
 use super::PekoAST;
+use super::data_structures::{ConditionBody, PositionData, PositionedValue, Spanned, UnpackItem};
 
 /// A platform-specific block.
 ///

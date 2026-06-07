@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 use peko_core::target::OperatingSystem;
 use serde_json::Value;
 
-use crate::bundler::{run_tool, BundleError, BundleResult};
+use crate::bundler::{BundleError, BundleResult, run_tool};
 
 /// Service name used for every keychain entry this module creates.
 const KEYCHAIN_SERVICE: &str = "dev.peko.signing";

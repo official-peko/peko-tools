@@ -11,7 +11,7 @@ use itertools::Itertools;
 
 use super::PekoParser;
 use crate::asts::statements::ImportStatementAST;
-use crate::asts::{data_structures::ClassMethod, PekoAST};
+use crate::asts::{PekoAST, data_structures::ClassMethod};
 use crate::lexer::TokenList;
 
 /// Constructs a parser over a standalone source string, with an empty file
@@ -382,13 +382,15 @@ class GenericClass<T, T2> from BaseClass {
                 "Array<int>"
             );
 
-            assert!(method_info
-                .arguments
-                .get_index(2)
-                .unwrap()
-                .1
-                .default_value
-                .is_some());
+            assert!(
+                method_info
+                    .arguments
+                    .get_index(2)
+                    .unwrap()
+                    .1
+                    .default_value
+                    .is_some()
+            );
         }
         _ => panic!("error parsing class"),
     }
