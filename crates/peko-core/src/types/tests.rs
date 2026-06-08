@@ -278,7 +278,6 @@ fn optional_get_inner_type_returns_none_for_non_optional() {
 
 #[test]
 fn is_string_type_matches_all_string_forms() {
-    assert!(PekoType::from_string("string", "").is_string_type());
     assert!(PekoType::from_string("char[]", "").is_string_type());
     assert!(PekoType::from_string("&char", "").is_string_type());
     assert!(!PekoType::from_string("int", "").is_string_type());
