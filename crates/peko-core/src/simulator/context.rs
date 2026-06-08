@@ -1264,13 +1264,7 @@ impl PekoSimulatorContext {
             let mut all_arguments_keywords =
                 !function.arguments.is_empty() || (class_function && function.arguments.len() > 1);
 
-            let arguments_iter = if class_function {
-                function.arguments.iter().skip(1)
-            } else {
-                function.arguments.iter().skip(0)
-            };
-
-            for (_, arg) in arguments_iter {
+            for (_, arg) in function.arguments.iter().skip(usize::from(class_function)) {
                 if !arg.default_value {
                     all_arguments_keywords = false;
                     break;
@@ -1324,18 +1318,15 @@ impl PekoSimulatorContext {
                 }
 
                 // Score variadic arguments if applicable.
-                if function.var_args_type.is_some()
+                if let Some(var_args_type) = &function.var_args_type
                     && argument_types.len() > function.arguments.len()
                 {
                     for argument_type in
-                        &argument_types[(function.arguments.len())..argument_types.len()]
+                        &argument_types[function.arguments.len()..argument_types.len()]
                     {
-                        if self.types_equal(argument_type, function.var_args_type.as_ref().unwrap())
-                        {
+                        if self.types_equal(argument_type, var_args_type) {
                             current_type_match_score += 2;
-                        } else if self
-                            .types_similar(argument_type, function.var_args_type.as_ref().unwrap())
-                        {
+                        } else if self.types_similar(argument_type, var_args_type) {
                             current_type_match_score += 1;
                         }
                     }
@@ -1442,9 +1433,7 @@ impl
         let post_stack = self.module_context.step_back();
 
         for parameter in type_parameters {
-            let Some(type_expanded) = self.expand_type(&parameter) else {
-                return None;
-            };
+            let type_expanded = self.expand_type(&parameter)?;
             name_parts.push(type_expanded.to_string());
             type_parameters_expanded.push(type_expanded);
         }
@@ -1526,9 +1515,7 @@ impl
         let post_stack = self.module_context.step_back();
 
         for parameter in type_parameters {
-            let Some(type_expanded) = self.expand_type(&parameter) else {
-                return None;
-            };
+            let type_expanded = self.expand_type(&parameter)?;
             name_parts.push(type_expanded.to_string());
             type_parameters_expanded.push(type_expanded);
         }
@@ -1598,10 +1585,7 @@ impl
         // Expand the function reference to its fully-qualified form.
         let mut function_name_type =
             types::PekoType::from_string(&function_name.to_string(), String::new());
-        let Some(expanded) = self.expand_type(&function_name_type) else {
-            return None;
-        };
-        function_name_type = expanded;
+        function_name_type = self.expand_type(&function_name_type)?;
 
         // Walk the module path to find the function's defining module.
         let mut next_module =
@@ -1617,14 +1601,12 @@ impl
             .map(SimulatorValue::get_type)
             .collect();
 
-        let Some(function_to_call) = self.choose_function(
+        let function_to_call = self.choose_function(
             next_module.read().unwrap().functions[&function_name_type.type_name].clone(),
             argument_types,
             None,
             false,
-        ) else {
-            return None;
-        };
+        )?;
 
         // Verify argument types one more time at the chosen overload —
         // belt-and-braces against choose_function returning a candidate
@@ -1742,22 +1724,22 @@ impl
             }
 
             // Variadic-arguments path.
-            if method.var_args_type.is_some() {
+            if let Some(var_args_type) = &method.var_args_type {
                 let mut var_arguments = Vec::new();
-                for i in break_index..arguments.len() {
-                    var_arguments.push(arguments[i].clone());
+                for arg in arguments.iter().skip(break_index) {
+                    var_arguments.push(arg.clone());
                 }
 
                 if self
-                    .create_standard_array(method.var_args_type.as_ref().unwrap(), var_arguments)
+                    .create_standard_array(var_args_type, var_arguments)
                     .is_none()
                 {
                     return Err(format!(
                         "variadic arguments to method `{method_name_str}` could not be packed into an array of type `{}`. At least one variadic argument has a type that does not match the declared variadic type",
-                        method.var_args_type.clone().unwrap(),
+                        var_args_type,
                     ));
                 }
-            }
+            };
         } else {
             // Keyword-call path.
             let provided_arguments = if let Some(provided) = provided_arguments {
@@ -1844,9 +1826,7 @@ impl
         class_type: &types::PekoType,
         constructor_arguments: Vec<SimulatorValue>,
     ) -> Option<SimulatorValue> {
-        let Some(class_to_create) = self.get_class_by_type(class_type) else {
-            return None;
-        };
+        let class_to_create = self.get_class_by_type(class_type)?;
 
         // The simulator's "allocation" is just a typed value — see
         // gc_allocate_type's rustdoc.
@@ -1957,11 +1937,8 @@ impl
         // (covered by is_float | is_integer | is_datatype).
         if lhs_value_type.is_float() || lhs_value_type.is_integer() || lhs_value_type.is_datatype()
         {
-            let rhs = self.box_value_to_type(&lhs.get_type(), rhs);
-
-            if rhs.is_none() {
-                return None;
-            }
+            // here to ensure the rhs is actually valid
+            let _rhs = self.box_value_to_type(&lhs.get_type(), rhs)?;
 
             let operation_type = match operator.to_string().as_str() {
                 // Arithmetic operators yield the lhs type.
@@ -1975,10 +1952,11 @@ impl
         }
 
         // String-to-string equality / inequality.
-        if lhs_value_type.is_string_type() && rhs_value_type.is_string_type() {
-            if matches!(operator.to_string().as_str(), "==" | "!=") {
-                return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
-            }
+        if lhs_value_type.is_string_type()
+            && rhs_value_type.is_string_type()
+            && matches!(operator.to_string().as_str(), "==" | "!=")
+        {
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
         }
 
         // Reference-like equality / inequality.

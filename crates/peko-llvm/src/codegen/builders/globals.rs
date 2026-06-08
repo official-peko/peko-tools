@@ -162,7 +162,7 @@ impl GlobalBuilder for PekoCodegenContext {
         // discarded since we replace it with our own.
         let global_sets_module = Arc::new(RwLock::new(CodegenModule::new_top_level(
             "global_sets",
-            self.get_current_file().to_path_buf(),
+            self.get_current_file(),
             None,
             self.llvm_context,
         )));
@@ -203,7 +203,7 @@ impl GlobalBuilder for PekoCodegenContext {
                 global_sets
                     .iter()
                     .find_position(|global_set| {
-                        global_set.as_str() == &format!("{modname}::set_globals")
+                        global_set.as_str() == format!("{modname}::set_globals")
                     })
                     .unwrap()
                     .0,
@@ -278,15 +278,13 @@ impl GlobalBuilder for PekoCodegenContext {
                         .to_str()
                         .unwrap(),
                 )
-            } else if self.compiled_styles_folder.is_some()
-                && global.variable_name == "ui::debug_mode"
+            } else if (self.compiled_styles_folder.is_some()
+                && global.variable_name == "ui::debug_mode")
+                || (self.asset_debug_folder.is_some()
+                    && global.variable_name == "assets::asset_debug")
             {
                 self.create_constant_boolean(true)
-            } else if self.compiled_styles_folder.is_some()
-                && global.variable_name == "assets::asset_debug"
-            {
-                self.create_constant_boolean(true)
-            } else if self.compiled_styles_folder.is_some()
+            } else if self.asset_debug_folder.is_some()
                 && global.variable_name == "assets::asset_debug_dir"
             {
                 self.create_cstring(self.asset_debug_folder.clone().unwrap().to_str().unwrap())
@@ -316,8 +314,8 @@ impl GlobalBuilder for PekoCodegenContext {
                             global_ast.get_end().clone(),
                             format!(
                                 "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
-                                value.value_type.to_string(),
-                                global.variable_type.to_string()
+                                value.value_type,
+                                global.variable_type
                             ),
                             peko_core::diagnostics::DiagnosticType::Error,
                             global.file.clone(),

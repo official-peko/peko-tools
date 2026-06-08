@@ -7,8 +7,8 @@ use std::time::Instant;
 use peko_core::target::{OperatingSystem, PekoTarget};
 
 use crate::bundler::{self, BundleError};
-use crate::cli::reporting::{ProgressSink, Reporter};
 use crate::cli::CLIInfo;
+use crate::cli::reporting::{ProgressSink, Reporter};
 use crate::commands::platform_label;
 use crate::execution;
 use crate::project::PekoProject;
@@ -200,11 +200,11 @@ fn build_ui_project(
     // Generate the bundling config templates if they don't exist yet
     // (first build) or if --regenconfig was passed.
     let configfiles_dir = project.get_root().join(".peko/bundling/configfiles");
-    if !configfiles_dir.exists() || cli_info.flags.has_flag("regenconfig") {
-        if let Err(e) = bundler::regenerate_application_bundle_files(&project) {
-            reporter.error(format!("could not generate bundling config files: {e}"));
-            return ExitCode::FAILURE;
-        }
+    if (!configfiles_dir.exists() || cli_info.flags.has_flag("regenconfig"))
+        && let Err(e) = bundler::regenerate_application_bundle_files(&project)
+    {
+        reporter.error(format!("could not generate bundling config files: {e}"));
+        return ExitCode::FAILURE;
     }
 
     // Type-check the project's entrypoint up front so we can report
@@ -278,7 +278,7 @@ fn build_ui_project(
             run_bundler(cli_info, &mut project, &build_directory, platform, progress);
 
         if let Err(e) = bundle_result {
-            failures.push((platform.clone(), PlatformFailure::Build(e)));
+            failures.push((*platform, PlatformFailure::Build(e)));
             continue;
         }
 
@@ -286,10 +286,10 @@ fn build_ui_project(
             match run_signer(cli_info, &project, &build_directory, platform, reporter) {
                 Ok(true) => {}
                 Ok(false) => {
-                    failures.push((platform.clone(), PlatformFailure::Sign(None)));
+                    failures.push((*platform, PlatformFailure::Sign(None)));
                 }
                 Err(e) => {
-                    failures.push((platform.clone(), PlatformFailure::Sign(Some(e))));
+                    failures.push((*platform, PlatformFailure::Sign(Some(e))));
                 }
             }
         }

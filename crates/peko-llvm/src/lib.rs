@@ -14,6 +14,10 @@
 //!   `LLVMTypeRef` / `LLVMValueRef` values when working with the codegen
 //!   context directly.
 
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::arc_with_non_send_sync)]
+
 pub extern crate llvm_sys_180;
 
 pub mod codegen;

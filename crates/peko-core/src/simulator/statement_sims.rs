@@ -242,7 +242,7 @@ impl PekoValueSimulator for IfStatementAST {
 
         // Simulate the else block (if present) with the same
         // scope-stacking dance.
-        if self.else_body.is_some() {
+        if let Some(else_body) = &self.else_body {
             simulator_context
                 .previous_scoped_variables
                 .push(simulator_context.scoped_variables.clone());
@@ -262,7 +262,7 @@ impl PekoValueSimulator for IfStatementAST {
             let mut branch_exited = false;
             let mut branch_returned = false;
 
-            for peko_ast in &self.else_body.as_ref().unwrap().value {
+            for peko_ast in &else_body.value {
                 let value_type = peko_ast.simulate(simulator_context).get_type().to_string();
 
                 if !branch_exited
@@ -279,9 +279,7 @@ impl PekoValueSimulator for IfStatementAST {
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
                             peko_ast.get_start().clone(),
-                            self.else_body
-                                .as_ref()
-                                .unwrap()
+                            else_body
                                 .value
                                 .last()
                                 .unwrap()
@@ -1186,7 +1184,14 @@ impl PekoValueSimulator for ReturnAST {
 
         // Set the expected type so the return expression simulates with
         // the right inference context.
-        if simulator_context.current_return_type.is_some() {
+        if simulator_context.current_return_type.is_some()
+            && simulator_context
+                .current_return_type
+                .as_ref()
+                .unwrap()
+                .to_string()
+                != "void"
+        {
             simulator_context.current_expected_type_options =
                 Some(vec![simulator_context.current_return_type.clone().unwrap()]);
         } else if simulator_context.current_return_type.is_none()

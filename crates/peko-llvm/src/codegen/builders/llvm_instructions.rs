@@ -7,8 +7,6 @@
 //! Allowed callees: `LlvmTypeBuilder`. (Some methods need `get_llvm_type`
 //! to know the type to load through.)
 
-use std::ptr::null_mut;
-
 use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMTypeRef};
 use peko_core::types::PekoType;
@@ -102,14 +100,7 @@ impl LlvmInstructionBuilder for PekoCodegenContext {
     }
 
     fn goto_block_start(&mut self, block: LLVMBasicBlockRef) {
-        // unsafe { core::LLVMPositionBuilderAtEnd(self.llvm_builder, block) };
-
-        // // Insert a placeholder instruction so the builder has a valid
-        // // anchor even when the block starts out empty.
-        // let instr =
-        //     unsafe { core::LLVMBuildAlloca(self.llvm_builder, core::LLVMInt8Type(), c"".as_ptr()) };
-
-        if unsafe { core::LLVMGetFirstInstruction(block) } == null_mut() {
+        if unsafe { core::LLVMGetFirstInstruction(block) }.is_null() {
             unsafe { core::LLVMPositionBuilderAtEnd(self.llvm_builder, block) };
         } else {
             unsafe {
@@ -119,11 +110,6 @@ impl LlvmInstructionBuilder for PekoCodegenContext {
                 );
             }
         }
-
-        // Remove the placeholder now that the builder is positioned.
-        // unsafe {
-        //     core::LLVMInstructionEraseFromParent(instr);
-        // }
 
         self.current_basic_block = Some(block);
     }

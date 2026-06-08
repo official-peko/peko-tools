@@ -248,24 +248,19 @@ pub struct Reporter {
 
 /// How much of the reporter's output is actually printed. Set once at
 /// startup from the cli's global flags (`--quiet`, `--verbose`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Verbosity {
     /// Only errors and warnings are printed. `info` and `success` are
     /// suppressed.
     Quiet,
     /// Default level: errors, warnings, info, success, help.
+    #[default]
     Normal,
     /// Same as Normal at the moment, but reserved for future
     /// extra-noisy output. Reporter callers can branch on
     /// [`Reporter::is_verbose`] to skip emitting expensive details
     /// unless the user opted in.
     Verbose,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Verbosity::Normal
-    }
 }
 
 impl Default for Reporter {

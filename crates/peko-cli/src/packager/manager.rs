@@ -499,14 +499,14 @@ impl PackageManager {
         self.download_to_file(&zip_url, &zip_tmp).await?;
 
         // Clean any prior partial extraction.
-        if version_dir.exists() {
-            if let Err(source) = tokio::fs::remove_dir_all(&version_dir).await {
-                let _ = tokio::fs::remove_file(&zip_tmp).await;
-                return Err(PackageError::Io {
-                    path: version_dir,
-                    source,
-                });
-            }
+        if version_dir.exists()
+            && let Err(source) = tokio::fs::remove_dir_all(&version_dir).await
+        {
+            let _ = tokio::fs::remove_file(&zip_tmp).await;
+            return Err(PackageError::Io {
+                path: version_dir,
+                source,
+            });
         }
         if let Err(source) = tokio::fs::create_dir_all(&version_dir).await {
             let _ = tokio::fs::remove_file(&zip_tmp).await;
@@ -789,7 +789,7 @@ fn scan_version_folders(pkg_dir: &Path) -> Vec<String> {
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    out.sort_by(|a, b| parse_version(a).cmp(&parse_version(b)));
+    out.sort_by_key(|a| parse_version(a));
     out
 }
 

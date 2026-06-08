@@ -16,8 +16,8 @@ use std::process::ExitCode;
 
 use peko_core::packages::HostPackage;
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 use crate::packager::builder::PackageComponentBinaryBuilder;
 
 /// `Package.json` template used by `pkg new`. `{name}` is substituted
@@ -227,15 +227,15 @@ fn execute_build(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         .unwrap_or_default();
     let package_binary_output = cwd.join(format!("{}{version_suffix}.pkpkg", package.info.name));
 
-    if package_binary_output.exists() {
-        if let Err(e) = std::fs::remove_file(&package_binary_output) {
-            progress.finish_phase();
-            reporter.error(format!(
-                "could not remove existing {}: {e}",
-                package_binary_output.display()
-            ));
-            return ExitCode::FAILURE;
-        }
+    if package_binary_output.exists()
+        && let Err(e) = std::fs::remove_file(&package_binary_output)
+    {
+        progress.finish_phase();
+        reporter.error(format!(
+            "could not remove existing {}: {e}",
+            package_binary_output.display()
+        ));
+        return ExitCode::FAILURE;
     }
 
     let mut output = match std::fs::OpenOptions::new()

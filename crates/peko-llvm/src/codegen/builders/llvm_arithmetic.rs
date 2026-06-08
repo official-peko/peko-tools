@@ -280,16 +280,10 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                 PekoType::simple_type("bool"),
             ),
             NumericalOperation::Modulus => self
-                .call_named_function(
-                    "Runtime::Modulus".to_string(),
-                    vec![int1.clone(), int2.clone()],
-                )
+                .call_named_function("Runtime::Modulus", vec![int1.clone(), int2.clone()])
                 .unwrap(),
             NumericalOperation::Exponentiation => self
-                .call_named_function(
-                    "Runtime::Exponential".to_string(),
-                    vec![int1.clone(), int2.clone()],
-                )
+                .call_named_function("Runtime::Exponential", vec![int1.clone(), int2.clone()])
                 .unwrap(),
         }
     }
@@ -418,16 +412,10 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                 float2.value_type.clone(),
             ),
             NumericalOperation::Modulus => self
-                .call_named_function(
-                    "Runtime::Modulus".to_string(),
-                    vec![float1.clone(), float2.clone()],
-                )
+                .call_named_function("Runtime::Modulus", vec![float1.clone(), float2.clone()])
                 .unwrap(),
             NumericalOperation::Exponentiation => self
-                .call_named_function(
-                    "Runtime::Exponential".to_string(),
-                    vec![float1.clone(), float2.clone()],
-                )
+                .call_named_function("Runtime::Exponential", vec![float1.clone(), float2.clone()])
                 .unwrap(),
         }
     }
@@ -546,10 +534,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
             };
 
         let strcmp_result = self
-            .call_named_function(
-                "extern::strcmp".to_string(),
-                vec![string1.clone(), string2.clone()],
-            )
+            .call_named_function("extern::strcmp", vec![string1.clone(), string2.clone()])
             .unwrap();
         let zero = self.create_constant_int(0);
 

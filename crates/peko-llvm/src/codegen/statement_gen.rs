@@ -123,8 +123,8 @@ impl PekoValueBuilder for VariableReassignmentAST {
                     self.variable_value.get_end().clone(),
                     format!(
                         "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
-                        variable_value.get_type().to_string(),
-                        expected_type.to_string()
+                        variable_value.get_type(),
+                        expected_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -139,8 +139,8 @@ impl PekoValueBuilder for VariableReassignmentAST {
                     format!(
                         "cannot apply binary operator `{}` to values of type `{}` and `{}`. There is no operator overload that accepts these two operand types",
                         self.assignment_operator.clone().unwrap(),
-                        variable_reference.get_type().to_string(),
-                        variable_value.get_type().to_string()
+                        variable_reference.get_type(),
+                        variable_value.get_type()
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -156,13 +156,12 @@ impl PekoValueBuilder for VariableReassignmentAST {
         // its `onStateChanged` (but not inside a constructor; the
         // object is not yet fully initialized).
         if !codegen_context.in_constructor
-            && previous_accessed_state.is_some()
-            && previous_primary_object.is_some()
+            && let Some(accessed_state) = &previous_accessed_state
+            && let Some(primary_object) = &previous_primary_object
         {
-            let attribute_name_value =
-                codegen_context.create_string(previous_accessed_state.as_ref().unwrap());
+            let attribute_name_value = codegen_context.create_string(accessed_state);
             let _ = codegen_context.call_object_method(
-                previous_primary_object.as_ref().unwrap(),
+                primary_object,
                 "onStateChanged".to_owned(),
                 vec![attribute_name_value],
                 None,
@@ -244,8 +243,8 @@ impl PekoValueBuilder for ReturnAST {
                     self.return_value.clone().unwrap().get_end().clone(),
                     format!(
                         "cannot return value of type `{}`. The enclosing function's declared return type is `{}`, and the returned value's type is not compatible",
-                        return_value.value_type.to_string(),
-                        codegen_context.current_return_type.as_ref().unwrap().to_string()
+                        return_value.value_type,
+                        codegen_context.current_return_type.as_ref().unwrap()
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -310,7 +309,7 @@ impl PekoValueBuilder for IfStatementAST {
                             condition_body.condition.get_end().clone(),
                             format!(
                                 "condition cannot be of type `{}`, must be of type `bool`",
-                                condition.get_type().to_string()
+                                condition.get_type()
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -504,7 +503,7 @@ impl PekoValueBuilder for WhileLoopAST {
                         self.conditional_body.condition.get_end().clone(),
                         format!(
                             "condition cannot be of type `{}`, must be of type `bool`",
-                            condition.get_type().to_string()
+                            condition.get_type()
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -607,10 +606,7 @@ impl PekoValueBuilder for ForLoopAST {
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
                         self.iterator.get_start().clone(),
                         self.iterator.get_end().clone(),
-                        format!(
-                            "value of type `{}` is not iterable",
-                            iterable.get_type().to_string()
-                        ),
+                        format!("value of type `{}` is not iterable", iterable.get_type()),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
@@ -641,7 +637,7 @@ impl PekoValueBuilder for ForLoopAST {
                         self.iterator.get_end().clone(),
                         format!(
                             "iterator of type `{}` does not have a valid `inrange` method",
-                            iterable.get_type().to_string()
+                            iterable.get_type()
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -677,7 +673,7 @@ impl PekoValueBuilder for ForLoopAST {
                         self.iterator.get_end().clone(),
                         format!(
                             "iterator of type `{}` does not have a valid `next` method",
-                            iterable.get_type().to_string()
+                            iterable.get_type()
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),

@@ -136,9 +136,9 @@ pub fn dir_contains_extension(dir: &Path, allowed_extensions: Option<&[&str]>) -
         let entry = entry?;
         let path = entry.path();
 
-        if path.is_file() && extension_allowed(&path, allowed_extensions) {
-            return Ok(true);
-        } else if path.is_dir() && dir_contains_extension(&path, allowed_extensions)? {
+        if (path.is_file() && extension_allowed(&path, allowed_extensions))
+            || (path.is_dir() && dir_contains_extension(&path, allowed_extensions)?)
+        {
             return Ok(true);
         }
     }

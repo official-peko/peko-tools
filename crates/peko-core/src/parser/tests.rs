@@ -895,7 +895,7 @@ fn test_xml_parsing() {
     assert_eq!(attributes_tag.attributes.len(), 2);
 
     let mut attributes_to_find = vec!["attr1", "attr2"];
-    for (attribute_name, _) in &attributes_tag.attributes {
+    for attribute_name in attributes_tag.attributes.keys() {
         if attributes_to_find.contains(&attribute_name.as_str()) {
             attributes_to_find.remove(
                 attributes_to_find

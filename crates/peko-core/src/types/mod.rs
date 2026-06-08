@@ -92,7 +92,6 @@ impl PekoType {
     /// This constructor is intentionally low-level because every existing
     /// call site already builds the argument list inline during parsing.
     /// Higher-level helpers like [`PekoType::simple_type`] cover common cases.
-    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         module_names: Vec<String>,
@@ -649,7 +648,7 @@ impl PekoType {
             self.pointer_depth -= 1;
         } else if self.reference_depth > 0 {
             self.reference_depth -= 1;
-        } else if self.type_name == "Pointer" && self.generic_types.len() >= 1 {
+        } else if self.type_name == "Pointer" && !self.generic_types.is_empty() {
             *self = self.generic_types[0].clone();
         }
     }

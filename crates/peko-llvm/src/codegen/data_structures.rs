@@ -1041,10 +1041,9 @@ impl TopLevelModuleInfo {
         if matches!(
             target.operating_system,
             peko_core::target::OperatingSystem::Android | peko_core::target::OperatingSystem::Linux
-        ) {
-            if let Err(e) = patch_stackmaps_section_writable(output_path) {
-                eprintln!("warning: failed to patch .llvm_stackmaps: {e}");
-            }
+        ) && let Err(e) = patch_stackmaps_section_writable(output_path)
+        {
+            eprintln!("warning: failed to patch .llvm_stackmaps: {e}");
         }
 
         success
@@ -1190,11 +1189,7 @@ impl CodegenModule {
                 return next_parent.read().unwrap().top_level_info.clone();
             }
 
-            if next_parent.read().unwrap().parent.is_none() {
-                return None;
-            }
-
-            let parent = next_parent.read().unwrap().parent.as_ref().unwrap().clone();
+            let parent = next_parent.read().unwrap().parent.as_ref()?.clone();
             next_parent = parent;
         }
     }

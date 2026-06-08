@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use serde_json::Value;
 
 use crate::bundler::signing;
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 use crate::project::PekoProject;
 
 /// Roles whose password is stored in the keychain for each platform.
@@ -88,10 +88,10 @@ fn read_password(cli_info: &CLIInfo) -> Option<String> {
     if let Some(password) = cli_info.flags.get_flag("password") {
         return Some(password);
     }
-    if let Some(path) = cli_info.flags.get_flag("password-file") {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            return Some(contents.trim_end_matches(['\n', '\r']).to_string());
-        }
+    if let Some(path) = cli_info.flags.get_flag("password-file")
+        && let Ok(contents) = std::fs::read_to_string(&path)
+    {
+        return Some(contents.trim_end_matches(['\n', '\r']).to_string());
     }
     None
 }
@@ -212,17 +212,17 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         }
     }
     for (flag, role) in optional {
-        if let Some(path) = cli_info.flags.get_flag(flag) {
-            if !install_file(
+        if let Some(path) = cli_info.flags.get_flag(flag)
+            && !install_file(
                 reporter,
                 root,
                 &platform,
                 role,
                 &PathBuf::from(path),
                 &mut registry,
-            ) {
-                return ExitCode::FAILURE;
-            }
+            )
+        {
+            return ExitCode::FAILURE;
         }
     }
 
@@ -337,11 +337,11 @@ fn remove(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str)
 
     // Delete the platform key directory.
     let dir = signing::platform_dir(root, &platform);
-    if dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            reporter.error(format!("could not remove {}: {e}", dir.display()));
-            return ExitCode::FAILURE;
-        }
+    if dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        reporter.error(format!("could not remove {}: {e}", dir.display()));
+        return ExitCode::FAILURE;
     }
 
     // Drop the registry entry.

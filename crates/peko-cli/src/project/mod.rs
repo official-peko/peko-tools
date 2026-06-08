@@ -297,7 +297,7 @@ impl ProjectIcon {
         );
 
         writer
-            .write(
+            .write_all(
                 carwriter::CarWriter::new(carbinary)
                     .create_binary()
                     .as_slice(),

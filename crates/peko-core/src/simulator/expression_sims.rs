@@ -914,7 +914,9 @@ impl PekoValueSimulator for FunctionCallAST {
             // original: the original `!arguments.len() == 1` parsed
             // as a bitwise-NOT and never fired correctly; corrected
             // to `arguments.len() != 1`.
-            } else if function_name.is_some() && function_name.unwrap().value == "Error" {
+            } else if let Some(function_name_value) = function_name
+                && function_name_value.value == "Error"
+            {
                 if arguments.len() != 1
                     || !simulator_context.types_similar(
                         &arguments[0].get_type(),
@@ -1105,9 +1107,12 @@ impl PekoValueSimulator for FunctionCallAST {
                             if self.arguments.len() > method_option.arguments.len()
                                 && method_option.var_args_type.is_some()
                             {
-                                for i in method_option.arguments.len()..self.arguments.len() {
-                                    argument_type_options[i]
-                                        .push(method_option.var_args_type.clone().unwrap());
+                                for arg in argument_type_options
+                                    .iter_mut()
+                                    .take(self.arguments.len())
+                                    .skip(method_option.arguments.len())
+                                {
+                                    arg.push(method_option.var_args_type.clone().unwrap());
                                 }
                             }
                         }
@@ -1402,24 +1407,20 @@ impl PekoValueSimulator for FunctionCallAST {
             // Fallback: try to fill remaining generics from the
             // expected type (e.g. `var x: Array<int> = Array()` —
             // the `int` is inferred from the binding's type).
-            let find_expected_type = if needed_generics_count == 0
-                || simulator_context.current_expected_type_options.is_none()
+            let find_expected_type = if let Some(current_expected_types) =
+                &simulator_context.current_expected_type_options
+                && needed_generics_count > 0
             {
-                None
+                current_expected_types.iter().find(|expected| {
+                    expected.type_name == function_base_name
+                        && expected.generic_types.len() == needed_generics_count
+                })
             } else {
-                simulator_context
-                    .current_expected_type_options
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .find(|expected| {
-                        expected.type_name == function_base_name
-                            && expected.generic_types.len() == needed_generics_count
-                    })
+                None
             };
 
-            if find_expected_type.is_some() {
-                function_generics = find_expected_type.unwrap().generic_types.clone();
+            if let Some(find_expected_type) = find_expected_type {
+                function_generics = find_expected_type.generic_types.clone();
             } else if needed_generics_count == 0 {
                 needed_generics.iter().for_each(|generic_typename| {
                     function_generics.push(collected_generic_types[generic_typename].clone());
@@ -1779,18 +1780,16 @@ impl PekoValueSimulator for FunctionCallAST {
 
         // Variadic-argument type-check: if extras were passed, they
         // all need to fit into an Array<varargs_type>.
-        if function_var_args_type.is_some()
+        if let Some(function_var_args) = &function_var_args_type
             && function_type.generic_types.len() - 1 < arguments.len()
         {
             let mut variable_arguments = Vec::new();
-            for i in (function_type.generic_types.len() - 1)..arguments.len() {
-                variable_arguments.push(arguments[i].clone());
+            for arg in arguments.iter().skip(function_type.generic_types.len() - 1) {
+                variable_arguments.push(arg.clone());
             }
 
-            let create_array = simulator_context.create_standard_array(
-                function_var_args_type.as_ref().unwrap(),
-                variable_arguments,
-            );
+            let create_array =
+                simulator_context.create_standard_array(function_var_args, variable_arguments);
 
             if create_array.is_none() {
                 let index = function_type.generic_types.len() - 1;
@@ -1802,7 +1801,7 @@ impl PekoValueSimulator for FunctionCallAST {
                         self.arguments.last().unwrap().1.get_end().clone(),
                         format!(
                             "variadic arguments have incorrect types. All variadic arguments must have type `{}`",
-                            function_var_args_type.as_ref().unwrap(),
+                            function_var_args,
                         ),
                         diagnostics::DiagnosticType::Error,
                         simulator_context.get_current_file(),
@@ -2132,8 +2131,12 @@ impl PekoValueSimulator for ObjectConstructionAST {
             if self.arguments.len() > method_option.arguments.len()
                 && method_option.var_args_type.is_some()
             {
-                for i in method_option.arguments.len()..self.arguments.len() {
-                    argument_type_options[i].push(method_option.var_args_type.clone().unwrap());
+                for type_option in argument_type_options
+                    .iter_mut()
+                    .take(self.arguments.len())
+                    .skip(method_option.arguments.len())
+                {
+                    type_option.push(method_option.var_args_type.clone().unwrap());
                 }
             }
         }
@@ -2186,7 +2189,15 @@ impl PekoValueSimulator for ObjectConstructionAST {
             );
             simulator_context.module_context.step_forward(post_stack);
 
-            if constructor_choice.is_none() {
+            if let Some(constructor_choice_value) = &constructor_choice {
+                for (argument_name, argument_info) in &constructor_choice_value.arguments {
+                    function_call_info
+                        .write()
+                        .unwrap()
+                        .signature_arguments
+                        .insert(argument_name.clone(), argument_info.argument_type.clone());
+                }
+            } else {
                 // Fall back to the diagnostic-recovery selector so
                 // the IDE can still surface a signature.
                 let best_signature_choice = simulator_context.choose_most_similar_function(
@@ -2224,14 +2235,6 @@ impl PekoValueSimulator for ObjectConstructionAST {
                         diagnostics::DiagnosticType::Error,
                         simulator_context.get_current_file(),
                     ));
-            } else {
-                for (argument_name, argument_info) in &constructor_choice.unwrap().arguments {
-                    function_call_info
-                        .write()
-                        .unwrap()
-                        .signature_arguments
-                        .insert(argument_name.clone(), argument_info.argument_type.clone());
-                }
             }
         } else {
             // No declared constructor — use the implicit
@@ -2606,9 +2609,12 @@ impl PekoValueSimulator for ObjectAccessAST {
                     if function_call.arguments.len() > method_option.arguments.len()
                         && method_option.var_args_type.is_some()
                     {
-                        for i in method_option.arguments.len()..function_call.arguments.len() {
-                            argument_type_options[i]
-                                .push(method_option.var_args_type.clone().unwrap());
+                        for arg_option in argument_type_options
+                            .iter_mut()
+                            .take(function_call.arguments.len())
+                            .skip(method_option.arguments.len())
+                        {
+                            arg_option.push(method_option.var_args_type.clone().unwrap());
                         }
                     }
                 }
@@ -3007,7 +3013,7 @@ impl PekoValueSimulator for UnaryExpressionAST {
                             self.operand.get_end().clone(),
                             format!(
                                 "cannot dereference value of type `{}` with the unary `*` operator. Only pointer or reference types can be dereferenced",
-                                value_type.to_string(),
+                                value_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file().to_path_buf(),

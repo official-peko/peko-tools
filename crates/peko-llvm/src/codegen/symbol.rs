@@ -128,8 +128,9 @@ impl SymbolName {
             result.push_str(generic_separator_right);
         }
 
-        if mangled && self.argument_types.is_some() {
-            let argument_types = self.argument_types.as_ref().unwrap();
+        if let Some(argument_types) = &self.argument_types
+            && mangled
+        {
             result.push_str("$$");
             for (idx, argtype) in argument_types.iter().enumerate() {
                 result.push_str(&argtype.to_mangled_string());

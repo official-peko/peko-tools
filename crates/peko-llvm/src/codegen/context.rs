@@ -358,11 +358,8 @@ impl
                     );
                 }
 
-                if function.imported_from.is_some() {
-                    function
-                        .imported_from
-                        .as_mut()
-                        .unwrap()
+                if let Some(imported_from) = function.imported_from.as_mut() {
+                    imported_from
                         .write()
                         .unwrap()
                         .functions
@@ -593,28 +590,21 @@ impl
 
                     let mut parent_method: Option<CodegenValue> = None;
                     let mut parent_idx: i32 = -1;
-                    if option.parent_class_info.is_some()
-                        && option.parent_class_info.as_ref().unwrap().0.to_string()
-                            != class_reference.class_type.to_string()
+                    if let Some(parent_class_info) = &&option.parent_class_info
+                        && parent_class_info.0.to_string() != class_reference.class_type.to_string()
                     {
-                        for (parent_option_idx, parent_option) in option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .1
-                            .read()
-                            .unwrap()
-                            .classes[&option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .0
-                            .declutter()
-                            .to_string()]
-                            .main_virtual_table
-                            .methods[method_name]
-                            .iter()
-                            .enumerate()
+                        for (parent_option_idx, parent_option) in
+                            parent_class_info.1.read().unwrap().classes[&option
+                                .parent_class_info
+                                .as_ref()
+                                .unwrap()
+                                .0
+                                .declutter()
+                                .to_string()]
+                                .main_virtual_table
+                                .methods[method_name]
+                                .iter()
+                                .enumerate()
                         {
                             if !self.types_equal(&parent_option.return_type, &option.return_type)
                                 || parent_option.arguments.len() != option.arguments.len()
@@ -794,7 +784,7 @@ impl
             if rhs.value_type.is_datatype() {
                 let cast_to_datatype = self.call_object_method(
                     &lhs,
-                    format!("[operator to_{}]", rhs.value_type.to_string()),
+                    format!("[operator to_{}]", rhs.value_type),
                     Vec::new(),
                     None,
                 );
@@ -844,7 +834,7 @@ impl
             || rhs.value_type.to_string() == "string")
             || self
                 .get_class_by_type(&rhs.value_type)
-                .map_or(false, |class| {
+                .is_some_and(|class| {
                     class
                         .main_virtual_table
                         .methods
@@ -877,10 +867,7 @@ impl
             let lhs_opaque = lhs.value_type.to_string() == "opaque";
             let rhs_opaque = rhs.value_type.to_string() == "opaque";
 
-            if (lhs_managed || rhs_managed)
-                && (lhs_managed || lhs_opaque)
-                && (rhs_managed || rhs_opaque)
-            {
+            if (lhs_managed && rhs_opaque) || (lhs_opaque && rhs_managed) {
                 return Some(self.build_pointer_comparison(&lhs, &rhs, operator_str == "=="));
             }
         }
@@ -986,7 +973,7 @@ impl
             None => {
                 return Err(format!(
                     "could not find object type '{}'",
-                    object.value_type.to_string()
+                    object.value_type
                 ));
             }
         };
@@ -1002,8 +989,7 @@ impl
         } else {
             return Err(format!(
                 "could not find method type '{}' on object of type '{}'",
-                method_name_str,
-                object.value_type.to_string()
+                method_name_str, object.value_type
             ));
         };
 
@@ -1069,8 +1055,7 @@ impl
         if method.visibility.private && self.current_this.is_none() {
             return Err(format!(
                 "cannot access private method '{}' on object of type '{}'",
-                method_name_str,
-                object.value_type.to_string()
+                method_name_str, object.value_type
             ));
         }
 
@@ -1099,9 +1084,7 @@ impl
                     None => {
                         return Err(format!(
                             "incorrect argument types for method '{}' (expected '{}' but got '{}')",
-                            method_name_str,
-                            arg.argument_type.to_string(),
-                            argument.value_type.to_string()
+                            method_name_str, arg.argument_type, argument.value_type
                         ));
                     }
                 };
@@ -1110,21 +1093,20 @@ impl
 
             // Variadic tail: collect remaining positional args into the
             // var-args array.
-            if method.var_args_type.is_some() {
+            if let Some(var_args_type) = &method.var_args_type {
                 let mut var_arguments = Vec::new();
-                for i in method.arguments.len()..arguments.len() {
-                    var_arguments.push(arguments[i].clone());
+                for arg in arguments.iter().skip(method.arguments.len()) {
+                    var_arguments.push(arg.clone());
                 }
 
-                let create_array = self
-                    .create_standard_array(method.var_args_type.as_ref().unwrap(), var_arguments);
+                let create_array = self.create_standard_array(var_args_type, var_arguments);
 
                 let create_array = match create_array {
                     Some(value) => value,
                     None => {
                         return Err(format!(
                             "could not create variable arguments of type '{}'",
-                            method.var_args_type.clone().unwrap().to_string()
+                            var_args_type
                         ));
                     }
                 };
@@ -1226,13 +1208,12 @@ impl
         self.build_managed_store(&get_attribute_pointer, &box_value);
 
         if !self.in_constructor
-            && previous_accessed_state.is_some()
-            && previous_primary_object.is_some()
+            && let (Some(accessed_state), Some(primary_object)) =
+                (&previous_accessed_state, previous_primary_object)
         {
-            let attribute_name_value =
-                self.create_string(previous_accessed_state.as_ref().unwrap());
+            let attribute_name_value = self.create_string(accessed_state);
             let _ = self.call_object_method(
-                &previous_primary_object.unwrap(),
+                &primary_object,
                 "onStateChanged".to_owned(),
                 vec![attribute_name_value],
                 None,
@@ -1253,7 +1234,7 @@ impl
             None => {
                 return Err(format!(
                     "could not find object type '{}'",
-                    object.value_type.to_string()
+                    object.value_type
                 ));
             }
         };
@@ -1263,8 +1244,7 @@ impl
         if !class.attributes.contains_key(&attribute_name_str) {
             return Err(format!(
                 "object of type '{}' does not have attribute '{}'",
-                attribute_name_str,
-                object.value_type.to_string()
+                attribute_name_str, object.value_type
             ));
         }
 
@@ -1273,8 +1253,7 @@ impl
         {
             return Err(format!(
                 "cannot access private attribute '{}' of object of type '{}'",
-                attribute_name_str,
-                object.value_type.to_string()
+                attribute_name_str, object.value_type
             ));
         }
 
@@ -1314,7 +1293,7 @@ impl
             if self
                 .call_object_method(
                     &map_object,
-                    "insert".to_string(),
+                    "insert",
                     vec![key.clone(), value.clone()],
                     None,
                 )
@@ -1339,7 +1318,7 @@ impl
 
         for value in &values {
             if self
-                .call_object_method(&array_object, "push".to_string(), vec![value.clone()], None)
+                .call_object_method(&array_object, "push", vec![value.clone()], None)
                 .is_err()
             {
                 return None;
@@ -1362,7 +1341,7 @@ impl
             && self
                 .call_object_method(
                     &allocate_object,
-                    "constructor".to_string(),
+                    "constructor",
                     constructor_arguments.clone(),
                     None,
                 )

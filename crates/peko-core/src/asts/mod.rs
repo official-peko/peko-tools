@@ -47,6 +47,7 @@ pub struct PlaceholderAST {
 /// expressions, statements, declarations, with [`PekoAST::Placeholder`]
 /// last.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum PekoAST {
     // Value ASTs
     Char(values::CharAST),

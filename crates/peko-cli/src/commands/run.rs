@@ -21,13 +21,13 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use peko_core::target::PekoTarget;
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 use crate::commands::toolchain_sysroot;
 use crate::execution::{self, incremental::ProjectIncrementalMap};
 use crate::project::PekoProject;
@@ -174,13 +174,14 @@ fn run_ui_project(
 
     // If on-disk incremental data was unreadable but the directory
     // exists, scrub it so the next build starts fresh.
-    if incremental_info.is_none() && incremental_run_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&incremental_run_dir) {
-            reporter.warning(format!(
-                "could not remove stale incremental dir {}: {e}",
-                incremental_run_dir.display()
-            ));
-        }
+    if incremental_info.is_none()
+        && incremental_run_dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&incremental_run_dir)
+    {
+        reporter.warning(format!(
+            "could not remove stale incremental dir {}: {e}",
+            incremental_run_dir.display()
+        ));
     }
 
     let project_style_directory = incremental_run_dir.join("styles");
@@ -214,7 +215,7 @@ fn run_ui_project(
 
     let (preloaded_modules, preloaded_libs) = match execution::load_required_packages(
         cli_info.get_peko_root(),
-        default_target.clone(),
+        default_target,
         Some(project_style_directory.clone()),
         Some(asset_debug_directory.clone()),
     ) {
@@ -230,7 +231,7 @@ fn run_ui_project(
     let initial_compile = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         &mut project,
-        default_target.clone(),
+        default_target,
         incremental_run_dir.clone(),
         Some(appserver_executable.clone()),
         false,
@@ -251,13 +252,13 @@ fn run_ui_project(
         }
     };
 
-    if let Some(d) = &diagnostics {
-        if d.get_error_count() > 0 {
-            progress.finish_phase();
-            reporter.report_diagnostics(d);
-            reporter.error("initial run failed due to compile errors");
-            return ExitCode::FAILURE;
-        }
+    if let Some(d) = &diagnostics
+        && d.get_error_count() > 0
+    {
+        progress.finish_phase();
+        reporter.report_diagnostics(d);
+        reporter.error("initial run failed due to compile errors");
+        return ExitCode::FAILURE;
     }
 
     // ---- Compile all the SCSS styles once -------------------------------
@@ -311,7 +312,7 @@ fn run_ui_project(
 
     let apprender_outcome = match execution::compile(
         cli_info.get_peko_root(),
-        default_target.clone(),
+        default_target,
         hotreloadapp_peko_path.clone(),
         project.get_root().to_path_buf(),
         apprender_object.clone(),
@@ -332,7 +333,7 @@ fn run_ui_project(
 
     let apprender_executable = incremental_run_dir.join("apprender");
     peko_llvm::linker::lld_link(
-        default_target.clone(),
+        default_target,
         apprender_object,
         apprender_outcome.codegen_context.files_to_link.clone(),
         sysroot.clone(),
@@ -499,7 +500,7 @@ fn run_ui_project(
             let rebuild = execution::incremental::compile_project(
                 cli_info.get_peko_root(),
                 &mut project,
-                default_target.clone(),
+                default_target,
                 incremental_run_dir.clone(),
                 Some(new_appserver_executable.clone()),
                 false,

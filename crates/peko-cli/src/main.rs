@@ -3,6 +3,7 @@
 //! Console interface for the Pekoscript toolchain. Argument parsing,
 //! global flag handling, and dispatch to per-subcommand modules under
 //! `commands/`.
+#![allow(clippy::too_many_arguments)]
 
 pub mod bundler;
 pub mod cli;

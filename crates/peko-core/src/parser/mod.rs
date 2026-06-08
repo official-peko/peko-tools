@@ -33,6 +33,7 @@
 //!   declaration, or expression including any leading visibility modifiers
 //!   and doc-comments.
 //! * [`PekoParser::secondary_parse`](#) (private): internal helper that
+//!
 //! parses simpler ASTs without operator-precedence handling.
 //! * [`PekoParser::parse_expression`]: operator-precedence expression
 //!   parser (modified shunting-yard).
@@ -213,6 +214,18 @@ pub struct PekoParser {
     /// diagnostic and position.
     pub file: PathBuf,
 }
+
+type FunctionArgumentsInfo = (
+    Vec<types::PekoType>,
+    Vec<(Option<PositionedValue<String>>, PekoAST)>,
+    PositionData,
+);
+type FunctionHeaderInfo = (
+    IndexMap<PositionedValue<String>, DeclarationArgumentData>,
+    Option<types::PekoType>,
+    Option<types::PekoType>,
+    PositionedValue<String>,
+);
 
 impl PekoParser {
     /// Constructs a new parser over `tokens` from the file at `file`.
@@ -454,8 +467,8 @@ impl PekoParser {
                 let mut closing_braces = 0;
                 let mut source_code = String::new();
 
-                while !self.tokens.finished()
-                    && !(self.tokens.current_token().equals("}") && closing_braces == 0)
+                while !(self.tokens.finished()
+                    || self.tokens.current_token().equals("}") && closing_braces == 0)
                     && self.tokens.current_token().equals("///")
                 {
                     while self.tokens.current_token().equals("///")
@@ -485,9 +498,9 @@ impl PekoParser {
 
                     self.tokens.increase_index(); // eat the '///'
 
-                    while !self.tokens.finished()
-                        && !self.tokens.current_token().has_trailing_newline()
-                        && !(self.tokens.current_token().equals("}") && closing_braces == 0)
+                    while !(self.tokens.finished()
+                        || self.tokens.current_token().has_trailing_newline()
+                        || self.tokens.current_token().equals("}") && closing_braces == 0)
                     {
                         if self.tokens.current_token().equals("{") {
                             closing_braces += 1;
@@ -813,13 +826,7 @@ impl PekoParser {
     /// Returns `(generic types, arguments, closing-paren end position)`. Each
     /// argument is paired with an optional keyword name (`Some` if the
     /// argument was passed as `name = value`, `None` otherwise).
-    pub fn parse_arguments(
-        &mut self,
-    ) -> (
-        Vec<types::PekoType>,
-        Vec<(Option<PositionedValue<String>>, PekoAST)>,
-        PositionData,
-    ) {
+    pub fn parse_arguments(&mut self) -> FunctionArgumentsInfo {
         // Optional `<T, U, ...>` generic argument list.
         let mut function_generics = Vec::new();
         if self.tokens.current_token().equals("<") {
@@ -885,15 +892,7 @@ impl PekoParser {
     /// header still parses for recovery.
     ///
     /// Returns `(arguments, return_type, varargs_type, varargs_name)`.
-    pub fn parse_function_header(
-        &mut self,
-        parse_varargs: bool,
-    ) -> (
-        IndexMap<PositionedValue<String>, DeclarationArgumentData>,
-        Option<types::PekoType>,
-        Option<types::PekoType>,
-        PositionedValue<String>,
-    ) {
+    pub fn parse_function_header(&mut self, parse_varargs: bool) -> FunctionHeaderInfo {
         let mut varargs_type = None;
         let mut varargs_name = String::new();
 
@@ -2488,10 +2487,10 @@ impl PekoParser {
         let attributes_start = self.get_current_position();
 
         // Attributes and events, terminated by `>` or `/>`.
-        while !self.tokens.finished()
-            && !(self.tokens.current_token().equals(">")
-                || (self.tokens.current_token().equals("/")
-                    && self.tokens.get_token_forward(1).equals(">")))
+        while !(self.tokens.finished()
+            || self.tokens.current_token().equals(">")
+            || self.tokens.current_token().equals("/")
+                && self.tokens.get_token_forward(1).equals(">"))
         {
             let mut errd = false;
 

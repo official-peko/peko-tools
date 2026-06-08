@@ -141,20 +141,14 @@ impl LlvmTypeBuilder for PekoCodegenContext {
 
         // Function types: collect argument LLVM types, then return type,
         // then emit `LLVMFunctionType`.
-        if fully_qualified_type.function_type.is_some() {
+        if let Some(function_type) = &fully_qualified_type.function_type {
             let mut argument_types = Vec::new();
             for argument_type in &fully_qualified_type.generic_types {
                 let argument_llvm_type = self.get_llvm_type(argument_type)?;
                 argument_types.push(argument_llvm_type);
             }
 
-            let return_type = self.get_llvm_type(
-                fully_qualified_type
-                    .function_type
-                    .as_ref()
-                    .unwrap()
-                    .as_ref(),
-            )?;
+            let return_type = self.get_llvm_type(function_type)?;
 
             let function_type = unsafe {
                 core::LLVMFunctionType(

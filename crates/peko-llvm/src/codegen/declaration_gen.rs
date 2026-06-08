@@ -31,14 +31,11 @@ impl PekoValueBuilder for NewVariableAST {
         // Set the expected-type hint for type inference if this
         // declaration has an explicit type.
         let previous_expected_type = codegen_context.current_expected_type_options.clone();
-        if self.variable_type.is_some()
-            && codegen_context.type_exists(self.variable_type.as_ref().unwrap())
+        if let Some(variable_type) = &self.variable_type
+            && codegen_context.type_exists(variable_type)
         {
-            codegen_context.current_expected_type_options = Some(vec![
-                codegen_context
-                    .expand_type(self.variable_type.as_ref().unwrap())
-                    .unwrap(),
-            ]);
+            codegen_context.current_expected_type_options =
+                Some(vec![codegen_context.expand_type(variable_type).unwrap()]);
         }
 
         // Local-scope path: stack-alloc, store, and add to the scope.
@@ -67,12 +64,12 @@ impl PekoValueBuilder for NewVariableAST {
                         self.variable_type.clone().unwrap().end_position.clone(),
                         format!(
                             "type `{}` is not defined. Check the type name and that the type is in scope",
-                            self.variable_type.clone().unwrap().to_string()
+                            self.variable_type.clone().unwrap()
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
-            } else if self.variable_type.is_some() {
+            } else if let Some(variable_type) = &self.variable_type {
                 let (previous_line, previous_file) = codegen_context.track_call_position(
                     self.variable_value
                         .as_ref()
@@ -83,8 +80,7 @@ impl PekoValueBuilder for NewVariableAST {
                     self.variable_value.as_ref().get_start().line,
                 );
 
-                let value_boxed = codegen_context
-                    .box_value_to_type(self.variable_type.as_ref().unwrap(), &variable_value);
+                let value_boxed = codegen_context.box_value_to_type(variable_type, &variable_value);
 
                 codegen_context.reset_call_position(&previous_line, &previous_file);
 
@@ -97,8 +93,8 @@ impl PekoValueBuilder for NewVariableAST {
                                 self.variable_value.get_end().clone(),
                                 format!(
                                     "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
-                                    variable_value.value_type.to_string(),
-                                    self.variable_type.clone().unwrap().to_string()
+                                    variable_value.value_type,
+                                    variable_type
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -170,7 +166,7 @@ impl PekoValueBuilder for NewVariableAST {
                         self.variable_type.clone().unwrap().end_position.clone(),
                         format!(
                         "type `{}` is not defined. Check the type name and that the type is in scope",
-                        self.variable_type.clone().unwrap().to_string()
+                        self.variable_type.clone().unwrap()
                     ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -304,8 +300,8 @@ impl PekoValueBuilder for FunctionDeclarationAST {
 
         // --- Collect function type info ---
 
-        let return_type = if self.return_type.is_some() {
-            let expanded_type = codegen_context.expand_type(self.return_type.as_ref().unwrap());
+        let return_type = if let Some(return_type) = &self.return_type {
+            let expanded_type = codegen_context.expand_type(return_type);
 
             let ret_ty = match expanded_type {
                 Some(t) => t,
@@ -317,7 +313,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                             self.return_type.clone().unwrap().end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                self.return_type.clone().unwrap().to_string(),
+                                return_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -348,7 +344,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                             arg_declaration.argument_type.end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                arg_declaration.argument_type.to_string(),
+                                arg_declaration.argument_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -368,10 +364,8 @@ impl PekoValueBuilder for FunctionDeclarationAST {
         }
 
         // Append the var-args parameter if present.
-        if self.varargs_type.is_some() {
-            let varargs_array_type = if !codegen_context
-                .type_exists(self.varargs_type.as_ref().unwrap())
-            {
+        if let Some(varargs_type) = &self.varargs_type {
+            let varargs_array_type = if !codegen_context.type_exists(varargs_type) {
                 codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -379,24 +373,21 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                         self.varargs_type.clone().unwrap().end_position.clone(),
                         format!(
                             "type `{}` is not defined. Check the type name and that the type is in scope",
-                            self.varargs_type.clone().unwrap().to_string(),
+                            varargs_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
 
                 PekoType::from_string(
-                    format!("standard::Array<{}>", PekoType::error_type().to_string()).as_str(),
+                    format!("standard::Array<{}>", PekoType::error_type()).as_str(),
                     codegen_context.get_current_file(),
                 )
             } else {
                 PekoType::from_string(
                     format!(
                         "standard::Array<{}>",
-                        codegen_context
-                            .expand_type(self.varargs_type.as_ref().unwrap())
-                            .unwrap()
-                            .to_string()
+                        codegen_context.expand_type(varargs_type).unwrap()
                     )
                     .as_str(),
                     codegen_context.get_current_file(),
@@ -539,19 +530,13 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                     self.visibility.clone(),
                     return_type.clone(),
                     arguments.clone(),
-                    if self.varargs_type.is_some() {
-                        Some(
-                            if codegen_context.type_exists(self.varargs_type.as_ref().unwrap()) {
-                                codegen_context
-                                    .expand_type(self.varargs_type.as_ref().unwrap())
-                                    .unwrap()
-                            } else {
-                                PekoType::error_type()
-                            },
-                        )
-                    } else {
-                        None
-                    },
+                    self.varargs_type.as_ref().map(|varargs_type| {
+                        if codegen_context.type_exists(varargs_type) {
+                            codegen_context.expand_type(varargs_type).unwrap()
+                        } else {
+                            PekoType::error_type()
+                        }
+                    }),
                     codegen_context.qualify_value_to_current(function_value),
                     0,
                     function_symbol_name,
@@ -651,7 +636,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                     format!(
                         "function `{}` does not return on all paths. The declared return type is `{}`, but at least one execution path can reach the end of the function without returning",
                         self.function_name.value,
-                        self.return_type.clone().unwrap().to_string()
+                        self.return_type.clone().unwrap()
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -865,7 +850,7 @@ impl PekoValueBuilder for ClosureAST {
                             declared.end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                declared.to_string(),
+                                declared,
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -891,7 +876,7 @@ impl PekoValueBuilder for ClosureAST {
                         argument_declaration.argument_type.end_position.clone(),
                         format!(
                             "type `{}` is not defined. Check the type name and that the type is in scope",
-                            argument_declaration.argument_type.to_string()
+                            argument_declaration.argument_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -1017,7 +1002,7 @@ impl PekoValueBuilder for ClosureAST {
                     self.end.clone(),
                     format!(
                         "closure does not return, expected to return a value of type `{}`",
-                        return_type.to_string()
+                        return_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -1192,10 +1177,8 @@ impl PekoValueBuilder for ClassAST {
         let mut class_attributes = IndexMap::new();
         let mut parent_class = None;
 
-        let main_virtual_table_struct_type = codegen_context.create_named_struct(format!(
-            "{}::<<main_virtual_table>>",
-            class_type.to_string()
-        ));
+        let main_virtual_table_struct_type =
+            codegen_context.create_named_struct(format!("{}::<<main_virtual_table>>", class_type));
 
         // Only add the vtable slot when the class actually has methods
         // or inherits from a class that does. The vtable is a managed
@@ -1226,7 +1209,7 @@ impl PekoValueBuilder for ClassAST {
                             self.derives_from[0].end_position.clone(),
                             format!(
                                 "cannot find class `{}`. Check the class name, that the class is declared, and that it is imported",
-                                self.derives_from[0].to_string()
+                                self.derives_from[0]
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1444,7 +1427,7 @@ impl PekoValueBuilder for ClassAST {
                                 argument_declaration.argument_type.end_position.clone(),
                                 format!(
                                     "type `{}` is not defined. Check the type name and that the type is in scope",
-                                    argument_declaration.argument_type.to_string(),
+                                    argument_declaration.argument_type,
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -1503,7 +1486,7 @@ impl PekoValueBuilder for ClassAST {
                             class_method.get_return_type().end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                class_method.get_return_type().to_string(),
+                                class_method.get_return_type(),
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1600,8 +1583,8 @@ impl PekoValueBuilder for ClassAST {
                 codegen_context.qualify_value_to_current(method_function),
                 // Override: reuse the parent's vtable index. New method:
                 // assign the next available slot.
-                if method_base_info.is_some() {
-                    method_base_info.as_ref().unwrap().1.virtual_table_index
+                if let Some(method_base) = &method_base_info {
+                    method_base.1.virtual_table_index
                 } else {
                     let mut current_methods_length = 0;
                     for (_, method_list) in &codegen_context
@@ -1647,7 +1630,7 @@ impl PekoValueBuilder for ClassAST {
                     .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
-                    .methods[&class_method.get_info().name.value][base_idx as usize] =
+                    .methods[&class_method.get_info().name.value][base_idx] =
                     codegen_function.clone();
             } else {
                 codegen_context
@@ -1719,7 +1702,7 @@ impl PekoValueBuilder for ClassAST {
                             attribute.attribute_type.end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                attribute.attribute_type.to_string(),
+                                attribute.attribute_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1921,7 +1904,7 @@ impl PekoValueBuilder for ClassAST {
                     CodegenVariable::new(
                         VisibilityData::open_visibility(),
                         PekoType::from_string(
-                            format!("Array<{}>", varargs_type.to_string()).as_str(),
+                            format!("Array<{}>", varargs_type).as_str(),
                             codegen_context.get_current_file(),
                         ),
                         qualified_varargs,
@@ -2101,7 +2084,7 @@ impl PekoValueBuilder for ClassAST {
                         format!(
                             "function `{}` does not return on all paths. The declared return type is `{}`, but at least one execution path can reach the end of the function without returning",
                             class_method.get_info().name.value,
-                            class_method.get_return_type().to_string()
+                            class_method.get_return_type()
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),

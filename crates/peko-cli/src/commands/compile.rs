@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use peko_core::target::{Architecture, OperatingSystem, PekoTarget};
 use peko_llvm::codegen::builders::modules::ModuleManager;
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 use crate::commands::toolchain_sysroot;
 use crate::execution;
 use crate::project::PekoProject;
@@ -77,11 +77,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     // The `console` flag on PekoTarget controls Windows entrypoint
     // selection (WinMain vs. main). For `compile`, default to console
     // mode - UI apps go through `build`, not `compile`.
-    let output_target = PekoTarget::new(
-        target_operating_system.clone(),
-        target_architecture.clone(),
-        true,
-    );
+    let output_target = PekoTarget::new(target_operating_system, target_architecture, true);
 
     // Resolve the linker output path (binary location). Only meaningful
     // when we're producing a binary, not an object.
@@ -110,7 +106,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     // Codegen.
     let compile_outcome = execution::compile(
         cli_info.get_peko_root(),
-        output_target.clone(),
+        output_target,
         main_file.clone(),
         compilation_root,
         object_choice.path().to_path_buf(),

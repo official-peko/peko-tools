@@ -6,12 +6,12 @@ use std::process::ExitCode;
 use eframe::egui;
 use egui::{ColorImage, TextureHandle};
 use peko_core::target::OperatingSystem;
-use rustyline::history::FileHistory;
 use rustyline::Editor;
+use rustyline::history::FileHistory;
 
 use crate::bundler;
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 use crate::project::{PekoProject, ProjectIcon, UIProjectInfo};
 
 // ---------------------------------------------------------------------------
@@ -643,11 +643,9 @@ fn execute_show_icon(reporter: &Reporter, project: PekoProject) -> ExitCode {
 
     let image_pixels = ui_info.icon.get_rgba_pixels();
     let image_width = ui_info.icon.width as usize;
-    let image_height = if image_width == 0 {
-        0
-    } else {
-        (image_pixels.len() / 4) / image_width
-    };
+    let image_height = (image_pixels.len() / 4)
+        .checked_div(image_width)
+        .unwrap_or(0);
 
     let result = eframe::run_native(
         "App Icon",

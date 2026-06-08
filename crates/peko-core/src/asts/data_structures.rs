@@ -241,12 +241,14 @@ pub struct VisibilityData {
     pub gc_safepoint: bool,
 }
 
+type VisibilityFlagInfo<'a> = &'a [(fn(&VisibilityData) -> bool, &'a str)];
+
 /// Active-flag table for [`VisibilityData`] formatting.
 ///
 /// Order matters: this is the order modifiers appear in the rendered
 /// `[a b c]` form. Defined as a constant to keep [`VisibilityData::flag_names`]
 /// and the [`Display`] impl in lockstep.
-const VISIBILITY_FLAG_ORDER: &[(fn(&VisibilityData) -> bool, &str)] = &[
+const VISIBILITY_FLAG_ORDER: VisibilityFlagInfo = &[
     (|v| v.private, "private"),
     (|v| v.constant, "constant"),
     (|v| v.external, "external"),

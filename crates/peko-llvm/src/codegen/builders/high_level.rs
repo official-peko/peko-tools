@@ -127,7 +127,7 @@ impl HighLevelCodegen for PekoCodegenContext {
             if neither_is_opaque && self.types_similar(&value.value_type, &inner) {
                 let current_file = self.get_current_file();
                 let class = self.get_class_by_type(&PekoType::from_string(
-                    format!("Option<{}>", inner.to_string()).as_str(),
+                    format!("Option<{}>", inner).as_str(),
                     current_file,
                 ))?;
 
@@ -242,13 +242,12 @@ impl HighLevelCodegen for PekoCodegenContext {
         }
 
         // Builtin to wrapper class via the wrapper's constructor.
-        if expected_type_class.is_some()
+        if let Some(class_to_create) = &expected_type_class
             && expected_type.pointer_depth == 0
             && expected_type.reference_depth == 0
             && value.value_type.is_builtin_type()
         {
-            let class_to_create = expected_type_class.unwrap();
-            let allocate_wrapper_object = self.allocate_class(&class_to_create)?;
+            let allocate_wrapper_object = self.allocate_class(class_to_create)?;
 
             // Then call its constructor.
             let constructor_call = self.call_object_method(
@@ -332,10 +331,7 @@ impl HighLevelCodegen for PekoCodegenContext {
         let expected_managed = is_managed_pointer(expected_type);
         let value_managed = is_managed_pointer(&value.value_type);
         if (expected_managed || value_managed)
-            && (expected_managed
-                || value_managed
-                || expected_type.is_pointer()
-                || value.value_type.is_pointer())
+            && (expected_type.is_pointer() || value.value_type.is_pointer())
         {
             if expected_managed == value_managed {
                 // Same address space (both managed): relabel only.
@@ -486,10 +482,7 @@ impl HighLevelCodegen for PekoCodegenContext {
             let slot_arg = CodegenValue::new(slot_raw, PekoType::simple_type("opaque"));
             let value_arg = CodegenValue::new(value_raw, PekoType::simple_type("opaque"));
 
-            self.call_named_function(
-                "extern::peko_gc_write_barrier".to_string(),
-                vec![slot_arg, value_arg],
-            );
+            self.call_named_function("extern::peko_gc_write_barrier", vec![slot_arg, value_arg]);
         }
     }
 }

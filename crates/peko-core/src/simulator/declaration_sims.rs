@@ -52,14 +52,11 @@ impl PekoValueSimulator for NewVariableAST {
         // Set the expected type so the initializer's simulation knows
         // what type to infer toward.
         let previous_expected_type = simulator_context.current_expected_type_options.clone();
-        if self.variable_type.is_some()
+        if let Some(variable_type) = &self.variable_type
             && simulator_context.type_exists(self.variable_type.as_ref().unwrap())
         {
-            simulator_context.current_expected_type_options = Some(vec![
-                simulator_context
-                    .expand_type(self.variable_type.as_ref().unwrap())
-                    .unwrap(),
-            ]);
+            simulator_context.current_expected_type_options =
+                Some(vec![simulator_context.expand_type(variable_type).unwrap()]);
         }
 
         // Local-scope declarations: simulate value, type-check, register.
@@ -82,27 +79,25 @@ impl PekoValueSimulator for NewVariableAST {
 
             // If a type was declared explicitly, ensure the initializer
             // matches (or can be cast).
-            if self.variable_type.is_some() {
-                if !simulator_context.type_exists(self.variable_type.as_ref().unwrap()) {
+            if let Some(variable_type) = &self.variable_type {
+                if !simulator_context.type_exists(variable_type) {
                     simulator_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
-                            self.variable_type.clone().unwrap().start_position.clone(),
-                            self.variable_type.clone().unwrap().end_position.clone(),
+                            variable_type.start_position.clone(),
+                            variable_type.end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                self.variable_type.clone().unwrap(),
+                                variable_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file(),
                         ),
                     );
                     variable_value = simulator_context.create_error_value();
-                } else if simulator_context.types_similar(
-                    &variable_value.get_type(),
-                    self.variable_type.as_ref().unwrap(),
-                ) {
+                } else if simulator_context.types_similar(&variable_value.get_type(), variable_type)
+                {
                     variable_value = simulator_context
-                        .box_value_to_type(self.variable_type.as_ref().unwrap(), &variable_value)
+                        .box_value_to_type(variable_type, &variable_value)
                         .unwrap();
                 } else {
                     simulator_context.diagnostics.report_diagnostic(
@@ -112,7 +107,7 @@ impl PekoValueSimulator for NewVariableAST {
                             format!(
                                 "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
                                 variable_value.get_type(),
-                                self.variable_type.clone().unwrap(),
+                                variable_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file(),
@@ -387,8 +382,8 @@ impl PekoValueSimulator for FunctionDeclarationAST {
         simulator_context.local_scope = true;
 
         let current_return_type = simulator_context.current_return_type.clone();
-        let function_return_type = if self.return_type.is_some() {
-            let expanded = simulator_context.expand_type(self.return_type.as_ref().unwrap());
+        let function_return_type = if let Some(function_return_type) = &self.return_type {
+            let expanded = simulator_context.expand_type(function_return_type);
             expanded.unwrap_or_else(PekoType::error_type)
         } else {
             PekoType::simple_type("void")
@@ -445,15 +440,15 @@ impl PekoValueSimulator for FunctionDeclarationAST {
 
         // Append the variadic-args type (wrapped in standard::Array) if
         // the function declares variadic arguments.
-        if self.varargs_type.is_some() {
-            argument_types.push(if !simulator_context.type_exists(self.varargs_type.as_ref().unwrap()) {
+        if let Some(var_args_type) = &self.varargs_type {
+            argument_types.push(if !simulator_context.type_exists(var_args_type) {
                 simulator_context.diagnostics.report_diagnostic(
                     diagnostics::PekoDiagnostic::new(
                         self.varargs_type.clone().unwrap().start_position.clone(),
                         self.varargs_type.clone().unwrap().end_position.clone(),
                         format!(
                             "type `{}` is not defined. Check the type name and that the type is in scope",
-                            self.varargs_type.clone().unwrap(),
+                            var_args_type,
                         ),
                         diagnostics::DiagnosticType::Error,
                         simulator_context.get_current_file(),
@@ -466,7 +461,7 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 )
             } else {
                 types::PekoType::from_string(
-                    format!("standard::Array<{}>", self.varargs_type.clone().unwrap()).as_str(),
+                    format!("standard::Array<{}>", var_args_type).as_str(),
                     simulator_context.get_current_file(),
                 )
             });
@@ -548,11 +543,9 @@ impl PekoValueSimulator for FunctionDeclarationAST {
         );
 
         let find_function_definition: Option<(usize, SimulatorFunction)> =
-            if find_function_definition.is_some() {
+            if let Some(function_definition) = &find_function_definition {
                 let mut all_types_equal = true;
-                for ((_, choice_arg), (_, actual_argument)) in find_function_definition
-                    .as_ref()
-                    .unwrap()
+                for ((_, choice_arg), (_, actual_argument)) in function_definition
                     .1
                     .arguments
                     .iter()
@@ -576,13 +569,13 @@ impl PekoValueSimulator for FunctionDeclarationAST {
             };
 
         // Override the existing overload (or append a new one).
-        if find_function_definition.is_some() {
+        if let Some(function_definition) = &find_function_definition {
             function_module
                 .write()
                 .unwrap()
                 .functions
                 .get_mut(&self.function_name.value)
-                .unwrap()[find_function_definition.unwrap().0] = peko_function;
+                .unwrap()[function_definition.0] = peko_function;
         } else {
             function_module
                 .write()
@@ -628,17 +621,11 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 argument_name.value.clone(),
                 ScopeSymbol::Variable(
                     ScopeVariable::new(
-                        if self.docinfo.is_some()
-                            && self
-                                .docinfo
-                                .as_ref()
-                                .unwrap()
-                                .parameter_docs
-                                .contains_key(&argument_name.value)
+                        if let Some(docinfo) = &self.docinfo
+                            && docinfo.parameter_docs.contains_key(&argument_name.value)
                         {
                             Some(DocInfo::new(
-                                self.docinfo.as_ref().unwrap().parameter_docs[&argument_name.value]
-                                    .clone(),
+                                docinfo.parameter_docs[&argument_name.value].clone(),
                                 HashMap::new(),
                                 Vec::new(),
                             ))
@@ -936,8 +923,8 @@ impl PekoValueSimulator for ClosureAST {
         simulator_context.local_scope = true;
 
         let current_return_type = simulator_context.current_return_type.clone();
-        let return_type_expanded = if self.return_type.is_some() {
-            simulator_context.expand_type(self.return_type.as_ref().unwrap())
+        let return_type_expanded = if let Some(return_type_expanded) = &self.return_type {
+            simulator_context.expand_type(return_type_expanded)
         } else {
             Some(PekoType::simple_type("void"))
         };
@@ -1349,7 +1336,7 @@ impl PekoValueSimulator for ClassAST {
                         generic_class_simple.generic_types.clear();
 
                         let find_generic = simulator_context
-                            .find_class_generic_in_current(&generic_class_simple.to_string());
+                            .find_class_generic_in_current(generic_class_simple.to_string());
                         if find_generic.is_none() {
                             break;
                         }
@@ -1480,21 +1467,7 @@ impl PekoValueSimulator for ClassAST {
         if self.derives_from.len() == 1 {
             let find_parent_class = simulator_context.get_class_by_type(&self.derives_from[0]);
 
-            if find_parent_class.is_none() {
-                simulator_context
-                    .diagnostics
-                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        self.derives_from[0].start_position.clone(),
-                        self.derives_from[0].end_position.clone(),
-                        format!(
-                            "cannot find class `{}`. Check the class name, that the class is in scope, and that it has been declared before this point",
-                            self.derives_from[0],
-                        ),
-                        diagnostics::DiagnosticType::Error,
-                        simulator_context.get_current_file(),
-                    ));
-            } else {
-                let find_parent_class = find_parent_class.unwrap();
+            if let Some(find_parent_class) = &find_parent_class {
                 parent_class = Some(Box::new(find_parent_class.clone()));
 
                 for (attribute_name, attribute) in &find_parent_class.attributes {
@@ -1518,7 +1491,20 @@ impl PekoValueSimulator for ClassAST {
                     );
                 }
 
-                virtual_table_methods.extend(find_parent_class.main_virtual_table.methods);
+                virtual_table_methods.extend(find_parent_class.main_virtual_table.methods.clone());
+            } else {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.derives_from[0].start_position.clone(),
+                        self.derives_from[0].end_position.clone(),
+                        format!(
+                            "cannot find class `{}`. Check the class name, that the class is in scope, and that it has been declared before this point",
+                            self.derives_from[0],
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
             }
         } else if self.derives_from.len() > 1 {
             simulator_context

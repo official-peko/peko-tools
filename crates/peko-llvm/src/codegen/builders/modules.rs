@@ -280,11 +280,8 @@ impl ModuleManager for PekoCodegenContext {
                     );
                 }
 
-                if function.imported_from.is_some() {
-                    function
-                        .imported_from
-                        .as_mut()
-                        .unwrap()
+                if let Some(imported_from) = function.imported_from.as_mut() {
+                    imported_from
                         .write()
                         .unwrap()
                         .functions
@@ -375,28 +372,21 @@ impl ModuleManager for PekoCodegenContext {
                     // reuse the same `LLVMValueRef` across overrides.
                     let mut parent_method: Option<CodegenValue> = None;
                     let mut parent_idx: i32 = -1;
-                    if option.parent_class_info.is_some()
-                        && option.parent_class_info.as_ref().unwrap().0.to_string()
-                            != class.class_type.to_string()
+                    if let Some(parent_class_info) = &option.parent_class_info
+                        && parent_class_info.0.to_string() != class.class_type.to_string()
                     {
-                        for (parent_option_idx, parent_option) in option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .1
-                            .read()
-                            .unwrap()
-                            .classes[&option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .0
-                            .declutter()
-                            .to_string()]
-                            .main_virtual_table
-                            .methods[method_name]
-                            .iter()
-                            .enumerate()
+                        for (parent_option_idx, parent_option) in
+                            parent_class_info.1.read().unwrap().classes[&option
+                                .parent_class_info
+                                .as_ref()
+                                .unwrap()
+                                .0
+                                .declutter()
+                                .to_string()]
+                                .main_virtual_table
+                                .methods[method_name]
+                                .iter()
+                                .enumerate()
                         {
                             if !self.types_equal(&parent_option.return_type, &option.return_type)
                                 || parent_option.arguments.len() != option.arguments.len()
@@ -484,11 +474,8 @@ impl ModuleManager for PekoCodegenContext {
                             .insert(to_uuid.clone(), new_function_value.clone());
                     }
 
-                    if class.imported_from.is_some() {
-                        class
-                            .imported_from
-                            .as_mut()
-                            .unwrap()
+                    if let Some(imported_from) = class.imported_from.as_mut() {
+                        imported_from
                             .write()
                             .unwrap()
                             .classes
@@ -749,8 +736,8 @@ impl ModuleManager for PekoCodegenContext {
     }
 
     fn link_modules(&mut self, globals_set: Arc<RwLock<CodegenModule>>) -> LLVMModuleRef {
-        if self.final_linked_module.is_some() {
-            return self.final_linked_module.unwrap();
+        if let Some(final_linked) = self.final_linked_module {
+            return final_linked;
         }
 
         let final_module = unsafe { core::LLVMModuleCreateWithName(c"main".as_ptr()) };
@@ -867,9 +854,7 @@ impl ModuleManager for PekoCodegenContext {
         // PEKO_DUMP_GC_IR environment variable so normal builds pay no
         // cost. Writes to "<output>.post-gc.ll".
         if std::env::var_os("PEKO_DUMP_GC_IR").is_some() {
-            let dump_path =
-                format!("/Users/preston/Work/peko/planning/newtests/TestCLI/main.peko.post-gc.ll");
-            let dump_c = cstr(dump_path);
+            let dump_c = cstr(self.root_folder.join("final.post-gc.ll").to_str().unwrap());
             let mut dump_error: *mut std::ffi::c_char = std::ptr::null_mut();
             unsafe {
                 core::LLVMPrintModuleToFile(linked_module, dump_c.as_ptr(), &mut dump_error);
@@ -896,12 +881,10 @@ impl ModuleManager for PekoCodegenContext {
         if matches!(
             target.operating_system,
             OperatingSystem::Android | OperatingSystem::Linux
-        ) {
-            if let Err(e) = crate::codegen::data_structures::patch_stackmaps_section_writable(
-                output_file.as_ref(),
-            ) {
-                eprintln!("warning: failed to patch .llvm_stackmaps: {e}");
-            }
+        ) && let Err(e) =
+            crate::codegen::data_structures::patch_stackmaps_section_writable(output_file.as_ref())
+        {
+            eprintln!("warning: failed to patch .llvm_stackmaps: {e}");
         }
 
         success

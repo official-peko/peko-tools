@@ -162,7 +162,7 @@ impl PekoValueBuilder for StringAST {
         );
 
         let format_call = codegen_context.call_named_function(
-            "standard::unsafe_format".to_string(),
+            "standard::unsafe_format",
             vec![format_string, interpolation_list],
         );
 

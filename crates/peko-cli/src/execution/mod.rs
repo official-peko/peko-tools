@@ -174,12 +174,8 @@ pub fn compile(
         std::fs::read_to_string(&main_file).unwrap(),
     );
 
-    let mut codegen_context = PekoCodegenContext::new(
-        target.clone(),
-        main_file.clone(),
-        false,
-        compilation_root.clone(),
-    );
+    let mut codegen_context =
+        PekoCodegenContext::new(target, main_file.clone(), false, compilation_root.clone());
 
     load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
@@ -228,6 +224,7 @@ pub fn compile(
 /// gets reused. `asset_debug_directory` is forwarded to
 /// [`PekoCodegenContext::asset_debug_folder`] so debug runs serve assets
 /// from that directory; pass `None` to serve assets from the bundle.
+#[allow(clippy::type_complexity)]
 pub fn load_required_packages(
     peko_root: &Path,
     target: PekoTarget,
@@ -237,7 +234,7 @@ pub fn load_required_packages(
     let asts = default_imports();
 
     let mut codegen_context = PekoCodegenContext::new(
-        target.clone(),
+        target,
         std::env::current_dir().unwrap(),
         false,
         PathBuf::new(),

@@ -422,10 +422,10 @@ pub trait ExecutionContextAlgorithms<
             .collect();
 
         // Drop the file extension on the final component.
-        if let Some(last) = components.last_mut() {
-            if let Some(stripped) = last.strip_suffix(".peko") {
-                *last = String::from(stripped);
-            }
+        if let Some(last) = components.last_mut()
+            && let Some(stripped) = last.strip_suffix(".peko")
+        {
+            *last = String::from(stripped);
         }
 
         // A trailing `main` collapses into its containing directory.
@@ -519,7 +519,7 @@ pub trait ExecutionContextAlgorithms<
         } else {
             // Plain local name relative to the importing file's directory.
             base_dir = importing_dir.to_path_buf();
-            walk_segments = &path_ids[..];
+            walk_segments = path_ids;
         }
 
         // A registry import with no further segments uses the package
@@ -640,7 +640,7 @@ pub trait ExecutionContextAlgorithms<
         module_name: impl ToString,
     ) -> Option<Arc<RwLock<ModuleType>>> {
         let mut current = self.get_module_context().current_module();
-        if current.read().unwrap().get_name().to_owned() == module_name.to_string() {
+        if current.read().unwrap().get_name() == module_name.to_string() {
             return Some(current);
         }
 
@@ -651,10 +651,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -670,10 +667,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -693,10 +687,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -713,10 +704,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -736,10 +724,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -759,10 +744,7 @@ pub trait ExecutionContextAlgorithms<
                 }
             }
 
-            if current.read().unwrap().get_parent().is_none() {
-                return None;
-            }
-            let parent = current.read().unwrap().get_parent().unwrap().clone();
+            let parent = current.read().unwrap().get_parent()?.clone();
             current = parent;
         }
     }
@@ -816,10 +798,7 @@ pub trait ExecutionContextAlgorithms<
 
             // Expand that type.
             let expanded_inner_type = self.expand_type(&inner_type);
-            if expanded_inner_type.is_none() {
-                return None;
-            }
-            inner_type = expanded_inner_type.unwrap();
+            inner_type = expanded_inner_type?;
 
             let mut expanded = PekoType::new(
                 vec!["standard".to_string()],
@@ -842,24 +821,14 @@ pub trait ExecutionContextAlgorithms<
             // Expand the argument types.
             for argument_type in type1.generic_types.iter_mut() {
                 let type_expanded = self.expand_type(argument_type);
-
-                if type_expanded.is_none() {
-                    return None;
-                }
-
-                *argument_type = type_expanded.unwrap();
+                *argument_type = type_expanded?;
             }
 
             // If the function has a return type, then expand that too.
             if type1.function_type.is_some() {
                 let return_type_expanded =
                     self.expand_type(type1.clone().function_type.unwrap().as_ref());
-
-                if return_type_expanded.is_none() {
-                    return None;
-                }
-
-                type1.function_type = Some(Box::new(return_type_expanded.unwrap()));
+                type1.function_type = Some(Box::new(return_type_expanded?));
             }
 
             type1.fully_expanded = true;
@@ -928,22 +897,21 @@ pub trait ExecutionContextAlgorithms<
             };
             module_names.remove(0);
 
-            for i in 0..module_names.len() {
-                let module_name = module_names[i].clone();
+            for module_name in &module_names {
                 if !contained_in
                     .read()
                     .unwrap()
                     .get_modules()
-                    .contains_key(&module_name)
+                    .contains_key(module_name)
                 {
-                    if contained_in.read().unwrap().get_name().to_owned() == module_name {
+                    if contained_in.read().unwrap().get_name() == module_name {
                         break;
                     }
 
                     return None;
                 }
 
-                let parent = contained_in.read().unwrap().get_modules()[&module_name].clone();
+                let parent = contained_in.read().unwrap().get_modules()[module_name].clone();
                 contained_in = parent;
             }
 
@@ -1020,10 +988,9 @@ pub trait ExecutionContextAlgorithms<
         {
             let generic =
                 class_parent.read().unwrap().get_class_generics()[&class_name_base].clone();
-            return match self.create_generic_class(&generic, type1.generic_types.clone()) {
-                Some(class) => Some(class.get_class_type().clone()),
-                None => None,
-            };
+            return self
+                .create_generic_class(&generic, type1.generic_types.clone())
+                .map(|class| class.get_class_type().clone());
         }
 
         type1.module_names.clear();
@@ -1048,7 +1015,7 @@ pub trait ExecutionContextAlgorithms<
             return true;
         }
 
-        if peko_type.type_name == "Pointer" && peko_type.generic_types.len() >= 1 {
+        if peko_type.type_name == "Pointer" && !peko_type.generic_types.is_empty() {
             return self.type_exists(&peko_type.generic_types[0]);
         }
 
@@ -1070,18 +1037,15 @@ pub trait ExecutionContextAlgorithms<
         }
 
         // Check function types.
-        if peko_type.function_type.is_some() {
+        if let Some(return_type) = &peko_type.function_type {
             // First, check all the argument types.
             for argument_type in &peko_type.generic_types {
-                let arg_type_exists = self.type_exists(argument_type);
-
-                if !arg_type_exists {
+                if !self.type_exists(argument_type) {
                     return false;
                 }
             }
-
             // Then check the return type.
-            return self.type_exists(peko_type.function_type.as_ref().unwrap());
+            return self.type_exists(return_type);
         }
 
         // If the current type is a generic type, substitute it for its
@@ -1093,12 +1057,9 @@ pub trait ExecutionContextAlgorithms<
 
         // Expand the type to its full official definition.
         let type_expanded = self.expand_type(peko_type);
-
-        if type_expanded.is_none() {
+        let Some(peko_type) = type_expanded else {
             return false;
-        }
-
-        let peko_type = type_expanded.unwrap();
+        };
 
         match peko_type.type_name.as_str() {
             // Built-in types obviously exist.
@@ -1129,11 +1090,7 @@ pub trait ExecutionContextAlgorithms<
         }
 
         // Expand the type all the way.
-        let type_expanded = self.expand_type(type1);
-        if type_expanded.is_none() {
-            return None;
-        }
-        let type_expanded = type_expanded.unwrap();
+        let type_expanded = self.expand_type(type1)?;
 
         // Convert the type to a class name.
         let class_name = type_expanded.declutter().to_string();
@@ -1152,8 +1109,7 @@ pub trait ExecutionContextAlgorithms<
             )
         } else if !type_expanded.module_names.is_empty() && {
             let current = self.get_module_context().current_module();
-            let name_matches = current.read().unwrap().get_name() == type_expanded.module_names[0];
-            name_matches
+            current.read().unwrap().get_name() == type_expanded.module_names[0]
         } {
             (self.get_module_context().current_module(), 1)
         } else {
@@ -1167,12 +1123,8 @@ pub trait ExecutionContextAlgorithms<
                 .get_modules()
                 .contains_key(&type_expanded.module_names[i])
             {
-                if next_module.read().unwrap().get_name().to_owned()
-                    == type_expanded.module_names[i]
-                {
-                    if next_module.read().unwrap().get_name().to_owned()
-                        == type_expanded.module_names[i]
-                    {
+                if next_module.read().unwrap().get_name() == type_expanded.module_names[i] {
+                    if next_module.read().unwrap().get_name() == type_expanded.module_names[i] {
                         break;
                     }
 
@@ -1354,24 +1306,20 @@ pub trait ExecutionContextAlgorithms<
         let type1_class = self.get_class_by_type(&type1_expanded);
         let type2_class = self.get_class_by_type(&type2_expanded);
 
-        if type1_class.is_some() && type2_class.is_some() {
-            if self.classes_connect(type1_class.as_ref().unwrap(), type2_class.as_ref().unwrap())
-                || self
-                    .classes_connect(type2_class.as_ref().unwrap(), type1_class.as_ref().unwrap())
-            {
-                return true;
-            }
+        if let (Some(class1), Some(class2)) = (&type1_class, &type2_class)
+            && (self.classes_connect(class1, class2) || self.classes_connect(class2, class1))
+        {
+            return true;
         }
 
         // Classes implementing `operator to_<type>` casts are similar to
         // <type>.
-        if type1_class.is_some()
+        if let Some(class1) = type1_class
             && type2_expanded.is_builtin_type()
-            && type1_class
-                .unwrap()
+            && class1
                 .get_main_virtual_table()
                 .get_methods()
-                .contains_key(&format!("[operator to_{}]", type2_expanded.to_string()))
+                .contains_key(&format!("[operator to_{}]", type2_expanded))
         {
             return true;
         }
@@ -1382,7 +1330,7 @@ pub trait ExecutionContextAlgorithms<
                 .unwrap()
                 .get_main_virtual_table()
                 .get_methods()
-                .contains_key(&format!("[operator to_{}]", type1_expanded.to_string()))
+                .contains_key(&format!("[operator to_{}]", type1_expanded))
         {
             return true;
         }
@@ -1462,13 +1410,12 @@ pub trait ExecutionContextAlgorithms<
             // Check if every argument has a default value (keyword-only call works).
             let mut all_arguments_keywords = !function.get_arguments().is_empty()
                 || (class_function && function.get_arguments().len() > 1);
-            let arguments_iter = if class_function {
-                function.get_arguments().iter().skip(1)
-            } else {
-                function.get_arguments().iter().skip(0)
-            };
 
-            for (_, arg) in arguments_iter {
+            for (_, arg) in function
+                .get_arguments()
+                .iter()
+                .skip(usize::from(class_function))
+            {
                 if !arg.has_default_value() {
                     all_arguments_keywords = false;
                     break;

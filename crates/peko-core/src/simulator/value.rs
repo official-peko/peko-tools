@@ -22,6 +22,7 @@ use super::data_structures::{SimulatorClass, SimulatorFunction};
 /// represents a different shape of result the simulator might encounter
 /// at a value-position in source.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SimulatorValue {
     /// A regular typed value (e.g. the result of an arithmetic expression
     /// or a variable reference).

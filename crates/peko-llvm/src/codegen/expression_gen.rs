@@ -69,8 +69,8 @@ impl PekoValueBuilder for ArrayAST {
                         item.get_end().clone(),
                         format!(
                             "type of value `{}` does not match the array type of `{}`",
-                            item_value.value_type.to_string(),
-                            array_values.first().unwrap().value_type.to_string(),
+                            item_value.value_type,
+                            array_values.first().unwrap().value_type,
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -124,13 +124,8 @@ impl PekoValueBuilder for MapAST {
                         key_item.get_end().clone(),
                         format!(
                             "type of key `{}` does not match the map key type of `{}`",
-                            key_item_value.value_type.to_string(),
-                            key_value_pair_values
-                                .first()
-                                .unwrap()
-                                .0
-                                .value_type
-                                .to_string(),
+                            key_item_value.value_type,
+                            key_value_pair_values.first().unwrap().0.value_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -149,13 +144,8 @@ impl PekoValueBuilder for MapAST {
                         key_item.get_end().clone(),
                         format!(
                             "type of value `{}` does not match the map value type of `{}`",
-                            value_item_value.value_type.to_string(),
-                            key_value_pair_values
-                                .first()
-                                .unwrap()
-                                .1
-                                .value_type
-                                .to_string(),
+                            value_item_value.value_type,
+                            key_value_pair_values.first().unwrap().1.value_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -287,8 +277,8 @@ impl PekoValueBuilder for PekoXTagAST {
                 event_arguments,
                 codegen_context
                     .scoped_variables
-                    .iter()
-                    .map(|(name, _)| PositionedValue::create_no_position(name.clone()))
+                    .keys()
+                    .map(|name| PositionedValue::create_no_position(name.clone()))
                     .collect_vec(),
                 None,
                 event.clone(),
@@ -359,7 +349,7 @@ impl PekoValueBuilder for ObjectConstructionAST {
                     self.class_name.end.clone(),
                     format!(
                         "cannot find class `{}`. Check the class name, that the class is declared, and that it is imported",
-                        class_type.to_string()
+                        class_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -375,69 +365,72 @@ impl PekoValueBuilder for ObjectConstructionAST {
 
         // Either reuse previously generated argument values (generic
         // class path) or generate them now.
-        let (constructor_arguments, constructor_keyword_arguments) = if codegen_context
-            .generated_kw_args
-            .is_some()
-        {
-            (
-                codegen_context.generated_args.clone(),
-                codegen_context.generated_kw_args.clone().unwrap(),
-            )
-        } else {
-            let method_options = get_codegen_class
-                .as_ref()
-                .unwrap()
-                .main_virtual_table
-                .methods["constructor"]
-                .clone();
-            let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
+        let (constructor_arguments, constructor_keyword_arguments) =
+            if codegen_context.generated_kw_args.is_some() {
+                (
+                    codegen_context.generated_args.clone(),
+                    codegen_context.generated_kw_args.clone().unwrap(),
+                )
+            } else {
+                let method_options = get_codegen_class
+                    .as_ref()
+                    .unwrap()
+                    .main_virtual_table
+                    .methods["constructor"]
+                    .clone();
+                let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
-            for method_option in method_options {
-                if (method_option.arguments.len() - 1) != self.arguments.len()
-                    || (self.arguments.len() > (method_option.arguments.len() - 1)
-                        && method_option.var_args_type.is_none())
-                {
-                    continue;
-                }
+                for method_option in method_options {
+                    if (method_option.arguments.len() - 1) != self.arguments.len()
+                        || (self.arguments.len() > (method_option.arguments.len() - 1)
+                            && method_option.var_args_type.is_none())
+                    {
+                        continue;
+                    }
 
-                for (idx, (_, argument)) in method_option.arguments.iter().skip(1).enumerate() {
-                    argument_type_options[idx].push(argument.argument_type.clone());
-                }
+                    for (idx, (_, argument)) in method_option.arguments.iter().skip(1).enumerate() {
+                        argument_type_options[idx].push(argument.argument_type.clone());
+                    }
 
-                if self.arguments.len() > (method_option.arguments.len() - 1)
-                    && method_option.var_args_type.is_some()
-                {
-                    for i in (method_option.arguments.len() - 1)..self.arguments.len() {
-                        argument_type_options[i].push(method_option.var_args_type.clone().unwrap());
+                    if self.arguments.len() > (method_option.arguments.len() - 1)
+                        && method_option.var_args_type.is_some()
+                    {
+                        for argument_type_option in argument_type_options
+                            .iter_mut()
+                            .take(self.arguments.len())
+                            .skip(method_option.arguments.len() - 1)
+                        {
+                            argument_type_option.push(method_option.var_args_type.clone().unwrap());
+                        }
                     }
                 }
-            }
 
-            let mut constructor_arguments = Vec::new();
-            let mut constructor_keyword_arguments = HashMap::new();
+                let mut constructor_arguments = Vec::new();
+                let mut constructor_keyword_arguments = HashMap::new();
 
-            let post_stack = codegen_context.module_context.step_back();
-            for ((argument_name, argument), expected_type_options) in
-                self.arguments.iter().zip(argument_type_options)
-            {
-                let current_expected_types = codegen_context.current_expected_type_options.clone();
-                codegen_context.current_expected_type_options = Some(expected_type_options);
+                let post_stack = codegen_context.module_context.step_back();
+                for ((argument_name, argument), expected_type_options) in
+                    self.arguments.iter().zip(argument_type_options)
+                {
+                    let current_expected_types =
+                        codegen_context.current_expected_type_options.clone();
+                    codegen_context.current_expected_type_options = Some(expected_type_options);
 
-                constructor_arguments.push(argument.build_value(codegen_context));
+                    constructor_arguments.push(argument.build_value(codegen_context));
 
-                codegen_context.current_expected_type_options = current_expected_types;
+                    codegen_context.current_expected_type_options = current_expected_types;
 
-                if let Some(name) = argument_name {
-                    constructor_keyword_arguments.insert(
-                        name.value.clone(),
-                        constructor_arguments.last().unwrap().clone(),
-                    );
+                    if let Some(name) = argument_name {
+                        constructor_keyword_arguments.insert(
+                            name.value.clone(),
+                            constructor_arguments.last().unwrap().clone(),
+                        );
+                    }
                 }
-            }
-            codegen_context.module_context.step_forward(post_stack);
+                codegen_context.module_context.step_forward(post_stack);
 
-            (constructor_arguments, constructor_keyword_arguments)
-        };
+                (constructor_arguments, constructor_keyword_arguments)
+            };
 
         let (previous_line, previous_file) = codegen_context.track_call_position(
             self.start.file.to_string_lossy().into_owned(),
@@ -471,7 +464,7 @@ impl PekoValueBuilder for ObjectConstructionAST {
                     self.end.clone(),
                     format!(
                         "no constructor of class `{}` matches the supplied argument types. Check the argument types against the class's declared constructors",
-                        class_type.to_string()
+                        class_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -495,7 +488,7 @@ impl PekoValueBuilder for ObjectConstructionAST {
                         self.end.clone(),
                         format!(
                             "wrong number of arguments to implicit constructor of class `{}`. The implicit constructor takes one argument per attribute, in declaration order",
-                            class_type.to_string()
+                            class_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -525,8 +518,8 @@ impl PekoValueBuilder for ObjectConstructionAST {
                                 self.arguments[idx].1.get_end().clone(),
                                 format!(
                                     "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
-                                    attribute_value.value_type.to_string(),
-                                    attribute.attribute_type.to_string()
+                                    attribute_value.value_type,
+                                    attribute.attribute_type
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -561,8 +554,8 @@ impl PekoValueBuilder for ObjectConstructionAST {
                                 self.arguments[idx].1.get_end().clone(),
                                 format!(
                                     "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
-                                    value_to_set.value_type.to_string(),
-                                    attribute.attribute_type.to_string()
+                                    value_to_set.value_type,
+                                    attribute.attribute_type
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -597,14 +590,12 @@ impl PekoValueBuilder for ObjectAccessAST {
         } else if codegen_context
             .state
             .contains(&"calling_object_method".to_string())
-        {
-            if let Some(idx) = codegen_context
+            && let Some(idx) = codegen_context
                 .state
                 .iter()
                 .position(|s| s == "calling_object_method")
-            {
-                codegen_context.state.remove(idx);
-            }
+        {
+            codegen_context.state.remove(idx);
         }
 
         let object = self.object.build_value(codegen_context);
@@ -721,8 +712,7 @@ impl PekoValueBuilder for ObjectAccessAST {
                                     function_call.arguments[argument_index].1.get_end().clone(),
                                     format!(
                                         "argument of type `{}` does not match expected type `{}`",
-                                        argument.value_type.to_string(),
-                                        argument_type.to_string(),
+                                        argument.value_type, argument_type
                                     ),
                                     diagnostics::DiagnosticType::Error,
                                     codegen_context.get_current_file().to_path_buf(),
@@ -761,7 +751,7 @@ impl PekoValueBuilder for ObjectAccessAST {
                             format!(
                                 "no method named `{}` on class `{}`. Check the method name and that it is declared on this class or a parent",
                                 function_name,
-                                class.class_type.to_string()
+                                class.class_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -812,10 +802,12 @@ impl PekoValueBuilder for ObjectAccessAST {
                     if function_call.arguments.len() > (method_option.arguments.len() - 1)
                         && method_option.var_args_type.is_some()
                     {
-                        for i in (method_option.arguments.len() - 1)..function_call.arguments.len()
+                        for argument_type_option in argument_type_options
+                            .iter_mut()
+                            .take(function_call.arguments.len())
+                            .skip(method_option.arguments.len() - 1)
                         {
-                            argument_type_options[i]
-                                .push(method_option.var_args_type.clone().unwrap());
+                            argument_type_option.push(method_option.var_args_type.clone().unwrap());
                         }
                     }
                 }
@@ -1003,14 +995,12 @@ impl PekoValueBuilder for ObjectAccessAST {
 
                 if object_name.as_deref() == Some("this")
                     && codegen_context.attributes_to_set.contains(&variable_name)
-                {
-                    if let Some(pos) = codegen_context
+                    && let Some(pos) = codegen_context
                         .attributes_to_set
                         .iter()
                         .position(|key| key.as_str() == variable_name)
-                    {
-                        codegen_context.attributes_to_set.remove(pos);
-                    }
+                {
+                    codegen_context.attributes_to_set.remove(pos);
                 }
 
                 let object_class = match codegen_context.get_class_by_type(&object.value_type) {
@@ -1031,7 +1021,7 @@ impl PekoValueBuilder for ObjectAccessAST {
                     .variable_value
                     .build_value(codegen_context);
 
-                if variable_reassignment.assignment_operator.is_some() {
+                if let Some(assignment_op) = &variable_reassignment.assignment_operator {
                     let attribute =
                         codegen_context.get_object_attribute(&object, variable_name.clone(), true);
 
@@ -1053,15 +1043,8 @@ impl PekoValueBuilder for ObjectAccessAST {
                         Ok(v) => v,
                     };
 
-                    let try_operator = codegen_context.apply_operator(
-                        variable_reassignment
-                            .assignment_operator
-                            .as_ref()
-                            .unwrap()
-                            .as_str(),
-                        &attribute,
-                        &variable_value,
-                    );
+                    let try_operator =
+                        codegen_context.apply_operator(assignment_op, &attribute, &variable_value);
 
                     match try_operator {
                         None => {
@@ -1072,9 +1055,9 @@ impl PekoValueBuilder for ObjectAccessAST {
                                     variable_reassignment.variable_reference.get_end().clone(),
                                     format!(
                                         "cannot apply operator `{}` between attribute of type `{}` and value of type `{}`. There is no operator overload that accepts these two operand types",
-                                        variable_reassignment.assignment_operator.as_ref().unwrap(),
-                                        attribute.value_type.to_string(),
-                                        variable_value.value_type.to_string()
+                                        assignment_op,
+                                        attribute.value_type,
+                                        variable_value.value_type
                                     ),
                                     diagnostics::DiagnosticType::Error,
                                     codegen_context.get_current_file().to_path_buf(),
@@ -1097,10 +1080,10 @@ impl PekoValueBuilder for ObjectAccessAST {
                             variable_reassignment.variable_reference.get_end().clone(),
                             format!(
                                 "cannot assign value of type `{}` to attribute of type `{}`. The value's type is not compatible with the attribute's declared type",
-                                variable_value.value_type.to_string(),
+                                variable_value.value_type,
                                 // Best-effort: we don't have the attribute type readily
                                 // available here, so fall back to the value's type.
-                                variable_value.value_type.to_string()
+                                variable_value.value_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1157,10 +1140,7 @@ impl PekoValueBuilder for ArrayAccessAST {
                         diagnostics::PekoDiagnostic::new(
                             self.array.get_start().clone(),
                             self.array.get_end().clone(),
-                            format!(
-                                "cannot index into value of type `{}`",
-                                array.value_type.to_string(),
-                            ),
+                            format!("cannot index into value of type `{}`", array.value_type,),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ),
@@ -1175,10 +1155,7 @@ impl PekoValueBuilder for ArrayAccessAST {
                 .report_diagnostic(diagnostics::PekoDiagnostic::new(
                     self.array.get_start().clone(),
                     self.array.get_end().clone(),
-                    format!(
-                        "value of type `{}` is not an array",
-                        array.value_type.to_string(),
-                    ),
+                    format!("value of type `{}` is not an array", array.value_type,),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
                 ));
@@ -1197,7 +1174,7 @@ impl PekoValueBuilder for ArrayAccessAST {
                     self.access.get_end().clone(),
                     format!(
                         "cannot index into array with index of type `{}`",
-                        access.value_type.to_string(),
+                        access.value_type,
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -1242,7 +1219,7 @@ impl PekoValueBuilder for UnwrapAST {
                         self.optional.get_end().clone(),
                         format!(
                             "cannot unwrap non-optional value of type `{}`",
-                            optional.value_type.to_string()
+                            optional.value_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -1268,8 +1245,7 @@ impl PekoValueBuilder for CastAST {
                         self.value.get_end().clone(),
                         format!(
                             "value of type `{}` cannot be cast to type `{}`",
-                            value.value_type.to_string(),
-                            self.cast_to.to_string()
+                            value.value_type, self.cast_to
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -1661,7 +1637,7 @@ impl PekoValueBuilder for RangeAST {
                     self.range_from.get_end().clone(),
                     format!(
                         "type of range start, `{}`, is not compatible with expected `int` type",
-                        range_start.value_type.to_string(),
+                        range_start.value_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -1684,7 +1660,7 @@ impl PekoValueBuilder for RangeAST {
                     self.range_to.get_end().clone(),
                     format!(
                         "type of range end, `{}`, is not compatible with expected `int` type",
-                        range_end.value_type.to_string(),
+                        range_end.value_type
                     ),
                     diagnostics::DiagnosticType::Error,
                     codegen_context.get_current_file().to_path_buf(),
@@ -1738,17 +1714,17 @@ impl PekoValueBuilder for FunctionCallAST {
 
         // Built-in pseudo-functions: `sizeof<T>()`, `Error(msg)`,
         // `__rt_peko_alloc<T>(count)`, and `cstring("literal")`.
-        if function_name.is_some()
-            && (function_name.clone().unwrap().value == "sizeof"
-                || function_name.clone().unwrap().value == "Error"
-                || function_name.clone().unwrap().value == "__rt_peko_alloc"
-                || function_name.clone().unwrap().value == "cstring")
+        if let Some(function_name) = &function_name
+            && (function_name.value == "sizeof"
+                || function_name.value == "Error"
+                || function_name.value == "__rt_peko_alloc"
+                || function_name.value == "cstring")
         {
             // `cstring("literal")` is handled before generic argument
             // building: it must read the raw literal text from the argument
             // AST and emit a raw (address space 0) C string, rather than let
             // the argument be built into a managed `string` first.
-            if function_name.as_ref().unwrap().value == "cstring" {
+            if function_name.value == "cstring" {
                 if self.arguments.len() != 1 {
                     codegen_context
                         .diagnostics
@@ -1765,15 +1741,15 @@ impl PekoValueBuilder for FunctionCallAST {
                 // The argument must be a plain (non-interpolated) string
                 // literal: a raw C string has no place to evaluate an
                 // interpolation.
-                if let PekoAST::String(string_ast) = &self.arguments[0].1 {
-                    if !string_ast.interpolated {
-                        let text = if string_ast.chunks.is_empty() {
-                            String::new()
-                        } else {
-                            string_ast.chunks[0].get_text()
-                        };
-                        return codegen_context.create_cstring(text);
-                    }
+                if let PekoAST::String(string_ast) = &self.arguments[0].1
+                    && !string_ast.interpolated
+                {
+                    let text = if string_ast.chunks.is_empty() {
+                        String::new()
+                    } else {
+                        string_ast.chunks[0].get_text()
+                    };
+                    return codegen_context.create_cstring(text);
                 }
 
                 codegen_context
@@ -1806,7 +1782,7 @@ impl PekoValueBuilder for FunctionCallAST {
             }
             codegen_context.module_context.step_forward(post_stack);
 
-            if function_name.clone().unwrap().value == "sizeof" {
+            if function_name.value == "sizeof" {
                 if self.function_generics.len() != 1 {
                     codegen_context
                         .diagnostics
@@ -1828,7 +1804,7 @@ impl PekoValueBuilder for FunctionCallAST {
                             self.function_generics[0].end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                self.function_generics[0].to_string()
+                                self.function_generics[0]
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1838,7 +1814,7 @@ impl PekoValueBuilder for FunctionCallAST {
 
                 let type_size = codegen_context.get_type_size(&self.function_generics[0], false);
                 return codegen_context.create_constant_int64(type_size as i32);
-            } else if function_name.as_ref().unwrap().value == "__rt_peko_alloc" {
+            } else if function_name.value == "__rt_peko_alloc" {
                 // __rt_peko_alloc<T>(count): allocate a managed buffer of
                 // `count` elements of type T, returning a Pointer<T>. Used
                 // by the standard library Array and Map classes for their
@@ -1864,7 +1840,7 @@ impl PekoValueBuilder for FunctionCallAST {
                             self.function_generics[0].end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                self.function_generics[0].to_string()
+                                self.function_generics[0]
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1942,7 +1918,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 return codegen_context
                     .allocate_managed_object_sized(&array_descriptor, &byte_count, &buffer_type)
                     .unwrap_or_else(|| codegen_context.create_error_value());
-            } else if function_name.as_ref().unwrap().value == "Error" {
+            } else if function_name.value == "Error" {
                 // Note: original `!arguments.len() == 1` was a bitwise-NOT
                 // bug that never fired correctly. Fixed to `!= 1`.
                 if arguments.len() != 1
@@ -2131,8 +2107,12 @@ impl PekoValueBuilder for FunctionCallAST {
                             if self.arguments.len() > (method_option.arguments.len() - 1)
                                 && method_option.var_args_type.is_some()
                             {
-                                for i in (method_option.arguments.len() - 1)..self.arguments.len() {
-                                    argument_type_options[i]
+                                for argument_type_option in argument_type_options
+                                    .iter_mut()
+                                    .take(self.arguments.len())
+                                    .skip(method_option.arguments.len() - 1)
+                                {
+                                    argument_type_option
                                         .push(method_option.var_args_type.clone().unwrap());
                                 }
                             }
@@ -2372,20 +2352,15 @@ impl PekoValueBuilder for FunctionCallAST {
             // Pass 2: if any generics are still unresolved, try to
             // pull them from the inference type (e.g. assigning to
             // `Array<int>` infers `int` for the generic).
-            let find_expected_type = if needed_generics_count == 0
-                || codegen_context.current_expected_type_options.is_none()
+            let find_expected_type = if needed_generics_count > 0
+                && let Some(expected_types) = &codegen_context.current_expected_type_options
             {
-                None
+                expected_types.iter().find(|expected| {
+                    expected.type_name == function_base_name
+                        && expected.generic_types.len() == needed_generics_count
+                })
             } else {
-                codegen_context
-                    .current_expected_type_options
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .find(|expected| {
-                        expected.type_name == function_base_name
-                            && expected.generic_types.len() == needed_generics_count
-                    })
+                None
             };
 
             if let Some(expected) = find_expected_type {
@@ -2444,7 +2419,7 @@ impl PekoValueBuilder for FunctionCallAST {
                                 generic.end_position.clone(),
                                 format!(
                                     "type `{}` is not defined. Check the type name and that the type is in scope",
-                                    generic.to_string()
+                                    generic
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -2676,10 +2651,11 @@ impl PekoValueBuilder for FunctionCallAST {
                         .build_value(codegen_context)
                 };
 
-                let boxed_argument =
-                    codegen_context.box_value_to_type(&arg.argument_type, &argument_value);
-
-                if boxed_argument.is_none() {
+                if let Some(boxed_argument) =
+                    codegen_context.box_value_to_type(&arg.argument_type, &argument_value)
+                {
+                    argument_values.push(boxed_argument);
+                } else {
                     arguments_errored = true;
                     codegen_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
@@ -2687,15 +2663,12 @@ impl PekoValueBuilder for FunctionCallAST {
                             self.arguments[index].1.get_end().clone(),
                             format!(
                                 "argument of type `{}` does not match expected type `{}`",
-                                argument_value.value_type.to_string(),
-                                arg.argument_type.to_string()
+                                argument_value.value_type, arg.argument_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ),
                     );
-                } else {
-                    argument_values.push(boxed_argument.unwrap());
                 }
             }
         } else {
@@ -2711,9 +2684,11 @@ impl PekoValueBuilder for FunctionCallAST {
                     break;
                 }
 
-                let boxed_argument = codegen_context.box_value_to_type(argument_type, argument);
-
-                if boxed_argument.is_none() {
+                if let Some(boxed_argument) =
+                    codegen_context.box_value_to_type(argument_type, argument)
+                {
+                    argument_values.push(boxed_argument);
+                } else {
                     arguments_errored = true;
                     codegen_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
@@ -2721,15 +2696,12 @@ impl PekoValueBuilder for FunctionCallAST {
                             self.arguments[index].1.get_end().clone(),
                             format!(
                                 "argument of type `{}` does not match expected type `{}`",
-                                argument.value_type.to_string(),
-                                argument_type.to_string()
+                                argument.value_type, argument_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ),
                     );
-                } else {
-                    argument_values.push(boxed_argument.unwrap());
                 }
             }
 
@@ -2758,20 +2730,19 @@ impl PekoValueBuilder for FunctionCallAST {
         }
 
         // Peko-style variadics: collect into a typed array.
-        if function_var_args_type.is_some()
+        if let Some(function_var_args_type) = &function_var_args_type
             && function_type.generic_types.len() - 1 < arguments.len()
         {
             let mut variable_arguments = Vec::new();
-            for i in (function_type.generic_types.len() - 1)..arguments.len() {
-                variable_arguments.push(arguments[i].clone());
+            for argument in arguments.iter().skip(function_type.generic_types.len() - 1) {
+                variable_arguments.push(argument.clone());
             }
 
-            let create_array = codegen_context.create_standard_array(
-                function_var_args_type.as_ref().unwrap(),
-                variable_arguments,
-            );
-
-            if create_array.is_none() {
+            if let Some(create_array) =
+                codegen_context.create_standard_array(function_var_args_type, variable_arguments)
+            {
+                argument_values.push(create_array);
+            } else {
                 arguments_errored = true;
                 let index = function_type.generic_types.len() - 1;
                 codegen_context
@@ -2781,13 +2752,11 @@ impl PekoValueBuilder for FunctionCallAST {
                         self.arguments.last().unwrap().1.get_end().clone(),
                         format!(
                             "variadic arguments have incorrect types. All variadic arguments must have type `{}`",
-                            function_var_args_type.unwrap().to_string()
+                            function_var_args_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
-            } else {
-                argument_values.push(create_array.unwrap());
             }
         }
 
@@ -2883,8 +2852,8 @@ impl PekoValueBuilder for BinaryExpressionAST {
                         format!(
                             "cannot apply binary operator `{}` to values of type `{}` and `{}`. There is no operator overload that accepts these two operand types",
                             self.operator,
-                            lhs.value_type.to_string(),
-                            rhs.value_type.to_string(),
+                            lhs.value_type,
+                            rhs.value_type
                         ),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -2913,7 +2882,7 @@ impl PekoValueBuilder for UnaryExpressionAST {
                             self.operand.get_end().clone(),
                             format!(
                                 "the `!` (logical not) operator requires a `bool`-compatible operand, but the operand has type `{}`",
-                                negate.value_type.to_string()
+                                negate.value_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -2969,7 +2938,7 @@ impl PekoValueBuilder for UnaryExpressionAST {
                                 self.operand.get_end().clone(),
                                 format!(
                                     "cannot negate value of type `{}` with the unary `-` operator. The type does not implement the `*` operator with an `int` operand",
-                                    value.value_type.to_string(),
+                                    value.value_type
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -2997,7 +2966,7 @@ impl PekoValueBuilder for UnaryExpressionAST {
                             self.operand.get_end().clone(),
                             format!(
                                 "cannot dereference value of type `{}` with the unary `*` operator. Only pointer or reference types can be dereferenced",
-                                value_type.to_string(),
+                                value_type
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),

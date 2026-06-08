@@ -753,6 +753,7 @@ impl ProjectIncrementalMap {
 ///
 /// File count isn't known until codegen completes, so this function emits
 /// a single spinner-style progress message rather than per-file ticks.
+#[allow(clippy::unnecessary_unwrap)]
 fn initialize_incremental_for_target(
     peko_root: &Path,
     project: &mut PekoProject,
@@ -772,17 +773,12 @@ fn initialize_incremental_for_target(
         std::fs::read_to_string(&main_file).unwrap(),
     );
 
-    let mut codegen_context = PekoCodegenContext::new(
-        target.clone(),
-        main_file.clone(),
-        false,
-        compilation_root.clone(),
-    );
+    let mut codegen_context =
+        PekoCodegenContext::new(target, main_file.clone(), false, compilation_root.clone());
     codegen_context.compiled_styles_folder = compiled_styles_dir.clone();
     codegen_context.asset_debug_folder = asset_debug_dir;
-    match &project.ui_project_info {
-        Some(ui_info) => codegen_context.application_id = Some(ui_info.bundle_id.clone()),
-        None => {}
+    if let Some(ui_info) = &project.ui_project_info {
+        codegen_context.application_id = Some(ui_info.bundle_id.clone());
     }
 
     if let Some(preloaded) = preloaded_modules {
@@ -814,7 +810,7 @@ fn initialize_incremental_for_target(
         .unwrap()
         .get_top_level()
         .unwrap()
-        .output_binary(target.clone(), objects_directory.join("__globals_set.o"));
+        .output_binary(target, objects_directory.join("__globals_set.o"));
     globals_set
         .read()
         .unwrap()
@@ -845,7 +841,7 @@ fn initialize_incremental_for_target(
                     .get_top_level()
                     .unwrap()
                     .output_binary(
-                        target.clone(),
+                        target,
                         objects_directory.join(format!("{}.o", project_file.file_id)),
                     );
                 top_level_module
@@ -912,7 +908,7 @@ fn initialize_incremental_for_target(
                 .get_top_level()
                 .unwrap()
                 .output_binary(
-                    target.clone(),
+                    target,
                     objects_directory.join(format!("{}.o", project_file.file_id)),
                 );
         }
@@ -952,7 +948,7 @@ fn compile_component(
     );
 
     let mut codegen_context = PekoCodegenContext::new(
-        target.clone(),
+        target,
         component_file.get_path(),
         true,
         compilation_root.clone(),
@@ -970,6 +966,7 @@ fn compile_component(
     // The "Big 3" import asts (runtime / standard / console) live at the
     // front of the parsed list
 
+    #[allow(clippy::arc_with_non_send_sync)]
     let this_module = Arc::new(RwLock::new(CodegenModule::new_top_level(
         component_file.module_name.clone(),
         component_file.get_path(),
@@ -1033,7 +1030,7 @@ fn compile_component(
 /// the entitlements plist as a Mach-O section at link time (used for iOS
 /// simulator bundles), or `None` for targets that do not embed
 /// entitlements at link time.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::unnecessary_unwrap)]
 pub fn compile_project(
     peko_root: &Path,
     project: &mut PekoProject,
@@ -1065,7 +1062,7 @@ pub fn compile_project(
             peko_root,
             project,
             incremental_directory.clone(),
-            target.clone(),
+            target,
             entry_file,
             project_root.clone(),
             compiled_styles_dir,
@@ -1129,7 +1126,7 @@ pub fn compile_project(
 
         // Rechecks first: if any fails, abort before recompilation.
         let mut rechecks_failed = false;
-        for (_, file_recheck) in &files_to_recheck {
+        for file_recheck in files_to_recheck.values() {
             progress.tick(&format!(
                 "Type-checking {}",
                 file_recheck.get_path().display()
@@ -1137,7 +1134,7 @@ pub fn compile_project(
 
             let outcome = super::test(
                 peko_root,
-                target.clone(),
+                target,
                 file_recheck.get_path(),
                 project_root.clone(),
             )?;
@@ -1162,17 +1159,17 @@ pub fn compile_project(
 
                     let (context, diagnostics) = compile_component(
                         peko_root,
-                        target.clone(),
+                        target,
                         recompile.clone(),
                         project_root.clone(),
                         objects_directory.clone(),
                         compiled_styles_dir.clone(),
                         asset_debug_dir.clone(),
                         preloaded_modules.clone(),
-                        match &project.ui_project_info {
-                            Some(ui_info) => Some(ui_info.bundle_id.clone()),
-                            None => None,
-                        },
+                        project
+                            .ui_project_info
+                            .as_ref()
+                            .map(|ui_info| ui_info.bundle_id.clone()),
                     )?;
                     imported_styles.extend(context.imported_styles.clone());
 
@@ -1280,17 +1277,10 @@ pub fn compile_project(
             // If the file set changed, rebuild the globals_set object so
             // it picks up new / removed global initializers.
             if new_files_added || removed_files {
-                let mut codegen_context = PekoCodegenContext::new(
-                    target.clone(),
-                    PathBuf::new(),
-                    true,
-                    project_root.clone(),
-                );
-                match &project.ui_project_info {
-                    Some(ui_info) => {
-                        codegen_context.application_id = Some(ui_info.bundle_id.clone())
-                    }
-                    None => {}
+                let mut codegen_context =
+                    PekoCodegenContext::new(target, PathBuf::new(), true, project_root.clone());
+                if let Some(ui_info) = &project.ui_project_info {
+                    codegen_context.application_id = Some(ui_info.bundle_id.clone());
                 }
                 if let Some(preloaded) = preloaded_modules {
                     codegen_context.module_context.load_modules(preloaded);
@@ -1305,7 +1295,7 @@ pub fn compile_project(
                     .unwrap()
                     .get_top_level()
                     .unwrap()
-                    .output_binary(target.clone(), objects_directory.join("__globals_set.o"));
+                    .output_binary(target, objects_directory.join("__globals_set.o"));
             }
         }
     }

@@ -3,6 +3,7 @@
 //! Boots the tokio runtime, sets up tracing to stderr (so it does not corrupt
 //! the JSON-RPC stream on stdout), and hands the rest of the lifecycle to
 //! `tower_lsp_server::Server`.
+#![allow(clippy::too_many_arguments)]
 
 mod analyzer;
 mod server;

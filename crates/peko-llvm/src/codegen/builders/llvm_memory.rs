@@ -120,7 +120,7 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
         // The runtime allocates the object, prepends and initializes the
         // header from the descriptor, and returns the object pointer.
         let allocation = self.call_named_function(
-            "extern::peko_gc_alloc_object".to_string(),
+            "extern::peko_gc_alloc_object",
             vec![descriptor.clone(), size_arg],
         )?;
 
@@ -136,7 +136,7 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
         // Same as allocate_managed_object, but the size is a runtime
         // value rather than a compile-time constant.
         let allocation = self.call_named_function(
-            "extern::peko_gc_alloc_object".to_string(),
+            "extern::peko_gc_alloc_object",
             vec![descriptor.clone(), byte_count.clone()],
         )?;
 
@@ -146,8 +146,7 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
     fn allocate_raw(&mut self, byte_count: usize, result_type: &PekoType) -> Option<CodegenValue> {
         let size_arg = self.create_constant_int(byte_count as i32);
 
-        let allocation =
-            self.call_named_function("extern::peko_gc_alloc".to_string(), vec![size_arg])?;
+        let allocation = self.call_named_function("extern::peko_gc_alloc", vec![size_arg])?;
 
         Some(cast_to_managed(self, &allocation, result_type))
     }

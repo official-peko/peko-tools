@@ -186,8 +186,6 @@ impl LlvmConstantBuilder for PekoCodegenContext {
         // 3. memcpy the literal bytes from the raw template (as0) into the
         //    managed buffer (as1). The intrinsic declaration was already added
         //    to the owning module in step 2 above.
-        let module = module;
-
         let memcpy_name = c"llvm.memcpy.p1.p0.i64";
         let mut memcpy_fn = unsafe { core::LLVMGetNamedFunction(module, memcpy_name.as_ptr()) };
         if memcpy_fn.is_null() {
