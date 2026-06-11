@@ -23,11 +23,14 @@ use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 
-/// Build iOS app bundles for the project (both arm64 and x86_64).
+/// Build iOS app bundles for the project. Release builds produce the
+/// arm64 device bundle only. Debug builds also produce an x86_64
+/// simulator bundle.
 pub fn bundle(
     cli_info: &CLIInfo,
     project: &mut PekoProject,
     ios_build_directory: PathBuf,
+    release: bool,
     progress: &dyn ProgressSink,
 ) -> BundleResult<()> {
     // Clean the build directory if it already exists, then recreate it.
@@ -46,40 +49,51 @@ pub fn bundle(
 
     let guard = CleanupGuard::new(ios_build_directory.clone());
 
-    // Four user-visible phases; the two inner compiles contribute
-    // their own units via add_to_total.
-    progress.add_to_total(4);
+    // The device build runs in every mode. The simulator build and the
+    // ad-hoc signing run for debug builds. Each compile contributes its
+    // own units via add_to_total.
+    progress.add_to_total(if release { 2 } else { 4 });
 
     progress.tick("iOS: preparing .app bundle layout");
 
-    let arm_build_dir = ios_build_directory.join("arm");
-    let x86_64_build_dir = ios_build_directory.join("x86_64");
-    io_at(&arm_build_dir, fs::create_dir_all(&arm_build_dir))?;
-    io_at(&x86_64_build_dir, fs::create_dir_all(&x86_64_build_dir))?;
-
-    // Bare `.app` directly under each per-arch dir. Release packaging
-    // wraps the arm64 bundle in `Payload/` and zips it into a `.ipa` in
-    // sign().
     let app_file_name = format!("{}.app", project.name);
-    let arm_app = arm_build_dir.join(&app_file_name);
-    let x86_64_app = x86_64_build_dir.join(&app_file_name);
+    let arm_app = ios_build_directory.join("arm").join(&app_file_name);
     io_at(&arm_app, fs::create_dir_all(&arm_app))?;
-    io_at(&x86_64_app, fs::create_dir_all(&x86_64_app))?;
 
-    // Info.plist - same bytes for both architectures.
+    let x86_64_app = ios_build_directory.join("x86_64").join(&app_file_name);
+    if !release {
+        io_at(&x86_64_app, fs::create_dir_all(&x86_64_app))?;
+    }
+
+    // Bundle roots that receive config files, icons, and assets. The
+    // device root is always present. The simulator root is present for
+    // debug builds.
+    let mut app_dirs: Vec<&PathBuf> = vec![&arm_app];
+    if !release {
+        app_dirs.push(&x86_64_app);
+    }
+
+    // Config files copied into each bundle root. Info.plist and the
+    // privacy manifest carry the same bytes for every architecture.
     let plist_src = project
         .get_root()
         .join(".peko/bundling/configfiles/ios/Info.plist");
-    io_at(&plist_src, fs::copy(&plist_src, arm_app.join("Info.plist")))?;
-    io_at(
-        &plist_src,
-        fs::copy(&plist_src, x86_64_app.join("Info.plist")),
-    )?;
+    let privacy_src = project
+        .get_root()
+        .join(".peko/bundling/configfiles/ios/PrivacyInfo.xcprivacy");
 
-    // Icons. Each architecture gets the same set: two raw PNGs (76x76
-    // and 60x60) plus a CAR asset catalog generated from the original.
+    // Icons: two raw PNGs (76x76 and 60x60) plus a CAR asset catalog
+    // generated from the original. Project assets go in the .app root on
+    // iOS. Subdirectories are preserved so resource lookups resolve the
+    // hierarchical names.
     let icon = &project.ui_project_info.as_ref().unwrap().icon;
-    for app_dir in [&arm_app, &x86_64_app] {
+    for app_dir in app_dirs.iter().copied() {
+        io_at(&plist_src, fs::copy(&plist_src, app_dir.join("Info.plist")))?;
+        io_at(
+            &privacy_src,
+            fs::copy(&privacy_src, app_dir.join("PrivacyInfo.xcprivacy")),
+        )?;
+
         let icon_76 = app_dir.join("AppIcon76x76.png");
         let icon_60 = app_dir.join("AppIcon60x60.png");
         let car = app_dir.join("Assets.car");
@@ -90,10 +104,6 @@ pub fn bundle(
             .to_png(&mut io_at(&icon_60, File::create(&icon_60))?);
         icon.to_car(&mut io_at(&car, File::create(&car))?);
 
-        // Project assets go in the .app root on iOS (there is no
-        // Contents/Resources subdir like macOS). Subdirectories are
-        // preserved so [NSBundle pathForResource:ofType:] resolves the
-        // hierarchical names.
         crate::bundler::copy_project_assets(project, app_dir)?;
     }
 
@@ -103,7 +113,6 @@ pub fn bundle(
         .get_root()
         .join(".peko/bundling/configfiles/ios/app.entitlements");
 
-    // Compile + link the native binary for each architecture.
     progress.tick("iOS: compiling arm64 binary");
     let arm_target = PekoTarget::new(OperatingSystem::IOS, Architecture::Arm, false);
     let (_, arm_diagnostics) = execution::incremental::compile_project(
@@ -124,35 +133,35 @@ pub fn bundle(
         return Err(BundleError::CompileDiagnostics(diagnostics));
     }
 
-    progress.tick("iOS: compiling x86_64 simulator binary");
-    let x86_64_target = PekoTarget::new(OperatingSystem::IOS, Architecture::X86_64, false);
-    let (_, x86_64_diagnostics) = execution::incremental::compile_project(
-        cli_info.get_peko_root(),
-        project,
-        x86_64_target,
-        project.get_root().join(".peko/incremental"),
-        Some(x86_64_app.join(&project.name)),
-        false,
-        Vec::new(),
-        None,
-        None,
-        None,
-        Some(entitlements.clone()),
-        progress,
-    )?;
-    if let Some(diagnostics) = x86_64_diagnostics {
-        return Err(BundleError::CompileDiagnostics(diagnostics));
+    if !release {
+        progress.tick("iOS: compiling x86_64 simulator binary");
+        let x86_64_target = PekoTarget::new(OperatingSystem::IOS, Architecture::X86_64, false);
+        let (_, x86_64_diagnostics) = execution::incremental::compile_project(
+            cli_info.get_peko_root(),
+            project,
+            x86_64_target,
+            project.get_root().join(".peko/incremental"),
+            Some(x86_64_app.join(&project.name)),
+            false,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(entitlements.clone()),
+            progress,
+        )?;
+        if let Some(diagnostics) = x86_64_diagnostics {
+            return Err(BundleError::CompileDiagnostics(diagnostics));
+        }
+
+        // Simulator bundles must carry a signature to launch. Ad-hoc sign
+        // each one. Capability entitlements live in the linked Mach-O
+        // section rather than in this signature. The device bundle is
+        // signed with the distribution key by sign() during release.
+        progress.tick("iOS: ad-hoc signing simulator bundles");
+        signing::adhoc_sign_apple_bundle(&arm_app)?;
+        signing::adhoc_sign_apple_bundle(&x86_64_app)?;
     }
-
-    // Both arm64 and x86_64 simulator bundles are produced. Release
-    // signing and .ipa packaging are handled by sign().
-
-    // Simulator bundles must carry a signature to launch. Ad-hoc sign
-    // each one. Capability entitlements live in the linked Mach-O section,
-    // not in this signature.
-    progress.tick("iOS: ad-hoc signing simulator bundles");
-    signing::adhoc_sign_apple_bundle(&arm_app)?;
-    signing::adhoc_sign_apple_bundle(&x86_64_app)?;
 
     guard.commit();
     Ok(())
@@ -206,7 +215,7 @@ pub fn sign(
         None => signing::entitlements_from_profile(profile)?,
     };
 
-    signing::sign_apple_bundle(&arm_app, &key, entitlements_xml.as_deref())?;
+    signing::sign_apple_bundle(&arm_app, &key, entitlements_xml.as_deref(), false)?;
 
     // Wrap the signed bundle in Payload/ and zip into a .ipa.
     let ipa_path = ios_build_directory.join(format!("{}.ipa", project.name));

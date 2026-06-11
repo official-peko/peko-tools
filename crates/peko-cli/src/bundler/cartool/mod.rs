@@ -1,10 +1,8 @@
 //! Writer for Apple's CAR (Compiled Asset Catalog) binary format.
 //!
 //! Used by the iOS bundler to embed app icons as a `.car` asset catalog
-//! inside the bundle. The format is undocumented by Apple; this
-//! implementation is reverse-engineered from `actool` output and supports
-//! only the subset needed for app-icon embedding (CSI rendition entries
-//! plus BOM tree metadata).
+//! inside the bundle. The writer supports the subset of the format needed
+//! for app-icon embedding (CSI rendition entries plus BOM tree metadata).
 //!
 //! Submodules:
 //!

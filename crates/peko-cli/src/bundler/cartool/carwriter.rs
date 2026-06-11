@@ -263,8 +263,8 @@ impl CarWriter {
     }
 
     /// Block offsets table (big endian):
-    /// block count, then `{ offset: u32, size: u32 }` per block. Returns
-    /// the table's length in bytes.
+    /// block count, then `{ offset: u32, size: u32 }` per block, then a
+    /// free-list count. Returns the table's length in bytes.
     fn write_block_offsets_table(&mut self) -> u32 {
         let start = self.current_offset();
         self.write_bytes(&(self.blocks.len() as u32).to_be_bytes());
@@ -274,6 +274,11 @@ impl CarWriter {
             self.write_bytes(&block.byte_offset.to_be_bytes());
             self.write_bytes(&block.byte_count.to_be_bytes());
         }
+
+        // Block-index free list. The index ends with a free-list count and
+        // that many free entries. The count is zero.
+        self.write_bytes(&0u32.to_be_bytes());
+
         self.current_offset() - start
     }
 
@@ -495,6 +500,14 @@ impl WriteToCar for carinfo::BomTree {
         let key_value_start = writer.current_offset();
         for _ in 0..self.keys.len() {
             writer.write_bytes(&[0; 8]);
+        }
+
+        // Pad the paths block out to block_size. The tree reader reads the
+        // full block_size span for each paths block, so the block occupies
+        // that many bytes in the file.
+        let header_written = writer.current_offset() - tree_header_start;
+        for _ in header_written..self.block_size {
+            writer.write_byte(0);
         }
 
         writer.add_block(&BomBlock {

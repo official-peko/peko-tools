@@ -21,12 +21,17 @@ OPTIONS
     --cert=<PATH>             ios and macos: signing certificate as a .p12
     --profile=<PATH>          ios: provisioning profile (.mobileprovision)
     --entitlements=<PATH>     ios and macos: entitlements plist (optional)
+    --notary-issuer=<ID>      macos: App Store Connect API issuer id, for
+                              notarization (optional)
+    --notary-key-id=<ID>      macos: App Store Connect API key id (optional)
+    --notary-p8=<PATH>        macos: App Store Connect API .p8 private key
+                              (optional; required with the notary id flags)
     --pfx=<PATH>              windows: code signing certificate as a .pfx
 
 EXAMPLES
     peko keys add --platform=android --keystore=upload.keystore --alias=upload --password=secret
     peko keys add --platform=ios --cert=dist.p12 --profile=app.mobileprovision --password=secret
-    peko keys add --platform=macos --cert=devid.p12 --password=secret
+    peko keys add --platform=macos --cert=devid.p12 --notary-issuer=ISSUER --notary-key-id=KEYID --notary-p8=AuthKey.p8 --password=secret
     peko keys add --platform=windows --pfx=codesign.pfx --password=secret
     peko keys list
     peko keys remove --platform=windows

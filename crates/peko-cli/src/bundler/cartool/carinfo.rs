@@ -58,7 +58,7 @@ pub struct CELMImageData {
 }
 
 /// Maximum pixel-rows-per-chunk used when splitting a full image into
-/// per-chunk compression buffers. This matches the value actool uses.
+/// per-chunk compression buffers.
 const CHUNK_ROW_COUNT: usize = 341;
 
 /// Bytes per pixel in the CAR's BGRA8 storage format.

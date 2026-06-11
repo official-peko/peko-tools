@@ -149,6 +149,7 @@ pub fn bundle(
             project,
             &android_build_directory,
             &app_directory,
+            false,
             progress,
         )?;
     } else {
@@ -218,6 +219,7 @@ fn build_app_bundle(
     project: &PekoProject,
     android_build_directory: &Path,
     app_directory: &Path,
+    debuggable: bool,
     progress: &dyn ProgressSink,
 ) -> BundleResult<PathBuf> {
     let aapt2 = resolve_aapt2(cli_info)?;
@@ -238,25 +240,28 @@ fn build_app_bundle(
     // Link into protobuf form, the format an app bundle requires.
     progress.tick("Android: linking resources for the bundle");
     let proto_apk = android_build_directory.join("base-proto.apk");
-    run_tool(
-        "aapt2",
-        Command::new(&aapt2)
-            .arg("link")
-            .arg("--proto-format")
-            .arg("-o")
-            .arg(&proto_apk)
-            .arg("-I")
-            .arg(
-                cli_info
-                    .get_peko_root()
-                    .join("Compiler/bundling/android.jar"),
-            )
-            .arg("--manifest")
-            .arg(app_directory.join("AndroidManifest.xml"))
-            .arg("-R")
-            .arg(&compiled_resources)
-            .arg("--auto-add-overlay"),
-    )?;
+    let mut link = Command::new(&aapt2);
+    link.arg("link")
+        .arg("--proto-format")
+        .arg("-o")
+        .arg(&proto_apk)
+        .arg("-I")
+        .arg(
+            cli_info
+                .get_peko_root()
+                .join("Compiler/bundling/android.jar"),
+        )
+        .arg("--manifest")
+        .arg(app_directory.join("AndroidManifest.xml"))
+        .arg("-R")
+        .arg(&compiled_resources)
+        .arg("--auto-add-overlay");
+    // Debug builds set android:debuggable at link time. Release builds leave
+    // it unset, which Google Play requires for published bundles.
+    if debuggable {
+        link.arg("--debug-mode");
+    }
+    run_tool("aapt2", &mut link)?;
 
     // Extract the proto APK so its parts can be rearranged into the base
     // module layout bundletool expects.
@@ -351,6 +356,7 @@ fn build_debug_apk(
         project,
         android_build_directory,
         app_directory,
+        true,
         progress,
     )?;
 

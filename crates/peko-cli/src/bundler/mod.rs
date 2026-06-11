@@ -289,19 +289,17 @@ const ANDROID_MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="utf-8" stand
 <manifest xmlns:tools="http://schemas.android.com/tools"
           xmlns:android="http://schemas.android.com/apk/res/android"
           package="{bundle_id}"
-          android:versionCode="1"
+          android:versionCode="{version_code}"
           android:versionName="{version}">
-    <uses-sdk android:minSdkVersion="22" android:targetSdkVersion="33" />
+    <uses-sdk android:minSdkVersion="22" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.SET_RELEASE_APP"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <application android:usesCleartextTraffic="true"
-                 android:debuggable="true"
                  android:hasCode="false"
                  tools:replace="android:icon,android:theme,android:allowBackup,label"
                  android:icon="@mipmap/icon">
         <activity android:configChanges="keyboardHidden|orientation"
                   android:name="android.app.NativeActivity"
-                  android:windowSoftInputMode="stateAlwaysHidden"
                   android:label="{name}"
                   android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="PekoApp"/>
@@ -331,6 +329,7 @@ const IOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <key>CFBundleSupportedPlatforms</key>
     <array><string>iPhoneOS</string></array>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -347,8 +346,6 @@ const IOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <key>DTXcodeBuild</key><string>17C529</string>
     <key>DTPlatformBuild</key><string>23C57</string>
     <key>UIRequiresFullScreen</key><true/>
-    <key>NSAppTransportSecurity</key>
-    <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
     <key>UILaunchScreen</key>
     <dict><key>UIColorName</key><string>black</string></dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
@@ -391,31 +388,132 @@ const IOS_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
+/// Apple privacy manifest template (`PrivacyInfo.xcprivacy`), used by both
+/// the iOS and macOS bundles.
+///
+/// Declares that the app does not track and collects no data types. The
+/// accessed-API entries cover the required-reason API categories the
+/// linked native code touches through the SQLite database file: file
+/// timestamps and disk space. Each entry pairs the API category with a
+/// reason code from Apple's fixed list. C617.1 covers timestamps of files
+/// in the app container. 85F4.1 covers free space of the app container.
+const APPLE_PRIVACY_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key><false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array><string>C617.1</string></array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array><string>85F4.1</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
+"#;
+
 /// macOS `Info.plist` template.
 const MACOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key><string>English</string>
+    <key>CFBundleName</key><string>{name}</string>
+    <key>CFBundleDisplayName</key><string>{name}</string>
     <key>CFBundleExecutable</key><string>exec</string>
     <key>CFBundleIdentifier</key><string>{bundle_id}</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>{name}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>{version}</string>
     <key>CFBundleVersion</key><string>{version}</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array><string>MacOSX</string></array>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
+    <key>DTPlatformName</key><string>macosx</string>
+    <key>DTSDKName</key><string>macosx26.2</string>
+    <key>DTPlatformVersion</key><string>26.2</string>
 </dict>
 </plist>
 "#;
 
+/// Derive a monotonic Android versionCode from a semver version string.
+/// The scheme is major * 1000000 + minor * 1000 + patch. The value climbs
+/// as the project version climbs and stays well within the Play limit of
+/// 2100000000. Any pre-release or build metadata suffix is ignored, and any
+/// unparsable component counts as zero.
+fn android_version_code(version: &str) -> u64 {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut parts = core
+        .split('.')
+        .map(|p| p.trim().parse::<u64>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    major * 1_000_000 + minor * 1_000 + patch
+}
+
+/// Normalize a project version into one to three period-separated
+/// integers. A leading "v" or "V" is removed, any pre-release or build
+/// suffix is dropped, and each kept component is parsed as an integer so
+/// leading zeros are stripped. Parsing stops at the first non-integer
+/// component. A version with no leading integer yields "0". The result is
+/// valid for `CFBundleVersion`, `CFBundleShortVersionString`, and the
+/// Android `versionName`.
+fn normalize_version(version: &str) -> String {
+    let trimmed = version.trim();
+    let without_v = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    let core = without_v.split(['-', '+']).next().unwrap_or(without_v);
+
+    let mut components: Vec<String> = Vec::new();
+    for part in core.split('.') {
+        match part.trim().parse::<u64>() {
+            Ok(number) => components.push(number.to_string()),
+            Err(_) => break,
+        }
+        if components.len() == 3 {
+            break;
+        }
+    }
+
+    if components.is_empty() {
+        "0".to_string()
+    } else {
+        components.join(".")
+    }
+}
+
 /// Substitute the placeholders in a template with the actual project
 /// values.
 fn fill_template(template: &str, name: &str, bundle_id: &str, version: &str) -> String {
+    let version = normalize_version(version);
     template
         .replace("{name}", name)
         .replace("{bundle_id}", bundle_id)
-        .replace("{version}", version)
+        .replace(
+            "{version_code}",
+            &android_version_code(&version).to_string(),
+        )
+        .replace("{version}", &version)
 }
 
 /// Fill `template`'s placeholders with the supplied values and write
@@ -500,6 +598,13 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         bundle_id,
         version,
     )?;
+    write_template(
+        &ios_folder.join("PrivacyInfo.xcprivacy"),
+        APPLE_PRIVACY_MANIFEST,
+        name,
+        bundle_id,
+        version,
+    )?;
 
     // macOS
     let macos_folder = project_bundling_folder.join("macos");
@@ -507,6 +612,13 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
     write_template(
         &macos_folder.join("Info.plist"),
         MACOS_INFO_PLIST,
+        name,
+        bundle_id,
+        version,
+    )?;
+    write_template(
+        &macos_folder.join("PrivacyInfo.xcprivacy"),
+        APPLE_PRIVACY_MANIFEST,
         name,
         bundle_id,
         version,

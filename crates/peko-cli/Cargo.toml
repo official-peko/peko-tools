@@ -42,6 +42,7 @@ grass = "0.13"
 ctrlc = "3"
 apple-codesign = "0.29.0"
 keyring-core = "1.0.0"
+app-store-connect = "0.7.0"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }

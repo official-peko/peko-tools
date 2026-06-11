@@ -114,7 +114,7 @@ pub fn lld_link(
 
             // Base iOS link arguments.
             let mut ios_arguments = format!(
-                "-w -dynamic -arch {arch} -platform_version {platform} 26.2.0 26.2 -syslibroot {} -framework Security -framework Foundation -framework WebKit -framework UIKit",
+                "-w -dynamic -arch {arch} -platform_version {platform} 15.0 26.2 -syslibroot {} -framework Security -framework Foundation -framework WebKit -framework UIKit",
                 sysroot.join("iPhoneOS.sdk").display()
             );
 

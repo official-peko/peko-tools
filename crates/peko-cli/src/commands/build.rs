@@ -274,8 +274,14 @@ fn build_ui_project(
         let label = platform_label(platform).unwrap_or("unknown");
         progress.tick(&format!("Building for {label}"));
 
-        let bundle_result =
-            run_bundler(cli_info, &mut project, &build_directory, platform, progress);
+        let bundle_result = run_bundler(
+            cli_info,
+            &mut project,
+            &build_directory,
+            platform,
+            release,
+            progress,
+        );
 
         if let Err(e) = bundle_result {
             failures.push((*platform, PlatformFailure::Build(e)));
@@ -334,15 +340,20 @@ fn run_bundler(
     project: &mut PekoProject,
     build_directory: &std::path::Path,
     platform: &OperatingSystem,
+    release: bool,
     progress: &dyn ProgressSink,
 ) -> Result<(), BundleError> {
     match platform {
         OperatingSystem::Android => {
             bundler::android::bundle(cli_info, project, build_directory.join("android"), progress)
         }
-        OperatingSystem::IOS => {
-            bundler::ios::bundle(cli_info, project, build_directory.join("ios"), progress)
-        }
+        OperatingSystem::IOS => bundler::ios::bundle(
+            cli_info,
+            project,
+            build_directory.join("ios"),
+            release,
+            progress,
+        ),
         OperatingSystem::Linux => {
             bundler::linux::bundle(cli_info, project, build_directory.join("linux"), progress)
         }
@@ -384,7 +395,8 @@ fn run_signer(
         }
         OperatingSystem::IOS => bundler::ios::sign(cli_info, project, build_directory.join("ios")),
         OperatingSystem::MacOS => {
-            match bundler::macos::sign(cli_info, project, build_directory.join("macos"))? {
+            match bundler::macos::sign(cli_info, project, build_directory.join("macos"), reporter)?
+            {
                 bundler::signing::OptionalSignOutcome::Signed => {}
                 bundler::signing::OptionalSignOutcome::NoKey => {
                     reporter.warning(format!(

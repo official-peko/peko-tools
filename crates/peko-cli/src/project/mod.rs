@@ -321,8 +321,28 @@ impl ProjectIcon {
             .unwrap();
     }
 
-    /// Resizes the icon to 256x256 and writes it as an `.icns` for Apple
-    /// bundles.
+    /// Writes this icon to a PNG with no alpha channel. Each pixel is
+    /// composited over an opaque white background and the result is
+    /// encoded as RGB. The App Store app icon rejects an alpha channel on
+    /// the large app icon.
+    pub fn to_png_opaque<W: Write + Seek>(&self, writer: &mut W) {
+        let height = (self.icon_pixel_data.len() as u32 / 4) / self.width;
+        let rgba = image::RgbaImage::from_raw(self.width, height, self.get_rgba_pixels()).unwrap();
+
+        let mut rgb = image::RgbImage::new(self.width, height);
+        for (x, y, pixel) in rgba.enumerate_pixels() {
+            let [r, g, b, a] = pixel.0;
+            let alpha = a as u32;
+            let background = 255 - alpha;
+            let blend =
+                |channel: u8| -> u8 { ((channel as u32 * alpha + 255 * background) / 255) as u8 };
+            rgb.put_pixel(x, y, image::Rgb([blend(r), blend(g), blend(b)]));
+        }
+
+        DynamicImage::ImageRgb8(rgb)
+            .write_to(writer, image::ImageFormat::Png)
+            .unwrap();
+    }
     pub fn to_icns<W: Write + Seek>(&self, writer: &mut W) {
         let imagex256 = self.resize(256, 256);
         let mut icns_family = icns::IconFamily::new();

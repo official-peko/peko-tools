@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use app_store_connect::UnifiedApiKey;
 use serde_json::Value;
 
 use crate::bundler::signing;
@@ -169,6 +170,68 @@ fn install_file(
     true
 }
 
+/// Encode the App Store Connect API key used for notarization from its
+/// three parts and install it under the macOS keys directory. The issuer
+/// id, key id, and `.p8` private key are combined into a unified JSON file
+/// that the notary client reads. Returns false when a partial flag set is
+/// given or encoding fails, with the error already reported. Returns true
+/// when a key is installed or when no notary flags are present.
+fn install_notary_key(
+    reporter: &Reporter,
+    root: &Path,
+    cli_info: &CLIInfo,
+    registry: &mut Value,
+) -> bool {
+    let issuer = cli_info.flags.get_flag("notary-issuer");
+    let key_id = cli_info.flags.get_flag("notary-key-id");
+    let private_key = cli_info.flags.get_flag("notary-p8");
+
+    let (issuer, key_id, private_key) = match (issuer, key_id, private_key) {
+        (None, None, None) => return true,
+        (Some(issuer), Some(key_id), Some(private_key)) => (issuer, key_id, private_key),
+        _ => {
+            reporter
+                .error("notary key needs all of --notary-issuer, --notary-key-id, and --notary-p8");
+            return false;
+        }
+    };
+
+    let private_key_path = PathBuf::from(&private_key);
+    if !private_key_path.exists() {
+        reporter.error(format!(
+            "notary private key '{}' does not exist",
+            private_key_path.display()
+        ));
+        return false;
+    }
+
+    let dir = signing::platform_dir(root, "macos");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        reporter.error(format!("could not create {}: {e}", dir.display()));
+        return false;
+    }
+
+    let unified = match UnifiedApiKey::from_ecdsa_pem_path(&issuer, &key_id, &private_key_path) {
+        Ok(unified) => unified,
+        Err(e) => {
+            reporter.error(format!("could not read notary private key: {e}"));
+            return false;
+        }
+    };
+
+    let dest = dir.join("notary_key.json");
+    if let Err(e) = unified.write_json_file(&dest) {
+        reporter.error(format!(
+            "could not write notary key to {}: {e}",
+            dest.display()
+        ));
+        return false;
+    }
+
+    set_registry_file(registry, "macos", "notary_key", "notary_key.json");
+    true
+}
+
 fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) -> ExitCode {
     let Some(platform) = require_platform(cli_info, reporter) else {
         return ExitCode::FAILURE;
@@ -224,6 +287,10 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         {
             return ExitCode::FAILURE;
         }
+    }
+
+    if platform == "macos" && !install_notary_key(reporter, root, cli_info, &mut registry) {
+        return ExitCode::FAILURE;
     }
 
     if platform == "android" {

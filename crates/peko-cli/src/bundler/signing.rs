@@ -318,40 +318,165 @@ pub fn adhoc_sign_apple_bundle(app_dir: &Path) -> BundleResult<()> {
         .map_err(|e| BundleError::Signing(format!("ad-hoc signing failed: {e}")))
 }
 
+/// Sign a path in place with the given Apple key on a dedicated thread.
+/// When `entitlements_xml` is `Some`, it is applied to the main executable.
+/// When `runtime_flag` is true, the main executable carries the hardened
+/// runtime flag. When `timestamp` is true, the signature includes a secure
+/// timestamp from Apple's timestamp service. The timestamp request runs its
+/// own runtime, so the work runs on a dedicated thread that has no ambient
+/// runtime. The inner runtime then starts and drops in a plain blocking
+/// context.
+fn sign_path_isolated(
+    target: &Path,
+    key: &AppleSigningKey,
+    entitlements_xml: Option<&str>,
+    runtime_flag: bool,
+    timestamp: bool,
+) -> BundleResult<()> {
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(move || -> BundleResult<()> {
+            use apple_codesign::cryptography::PrivateKey;
+            use apple_codesign::{
+                CodeSignatureFlags, SettingsScope, SigningSettings, UnifiedSigner,
+            };
+
+            let p12_bytes = std::fs::read(&key.p12).map_err(|source| BundleError::Io {
+                path: key.p12.clone(),
+                source,
+            })?;
+
+            // Load the certificate and private key from the PKCS#12 container.
+            let (certificate, private_key) =
+                apple_codesign::cryptography::parse_pfx_data(&p12_bytes, &key.p12_password)
+                    .map_err(|e| BundleError::Signing(format!("p12 load failed: {e}")))?;
+
+            let mut settings = SigningSettings::default();
+            settings.set_signing_key(private_key.as_key_info_signer(), certificate);
+
+            // Register the Apple CA chain (WWDR intermediate and Apple root)
+            // from the crate's bundled Apple certificates so the signature
+            // carries a full chain. The signer otherwise embeds only the
+            // leaf, and Apple does not recognize the result as a submission
+            // certificate.
+            settings.chain_apple_certificates();
+
+            // Embed the team identifier carried by the Apple signing
+            // certificate.
+            settings.set_team_id_from_signing_certificate();
+
+            if let Some(xml) = entitlements_xml {
+                settings
+                    .set_entitlements_xml(SettingsScope::Main, xml)
+                    .map_err(|e| BundleError::Signing(format!("entitlements setup failed: {e}")))?;
+            }
+
+            if runtime_flag {
+                settings.set_code_signature_flags(SettingsScope::Main, CodeSignatureFlags::RUNTIME);
+            }
+
+            if timestamp {
+                settings
+                    .set_time_stamp_url("http://timestamp.apple.com/ts01")
+                    .map_err(|e| BundleError::Signing(format!("timestamp setup failed: {e}")))?;
+            }
+
+            let signer = UnifiedSigner::new(settings);
+            signer
+                .sign_path_in_place(target)
+                .map_err(|e| BundleError::Signing(format!("signing failed: {e}")))
+        });
+
+        match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(BundleError::Signing("signing thread panicked".to_string())),
+        }
+    })
+}
+
 /// Sign a Mach-O bundle (a `.app` directory) in place with the given Apple
 /// key. When `entitlements_xml` is `Some`, it is applied to the main
-/// executable. This drives the `apple-codesign` crate directly.
+/// executable. When `hardened_runtime` is true, the main executable is
+/// signed with the hardened runtime flag and a secure timestamp from
+/// Apple's timestamp service, which notarization requires.
 pub fn sign_apple_bundle(
     app_dir: &Path,
     key: &AppleSigningKey,
     entitlements_xml: Option<&str>,
+    hardened_runtime: bool,
 ) -> BundleResult<()> {
-    use apple_codesign::cryptography::PrivateKey;
-    use apple_codesign::{SettingsScope, SigningSettings, UnifiedSigner};
+    sign_path_isolated(
+        app_dir,
+        key,
+        entitlements_xml,
+        hardened_runtime,
+        hardened_runtime,
+    )
+}
 
-    let p12_bytes = std::fs::read(&key.p12).map_err(|source| BundleError::Io {
-        path: key.p12.clone(),
-        source,
-    })?;
+/// Sign a disk image in place with the given Apple key and a secure
+/// timestamp. The image carries no hardened runtime flag and no
+/// entitlements. The timestamp is included because notarization requires
+/// it on the image signature.
+pub fn sign_dmg(dmg: &Path, key: &AppleSigningKey) -> BundleResult<()> {
+    sign_path_isolated(dmg, key, None, false, true)
+}
 
-    // Load the certificate and private key from the PKCS#12 container.
-    let (certificate, private_key) =
-        apple_codesign::cryptography::parse_pfx_data(&p12_bytes, &key.p12_password)
-            .map_err(|e| BundleError::Signing(format!("p12 load failed: {e}")))?;
+/// Apple notarization credentials: an App Store Connect API key encoded as
+/// a single JSON file by `rcodesign encode-app-store-connect-api-key`.
+pub struct NotaryCredentials {
+    pub api_key_json: PathBuf,
+}
 
-    let mut settings = SigningSettings::default();
-    settings.set_signing_key(private_key.as_key_info_signer(), certificate);
-
-    if let Some(xml) = entitlements_xml {
-        settings
-            .set_entitlements_xml(SettingsScope::Main, xml)
-            .map_err(|e| BundleError::Signing(format!("entitlements setup failed: {e}")))?;
+/// Resolve notarization credentials for a platform from the registry, or
+/// `None` when no notary key is registered or the file is missing.
+pub fn resolve_notary(project_root: &Path, platform: &str) -> Option<NotaryCredentials> {
+    let registry = load_registry(project_root).ok()?;
+    let api_key_json = registered_file(project_root, &registry, platform, "notary_key")?;
+    if !api_key_json.exists() {
+        return None;
     }
+    Some(NotaryCredentials { api_key_json })
+}
 
-    let signer = UnifiedSigner::new(settings);
-    signer
-        .sign_path_in_place(app_dir)
-        .map_err(|e| BundleError::Signing(format!("bundle signing failed: {e}")))
+/// Notarize a signed bundle with Apple's notary service and staple the
+/// ticket onto it, using the `apple-codesign` crate in process. The
+/// credentials are an App Store Connect API key JSON file. The bundle is
+/// submitted, the call waits for a terminal result, and the ticket is
+/// stapled onto the bundle when notarization succeeds. This needs no
+/// external tools and runs on any host the crate compiles on.
+pub fn notarize_and_staple(app: &Path, creds: &NotaryCredentials) -> BundleResult<()> {
+    use apple_codesign::notarization::Notarizer;
+    use apple_codesign::stapling::Stapler;
+
+    // apple-codesign drives the notary API with its own tokio runtime. The
+    // CLI runs inside a tokio runtime, so the notary work runs on a
+    // dedicated thread that has no ambient runtime. The inner runtime then
+    // starts and drops in a plain blocking context.
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| -> BundleResult<()> {
+            let notarizer = Notarizer::from_api_key(&creds.api_key_json)
+                .map_err(|e| BundleError::Signing(format!("notary key load failed: {e}")))?;
+
+            notarizer
+                .notarize_path(app, Some(std::time::Duration::from_secs(600)))
+                .map_err(|e| BundleError::Signing(format!("notarization failed: {e}")))?;
+
+            let stapler = Stapler::new()
+                .map_err(|e| BundleError::Signing(format!("stapler init failed: {e}")))?;
+            stapler
+                .staple_path(app)
+                .map_err(|e| BundleError::Signing(format!("staple failed: {e}")))?;
+
+            Ok(())
+        });
+
+        match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(BundleError::Signing(
+                "notarization thread panicked".to_string(),
+            )),
+        }
+    })
 }
 
 /// Extract the entitlements plist from a provisioning profile.

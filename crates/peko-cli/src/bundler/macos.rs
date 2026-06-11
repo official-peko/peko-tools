@@ -1,27 +1,31 @@
 //! macOS `.app` bundler.
 //!
-//! Produces a `.app` bundle for both arm64 and x86_64 (separate
-//! `<build_dir>/arm/<Name>.app/` and `<build_dir>/x86_64/<Name>.app/`
-//! trees). Each bundle has the standard macOS layout:
-//! `Contents/Info.plist`, `Contents/MacOS/exec` (the compiled binary),
-//! and `Contents/Resources/icon.icns`.
+//! Produces a single universal `.app` bundle at `<build_dir>/<Name>.app`.
+//! The arm64 and x86_64 executables are compiled separately and combined
+//! into one universal binary with `lipo`. The bundle has the standard
+//! macOS layout: `Contents/Info.plist`, `Contents/MacOS/exec` (the
+//! universal binary), `Contents/Resources/icon.icns`, and
+//! `Contents/Resources/PrivacyInfo.xcprivacy`.
 //!
-//! macOS signing is optional. [`sign`] signs both bundles in place with a
-//! Developer ID key using the `apple-codesign` crate when a macOS key is
-//! registered for the project.
+//! macOS signing is optional. [`sign`] signs the bundle in place with a
+//! Developer ID key and the hardened runtime through the `apple-codesign`
+//! crate when a macOS key is registered. When a notary key is registered,
+//! the signed bundle is submitted to Apple's notary service and the ticket
+//! is stapled, all in process through the same crate.
 
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use peko_core::target::{Architecture, OperatingSystem, PekoTarget};
 
-use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, signing};
+use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, run_tool, signing};
 use crate::cli::CLIInfo;
-use crate::cli::reporting::ProgressSink;
+use crate::cli::reporting::{ProgressSink, Reporter};
 use crate::execution;
 use crate::project::PekoProject;
 
-/// Build macOS `.app` bundles for the project (both arm64 and x86_64).
+/// Build a universal macOS `.app` bundle for the project.
 pub fn bundle(
     cli_info: &CLIInfo,
     project: &mut PekoProject,
@@ -43,75 +47,57 @@ pub fn bundle(
 
     let guard = CleanupGuard::new(macos_build_directory.clone());
 
-    // Three user-visible phases; the two inner compiles contribute
-    // their own units via add_to_total.
+    // Three user-visible phases; the two inner compiles contribute their
+    // own units via add_to_total.
     progress.add_to_total(3);
 
     progress.tick("macOS: preparing .app bundle layout");
 
-    let arm_build_dir = macos_build_directory.join("arm");
-    let x86_64_build_dir = macos_build_directory.join("x86_64");
-    io_at(&arm_build_dir, fs::create_dir_all(&arm_build_dir))?;
-    io_at(&x86_64_build_dir, fs::create_dir_all(&x86_64_build_dir))?;
-
-    // Lay out the standard .app/Contents/{MacOS,Resources} subtrees for
-    // both architectures.
     let app_file_name = format!("{}.app", project.name);
-    let arm_app = arm_build_dir.join(&app_file_name);
-    let x86_64_app = x86_64_build_dir.join(&app_file_name);
-    io_at(&arm_app, fs::create_dir_all(&arm_app))?;
-    io_at(&x86_64_app, fs::create_dir_all(&x86_64_app))?;
+    let app = macos_build_directory.join(&app_file_name);
+    let app_contents = app.join("Contents");
+    let exec_dir = app_contents.join("MacOS");
+    let resources_dir = app_contents.join("Resources");
+    io_at(&exec_dir, fs::create_dir_all(&exec_dir))?;
+    io_at(&resources_dir, fs::create_dir_all(&resources_dir))?;
 
-    let arm_app_contents = arm_app.join("Contents");
-    let x86_64_app_contents = x86_64_app.join("Contents");
-    io_at(&arm_app_contents, fs::create_dir_all(&arm_app_contents))?;
-    io_at(
-        &x86_64_app_contents,
-        fs::create_dir_all(&x86_64_app_contents),
-    )?;
-
-    let arm_exec_dir = arm_app_contents.join("MacOS");
-    let x86_64_exec_dir = x86_64_app_contents.join("MacOS");
-    io_at(&arm_exec_dir, fs::create_dir_all(&arm_exec_dir))?;
-    io_at(&x86_64_exec_dir, fs::create_dir_all(&x86_64_exec_dir))?;
-
-    let arm_resources_dir = arm_app_contents.join("Resources");
-    let x86_64_resources_dir = x86_64_app_contents.join("Resources");
-    io_at(&arm_resources_dir, fs::create_dir_all(&arm_resources_dir))?;
-    io_at(
-        &x86_64_resources_dir,
-        fs::create_dir_all(&x86_64_resources_dir),
-    )?;
-
-    // Info.plist - same bytes for both architectures.
+    // Info.plist into Contents.
     let plist_src = project
         .get_root()
         .join(".peko/bundling/configfiles/macos/Info.plist");
     io_at(
         &plist_src,
-        fs::copy(&plist_src, arm_app_contents.join("Info.plist")),
+        fs::copy(&plist_src, app_contents.join("Info.plist")),
     )?;
+
+    // Privacy manifest into Contents/Resources.
+    let privacy_src = project
+        .get_root()
+        .join(".peko/bundling/configfiles/macos/PrivacyInfo.xcprivacy");
     io_at(
-        &plist_src,
-        fs::copy(&plist_src, x86_64_app_contents.join("Info.plist")),
+        &privacy_src,
+        fs::copy(&privacy_src, resources_dir.join("PrivacyInfo.xcprivacy")),
     )?;
 
-    // Icons. Same .icns content for both architectures.
+    // Icon into Contents/Resources.
     let icon = &project.ui_project_info.as_ref().unwrap().icon;
-    let arm_icon = arm_resources_dir.join("icon.icns");
-    let x86_64_icon = x86_64_resources_dir.join("icon.icns");
-    icon.to_icns(&mut io_at(&arm_icon, File::create(&arm_icon))?);
-    icon.to_icns(&mut io_at(&x86_64_icon, File::create(&x86_64_icon))?);
+    let icns = resources_dir.join("icon.icns");
+    icon.to_icns(&mut io_at(&icns, File::create(&icns))?);
 
-    // Project assets, copied into Resources for both architectures with
-    // subdirectories preserved. The assets package's Apple native layer
-    // resolves "icons/home.png" via [NSBundle pathForResource:@"icons/home"
+    // Project assets into Contents/Resources with subdirectories
+    // preserved. The assets package's Apple native layer resolves
+    // "icons/home.png" via [NSBundle pathForResource:@"icons/home"
     // ofType:@"png"], which needs the real folder structure under
-    // Resources (not flattened), so we keep the hierarchical names.
-    crate::bundler::copy_project_assets(project, &arm_resources_dir)?;
-    crate::bundler::copy_project_assets(project, &x86_64_resources_dir)?;
+    // Resources, so the hierarchical names are kept.
+    crate::bundler::copy_project_assets(project, &resources_dir)?;
 
-    // Compile + link the native binary for each architecture.
+    // Per-architecture executables compiled into an intermediates folder,
+    // then combined into one universal binary.
+    let intermediates = macos_build_directory.join("intermediates");
+    io_at(&intermediates, fs::create_dir_all(&intermediates))?;
+    let arm_exec = intermediates.join("exec-arm64");
+    let x86_64_exec = intermediates.join("exec-x86_64");
+
     progress.tick("macOS: compiling arm64 binary");
     let arm_target = PekoTarget::new(OperatingSystem::MacOS, Architecture::Arm, false);
     let (_, arm_diagnostics) = execution::incremental::compile_project(
@@ -119,7 +105,7 @@ pub fn bundle(
         project,
         arm_target,
         project.get_root().join(".peko/incremental"),
-        Some(arm_exec_dir.join("exec")),
+        Some(arm_exec.clone()),
         false,
         Vec::new(),
         None,
@@ -139,7 +125,7 @@ pub fn bundle(
         project,
         x86_64_target,
         project.get_root().join(".peko/incremental"),
-        Some(x86_64_exec_dir.join("exec")),
+        Some(x86_64_exec.clone()),
         false,
         Vec::new(),
         None,
@@ -152,23 +138,42 @@ pub fn bundle(
         return Err(BundleError::CompileDiagnostics(diagnostics));
     }
 
-    // Both arm64 and x86_64 bundles are produced. Optional Developer ID
-    // signing is handled by sign().
+    // Combine both slices into one universal binary at Contents/MacOS/exec
+    // using the llvm-lipo that ships with the Peko LLVM toolchain.
+    let universal_exec = exec_dir.join("exec");
+    let llvm_lipo = resolve_llvm_lipo(cli_info.get_peko_root());
+    run_tool(
+        "llvm-lipo",
+        Command::new(&llvm_lipo)
+            .arg("-create")
+            .arg(&arm_exec)
+            .arg(&x86_64_exec)
+            .arg("-output")
+            .arg(&universal_exec),
+    )?;
+
+    // The per-architecture executables are consumed by lipo.
+    io_at(&intermediates, fs::remove_dir_all(&intermediates))?;
 
     guard.commit();
     Ok(())
 }
 
-/// Optionally sign the macOS `.app` bundles with a Developer ID key.
+/// Optionally sign and notarize the macOS `.app` bundle.
 ///
-/// macOS signing is optional. When no macOS key is registered the
-/// unsigned bundles are left in place. When a key is registered, both the
-/// arm64 and x86_64 bundles are signed in place with the `apple-codesign`
-/// crate. Developer ID signing needs no provisioning profile.
+/// macOS signing is optional. When no macOS key is registered the unsigned
+/// bundle is left in place. When a key is registered, the bundle is signed
+/// in place with the hardened runtime through the `apple-codesign` crate.
+/// Developer ID signing needs no provisioning profile. When a notary key
+/// is registered, the signed bundle is submitted to Apple's notary service
+/// and the ticket is stapled. A signed disk image holding the bundle is
+/// written next to it for distribution, and is notarized and stapled when a
+/// notary key is registered.
 pub fn sign(
     _cli_info: &CLIInfo,
     project: &PekoProject,
     macos_build_directory: PathBuf,
+    reporter: &Reporter,
 ) -> BundleResult<signing::OptionalSignOutcome> {
     let Some(ui_info) = project.ui_project_info.as_ref() else {
         return Ok(signing::OptionalSignOutcome::NoKey);
@@ -180,17 +185,108 @@ pub fn sign(
     };
 
     let app_file_name = format!("{}.app", project.name);
+    let app = macos_build_directory.join(&app_file_name);
+    if !app.exists() {
+        return Err(BundleError::Signing(format!(
+            "macOS .app not found at {}",
+            app.display()
+        )));
+    }
+
     let entitlements_xml = match key.entitlements.as_ref() {
         Some(path) => Some(io_at(path, fs::read_to_string(path))?),
         None => None,
     };
 
-    for arch_dir in ["arm", "x86_64"] {
-        let app = macos_build_directory.join(arch_dir).join(&app_file_name);
-        if app.exists() {
-            signing::sign_apple_bundle(&app, &key, entitlements_xml.as_deref())?;
+    signing::sign_apple_bundle(&app, &key, entitlements_xml.as_deref(), true)?;
+
+    // Notarize when notary credentials are registered. Without them the
+    // bundle is signed but not notarized.
+    let notary = signing::resolve_notary(project.get_root(), "macos");
+    match &notary {
+        Some(creds) => signing::notarize_and_staple(&app, creds)?,
+        None => {
+            reporter.warning("macOS: no notary key registered; bundle signed but not notarized")
         }
     }
 
+    // Package the signed bundle into a distributable disk image. The image
+    // is signed with the same key. When notary credentials are registered
+    // the image is notarized and stapled.
+    let dmg = package_dmg(&macos_build_directory, &project.name, &app)?;
+    signing::sign_dmg(&dmg, &key)?;
+    if let Some(creds) = &notary {
+        signing::notarize_and_staple(&dmg, creds)?;
+    }
+
     Ok(signing::OptionalSignOutcome::Signed)
+}
+
+/// Build a distributable disk image holding the signed `.app`. The image
+/// contains the bundle and a link to the Applications folder for drag
+/// installation. The image is written next to the bundle and its path is
+/// returned. Disk image creation runs on macOS.
+fn package_dmg(build_dir: &Path, name: &str, app: &Path) -> BundleResult<PathBuf> {
+    let staging = build_dir.join("dmg-staging");
+    if staging.exists() {
+        io_at(&staging, fs::remove_dir_all(&staging))?;
+    }
+    io_at(&staging, fs::create_dir_all(&staging))?;
+
+    let staged_app = staging.join(format!("{name}.app"));
+    run_tool("ditto", Command::new("ditto").arg(app).arg(&staged_app))?;
+
+    run_tool(
+        "ln",
+        Command::new("ln")
+            .arg("-s")
+            .arg("/Applications")
+            .arg(staging.join("Applications")),
+    )?;
+
+    let dmg = build_dir.join(format!("{name}.dmg"));
+    if dmg.exists() {
+        io_at(&dmg, fs::remove_file(&dmg))?;
+    }
+
+    run_tool(
+        "hdiutil",
+        Command::new("hdiutil")
+            .arg("create")
+            .arg("-volname")
+            .arg(name)
+            .arg("-srcfolder")
+            .arg(&staging)
+            .arg("-ov")
+            .arg("-format")
+            .arg("UDZO")
+            .arg(&dmg),
+    )?;
+
+    io_at(&staging, fs::remove_dir_all(&staging))?;
+
+    Ok(dmg)
+}
+
+/// Resolve the `llvm-lipo` used to build the universal binary. Selects the
+/// host binary under the Peko compiler bin directory and falls back to the
+/// `llvm-lipo` on the system PATH.
+fn resolve_llvm_lipo(peko_root: &Path) -> PathBuf {
+    let host_binary = match std::env::consts::OS {
+        "linux" => match std::env::consts::ARCH {
+            "arm" | "aarch64" => "llvm-lipo-linux-arm",
+            _ => "llvm-lipo-linux-x86_64",
+        },
+        "macos" => match std::env::consts::ARCH {
+            "arm" | "aarch64" => "llvm-lipo-darwin-arm",
+            _ => "llvm-lipo-darwin-x86_64",
+        },
+        _ => "llvm-lipo-windows.exe",
+    };
+    let bundled = peko_root.join("Compiler/bin/llvm-lipo").join(host_binary);
+    if bundled.exists() {
+        bundled
+    } else {
+        PathBuf::from("llvm-lipo")
+    }
 }
