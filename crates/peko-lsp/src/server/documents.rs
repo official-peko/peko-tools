@@ -45,13 +45,21 @@ impl Document {
                 }
                 // Incremental update.
                 Some(range) => {
-                    let start = rope_offset(&self.text, range.start);
-                    let end = rope_offset(&self.text, range.end);
+                    let bounds = rope_offset(&self.text, range.start)
+                        .zip(rope_offset(&self.text, range.end));
 
-                    if start > end || end > self.text.len_chars() {
+                    let Some((start, end)) = bounds else {
                         tracing::warn!(
-                            "out-of-range edit `[{start}..{end}]` for rope of length `{}`. Falling back to full replacement",
+                            "edit range outside rope of length `{}`. Falling back to full replacement",
                             self.text.len_chars()
+                        );
+                        self.text = Rope::from_str(&change.text);
+                        continue;
+                    };
+
+                    if start > end {
+                        tracing::warn!(
+                            "inverted edit range `[{start}..{end}]`. Falling back to full replacement"
                         );
                         self.text = Rope::from_str(&change.text);
                         continue;
@@ -66,10 +74,17 @@ impl Document {
 }
 
 /// Convert an LSP `Position` (0-based line + character) to a char offset
-/// inside the rope.
-fn rope_offset(rope: &Rope, pos: tower_lsp_server::ls_types::Position) -> usize {
-    let line_start = rope.line_to_char(pos.line as usize);
-    line_start + pos.character as usize
+/// inside the rope. Returns `None` when the line is past the end of the rope.
+/// The character is clamped to the length of its line.
+fn rope_offset(rope: &Rope, pos: tower_lsp_server::ls_types::Position) -> Option<usize> {
+    let line = pos.line as usize;
+    if line >= rope.len_lines() {
+        return None;
+    }
+    let line_start = rope.line_to_char(line);
+    let line_len = rope.line(line).len_chars();
+    let character = (pos.character as usize).min(line_len);
+    Some(line_start + character)
 }
 
 // ---------------------------------------------------------------------------

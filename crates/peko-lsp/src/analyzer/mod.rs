@@ -115,10 +115,10 @@ impl PekoAnalyzer {
     pub fn set_project_folder(&mut self, mut project_folder: PathBuf) {
         let mut search_limit = 5;
         while search_limit > 0
-            && project_folder.parent().is_some()
+            && let Some(parent) = project_folder.parent()
             && !project_folder.join(".peko/project/config.pkbin").exists()
         {
-            project_folder = project_folder.parent().unwrap().to_path_buf();
+            project_folder = parent.to_path_buf();
             search_limit -= 1;
         }
 
@@ -143,7 +143,7 @@ impl PekoAnalyzer {
 
         let mut simulator_context = PekoSimulatorContext::new(
             target,
-            std::env::current_dir().unwrap(),
+            std::env::current_dir().unwrap_or_default(),
             PositionData::default(),
             PathBuf::new(),
         );
@@ -210,13 +210,12 @@ impl PekoAnalyzer {
         let (parsed_asts, parser_diagnostics) =
             helpers::parse_peko_source(document_path, doc.contents());
 
-        let end_position = if parsed_asts.is_empty() {
-            PositionData {
+        let end_position = match parsed_asts.last() {
+            Some(last_ast) => last_ast.get_end().clone(),
+            None => PositionData {
                 file: document_path.to_path_buf(),
                 ..PositionData::default()
-            }
-        } else {
-            parsed_asts.last().unwrap().get_end().clone()
+            },
         };
 
         let mut simulator_context =
@@ -263,8 +262,8 @@ impl PekoAnalyzer {
         // to find `::`, `:`, `.`, or `[`.
         let mut back_search_offset_access = doc.offset_at(position);
         while back_search_offset_access > 0
-            && (char_is_peko_id_eligible!(doc.char_at(back_search_offset_access).unwrap())
-                || char_is_whitespace!(doc.char_at(back_search_offset_access).unwrap()))
+            && let Some(cur_char) = doc.char_at(back_search_offset_access)
+            && (char_is_peko_id_eligible!(cur_char) || char_is_whitespace!(cur_char))
         {
             back_search_offset_access -= 1;
         }
@@ -280,16 +279,18 @@ impl PekoAnalyzer {
             back_search_offset_module -= 2;
             let mut current_module_name = String::new();
             while back_search_offset_module > 0
-                && char_is_peko_id_eligible!(doc.char_at(back_search_offset_module).unwrap())
+                && let Some(cur_char) = doc.char_at(back_search_offset_module)
+                && char_is_peko_id_eligible!(cur_char)
             {
-                current_module_name.insert(0, doc.char_at(back_search_offset_module).unwrap());
+                current_module_name.insert(0, cur_char);
                 back_search_offset_module -= 1;
             }
             module_full_name.insert_str(0, "::");
             module_full_name.insert_str(0, &current_module_name);
 
             while back_search_offset_module > 0
-                && char_is_whitespace!(doc.char_at(back_search_offset_module).unwrap())
+                && let Some(cur_char) = doc.char_at(back_search_offset_module)
+                && char_is_whitespace!(cur_char)
             {
                 back_search_offset_module -= 1;
             }
@@ -304,7 +305,8 @@ impl PekoAnalyzer {
         // `<` or `:`.
         let mut back_search_offset_type = back_search_offset_module;
         while back_search_offset_type > 0
-            && char_is_peko_type_eligible!(doc.char_at(back_search_offset_type).unwrap(), false)
+            && let Some(cur_char) = doc.char_at(back_search_offset_type)
+            && char_is_peko_type_eligible!(cur_char, false)
         {
             back_search_offset_type -= 1;
         }
@@ -314,7 +316,8 @@ impl PekoAnalyzer {
         let mut forward_search_offset_type = doc.offset_at(position);
         let mut forward_search_ends_with_def = false;
         while forward_search_offset_type < doc.contents().len()
-            && char_is_peko_type_eligible!(doc.char_at(forward_search_offset_type).unwrap(), true)
+            && let Some(cur_char) = doc.char_at(forward_search_offset_type)
+            && char_is_peko_type_eligible!(cur_char, true)
         {
             if doc.string_forward(forward_search_offset_type, 2) == "fn"
                 || doc.string_forward(forward_search_offset_type, 5) == "class"
@@ -325,32 +328,59 @@ impl PekoAnalyzer {
             forward_search_offset_type += 1;
         }
 
-        // Clamp forward search so it never points past the last byte.
-        forward_search_offset_type = cmp::min(doc.contents().len() - 1, forward_search_offset_type);
+        // Clamp forward search so it never points past the last byte. The
+        // saturating subtraction yields zero for an empty document.
+        forward_search_offset_type = cmp::min(
+            doc.contents().len().saturating_sub(1),
+            forward_search_offset_type,
+        );
 
-        if doc.char_at(back_search_offset_type).unwrap() == '[' && forward_search_ends_with_def {
+        // Read the boundary characters once. A missing character means the
+        // cursor sits past the end of the source. A missing character compares
+        // unequal to every literal below, so the search falls through to the
+        // general symbol case.
+        let type_boundary_char = doc.char_at(back_search_offset_type);
+        let type_forward_char = doc.char_at(forward_search_offset_type);
+        let access_boundary_char = doc.char_at(back_search_offset_access);
+
+        if type_boundary_char == Some('[') && forward_search_ends_with_def {
             return SymbolSearchResult::Visibilities;
         }
 
         // Decide whether this is a "types only" search.
-        let only_grab_types = (doc.char_at(back_search_offset_type).unwrap() == ':'
+        let only_grab_types = (type_boundary_char == Some(':')
             && doc.string_back(back_search_offset_type, 2) != "::")
-            || (doc.char_at(back_search_offset_type).unwrap() == '<'
-                && doc.char_at(forward_search_offset_type).unwrap() == '>');
+            || (type_boundary_char == Some('<') && type_forward_char == Some('>'));
 
-        let object_access = doc.char_at(back_search_offset_access).unwrap() == '.'
+        let object_access = access_boundary_char == Some('.')
             && doc.string_back(back_search_offset_access, 2) != "..";
 
         // When we're doing an object access, walk the position back to the
         // dot so simulator queries report members of the object on the left.
         let final_position = if object_access {
             let mut position = position.clone();
-            while doc.offset_at(&position) != back_search_offset_access {
-                if position.character == 0 && position.line > 1 {
+            // Walk the cursor backward until its byte offset matches the access
+            // boundary. Each iteration moves to an earlier position. The loop
+            // stops at the start of the document or when a step fails to reduce
+            // the offset, so it terminates even when the boundary offset cannot
+            // be matched exactly.
+            loop {
+                let current_offset = doc.offset_at(&position);
+                if current_offset == back_search_offset_access {
+                    break;
+                }
+
+                if position.character > 0 {
+                    position.character -= 1;
+                } else if position.line > 1 {
                     position.line -= 1;
                     position.character = doc.max_offset_at(&position) as u32;
-                } else if position.character > 0 {
-                    position.character -= 1;
+                } else {
+                    break;
+                }
+
+                if doc.offset_at(&position) >= current_offset {
+                    break;
                 }
             }
             position
@@ -466,14 +496,22 @@ impl AnalysisEngine for PekoAnalyzer {
             return Vec::new();
         };
 
-        helpers::document_symbols_from_scope(
-            simulation_result.context.module_context.top_level_modules["main"]
-                .read()
-                .unwrap()
-                .scope
-                .clone(),
-            false,
-        )
+        let Some(main_module) = simulation_result
+            .context
+            .module_context
+            .top_level_modules
+            .get("main")
+        else {
+            return Vec::new();
+        };
+
+        let scope = main_module
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scope
+            .clone();
+
+        helpers::document_symbols_from_scope(scope, false)
     }
 
     fn hover(&self, path: &Path, position: &Position) -> Option<HoverInfo> {
@@ -498,10 +536,11 @@ impl AnalysisEngine for PekoAnalyzer {
         let mut symbol_markdown = String::from("```pekoscript\n");
         match symbol.get_kind() {
             "class" | "class-generic" => {
-                let symbol_class = symbol.as_class().unwrap();
                 symbol_markdown.push_str("class ");
 
-                if symbol_class.generic {
+                if let Some(symbol_class) = symbol.as_class()
+                    && symbol_class.generic
+                {
                     symbol_markdown.push('<');
                     symbol_markdown.push_str(
                         &symbol_class
@@ -516,7 +555,9 @@ impl AnalysisEngine for PekoAnalyzer {
 
                 symbol_markdown.push_str(&symbol.get_name());
 
-                if !symbol_class.first_constructor_arguments.is_empty() {
+                if let Some(symbol_class) = symbol.as_class()
+                    && !symbol_class.first_constructor_arguments.is_empty()
+                {
                     symbol_markdown.push('(');
                     let args: Vec<String> = symbol_class
                         .first_constructor_arguments
@@ -531,42 +572,47 @@ impl AnalysisEngine for PekoAnalyzer {
             }
 
             "function" | "function-generic" => {
-                let symbol_function = symbol.as_function().unwrap();
                 symbol_markdown.push_str("fn ");
 
-                if symbol_function.generic {
-                    symbol_markdown.push('<');
-                    symbol_markdown.push_str(
-                        &symbol_function
-                            .generic_type_names
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    );
-                    symbol_markdown.push('>');
+                if let Some(symbol_function) = symbol.as_function() {
+                    if symbol_function.generic {
+                        symbol_markdown.push('<');
+                        symbol_markdown.push_str(
+                            &symbol_function
+                                .generic_type_names
+                                .iter()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        );
+                        symbol_markdown.push('>');
+                    }
+
+                    symbol_markdown.push_str(&symbol.get_name());
+                    symbol_markdown.push('(');
+
+                    let args: Vec<String> = symbol_function
+                        .arguments
+                        .iter()
+                        .map(|(argument_name, (_, argument_type))| {
+                            format!("{argument_name}: {argument_type}")
+                        })
+                        .collect();
+                    symbol_markdown.push_str(&args.join(", "));
+
+                    symbol_markdown.push_str(") => ");
+                    symbol_markdown.push_str(&symbol_function.return_type.to_string());
+                } else {
+                    symbol_markdown.push_str(&symbol.get_name());
                 }
-
-                symbol_markdown.push_str(&symbol.get_name());
-                symbol_markdown.push('(');
-
-                let args: Vec<String> = symbol_function
-                    .arguments
-                    .iter()
-                    .map(|(argument_name, (_, argument_type))| {
-                        format!("{argument_name}: {argument_type}")
-                    })
-                    .collect();
-                symbol_markdown.push_str(&args.join(", "));
-
-                symbol_markdown.push_str(") => ");
-                symbol_markdown.push_str(&symbol_function.return_type.to_string());
             }
 
             "variable" | "attribute" => {
                 symbol_markdown.push_str(&symbol.get_name());
-                symbol_markdown.push_str(": ");
-                symbol_markdown.push_str(&symbol.as_variable().unwrap().value_type.to_string());
+                if let Some(symbol_variable) = symbol.as_variable() {
+                    symbol_markdown.push_str(": ");
+                    symbol_markdown.push_str(&symbol_variable.value_type.to_string());
+                }
             }
 
             _ => {
@@ -630,113 +676,120 @@ impl AnalysisEngine for PekoAnalyzer {
             .map(|symbol| {
                 let (insert_text, insert_text_format, command) = match symbol.get_kind() {
                     "variable" | "attribute" => (None, None, None),
-                    "function" | "function-generic" => {
-                        let symbol_function = symbol.as_function().unwrap();
-                        let mut insert = symbol_function.name.clone();
-                        if symbol_function.generic {
-                            insert.push('<');
-                            for (idx, generic_name) in
-                                symbol_function.generic_type_names.iter().enumerate()
-                            {
-                                insert.push_str(&format!("${{{}:{generic_name}}}", idx + 1));
-                                if idx < symbol_function.generic_type_names.len() - 1 {
-                                    insert.push_str(", ");
+                    "function" | "function-generic" => match symbol.as_function() {
+                        None => (None, None, None),
+                        Some(symbol_function) => {
+                            let mut insert = symbol_function.name.clone();
+                            if symbol_function.generic {
+                                insert.push('<');
+                                for (idx, generic_name) in
+                                    symbol_function.generic_type_names.iter().enumerate()
+                                {
+                                    insert.push_str(&format!("${{{}:{generic_name}}}", idx + 1));
+                                    if idx < symbol_function.generic_type_names.len() - 1 {
+                                        insert.push_str(", ");
+                                    }
                                 }
-                            }
-                            insert.push('>');
-                        }
-
-                        if doc.char_at(doc.offset_at(position)).unwrap() != '(' {
-                            insert.push('(');
-                            for (idx, (argument_name, _)) in
-                                symbol_function.arguments.iter().enumerate()
-                            {
-                                insert.push_str(&format!(
-                                    "${{{}:{argument_name}}}",
-                                    idx + symbol_function.generic_type_names.len() + 1
-                                ));
-                                if idx < symbol_function.arguments.len() - 1 {
-                                    insert.push_str(", ");
-                                }
+                                insert.push('>');
                             }
 
-                            insert.push(')');
-
-                            (
-                                Some(insert),
-                                Some(InsertTextFormat::Snippet),
-                                Some(Command {
-                                    title: "suggestionhelper".to_string(),
-                                    command: "editor::ShowSignatureHelp".to_string(),
-                                }),
-                            )
-                        } else if symbol_function.generic {
-                            (
-                                Some(insert),
-                                Some(InsertTextFormat::Snippet),
-                                Some(Command {
-                                    title: "suggestionhelper".to_string(),
-                                    command: "editor::ShowSignatureHelp".to_string(),
-                                }),
-                            )
-                        } else {
-                            (Some(insert), None, None)
-                        }
-                    }
-                    "class" | "class-generic" => {
-                        let symbol_class = symbol.as_class().unwrap();
-                        let mut insert = symbol_class.name.clone();
-                        if symbol_class.generic {
-                            insert.push('<');
-                            for (idx, generic_name) in symbol_class.generic_types.iter().enumerate()
+                            if let Some(cur_char) = doc.char_at(doc.offset_at(position))
+                                && cur_char != '('
                             {
-                                insert.push_str(&format!("${{{}:{generic_name}}}", idx + 1));
-                                if idx < symbol_class.generic_types.len() - 1 {
-                                    insert.push_str(", ");
+                                insert.push('(');
+                                for (idx, (argument_name, _)) in
+                                    symbol_function.arguments.iter().enumerate()
+                                {
+                                    insert.push_str(&format!(
+                                        "${{{}:{argument_name}}}",
+                                        idx + symbol_function.generic_type_names.len() + 1
+                                    ));
+                                    if idx < symbol_function.arguments.len() - 1 {
+                                        insert.push_str(", ");
+                                    }
                                 }
-                            }
-                            insert.push('>');
-                        }
 
-                        if list_builtin_types {
-                            (Some(insert), Some(InsertTextFormat::Snippet), None)
-                        } else if doc.char_at(doc.offset_at(position)).unwrap() != '(' {
-                            insert.push('(');
-                            for (idx, (argument_name, _)) in
-                                symbol_class.first_constructor_arguments.iter().enumerate()
-                            {
-                                insert.push_str(&format!(
-                                    "${{{}:{argument_name}}}",
-                                    idx + symbol_class.generic_types.len() + 1
-                                ));
-                                if idx < symbol_class.first_constructor_arguments.len() - 1 {
-                                    insert.push_str(", ");
+                                insert.push(')');
+
+                                (
+                                    Some(insert),
+                                    Some(InsertTextFormat::Snippet),
+                                    Some(Command {
+                                        title: "suggestionhelper".to_string(),
+                                        command: "editor::ShowSignatureHelp".to_string(),
+                                    }),
+                                )
+                            } else if symbol_function.generic {
+                                (
+                                    Some(insert),
+                                    Some(InsertTextFormat::Snippet),
+                                    Some(Command {
+                                        title: "suggestionhelper".to_string(),
+                                        command: "editor::ShowSignatureHelp".to_string(),
+                                    }),
+                                )
+                            } else {
+                                (Some(insert), None, None)
+                            }
+                        }
+                    },
+                    "class" | "class-generic" => match symbol.as_class() {
+                        None => (None, None, None),
+                        Some(symbol_class) => {
+                            let mut insert = symbol_class.name.clone();
+                            if symbol_class.generic {
+                                insert.push('<');
+                                for (idx, generic_name) in
+                                    symbol_class.generic_types.iter().enumerate()
+                                {
+                                    insert.push_str(&format!("${{{}:{generic_name}}}", idx + 1));
+                                    if idx < symbol_class.generic_types.len() - 1 {
+                                        insert.push_str(", ");
+                                    }
                                 }
+                                insert.push('>');
                             }
 
-                            insert.push(')');
+                            if list_builtin_types {
+                                (Some(insert), Some(InsertTextFormat::Snippet), None)
+                            } else if doc.char_at(doc.offset_at(position)) != Some('(') {
+                                insert.push('(');
+                                for (idx, (argument_name, _)) in
+                                    symbol_class.first_constructor_arguments.iter().enumerate()
+                                {
+                                    insert.push_str(&format!(
+                                        "${{{}:{argument_name}}}",
+                                        idx + symbol_class.generic_types.len() + 1
+                                    ));
+                                    if idx < symbol_class.first_constructor_arguments.len() - 1 {
+                                        insert.push_str(", ");
+                                    }
+                                }
 
-                            (
-                                Some(insert),
-                                Some(InsertTextFormat::Snippet),
-                                Some(Command {
-                                    title: "suggestionhelper".to_string(),
-                                    command: "editor::ShowSignatureHelp".to_string(),
-                                }),
-                            )
-                        } else if symbol_class.generic {
-                            (
-                                Some(insert),
-                                Some(InsertTextFormat::Snippet),
-                                Some(Command {
-                                    title: "suggestionhelper".to_string(),
-                                    command: "editor::ShowSignatureHelp".to_string(),
-                                }),
-                            )
-                        } else {
-                            (Some(insert), None, None)
+                                insert.push(')');
+
+                                (
+                                    Some(insert),
+                                    Some(InsertTextFormat::Snippet),
+                                    Some(Command {
+                                        title: "suggestionhelper".to_string(),
+                                        command: "editor::ShowSignatureHelp".to_string(),
+                                    }),
+                                )
+                            } else if symbol_class.generic {
+                                (
+                                    Some(insert),
+                                    Some(InsertTextFormat::Snippet),
+                                    Some(Command {
+                                        title: "suggestionhelper".to_string(),
+                                        command: "editor::ShowSignatureHelp".to_string(),
+                                    }),
+                                )
+                            } else {
+                                (Some(insert), None, None)
+                            }
                         }
-                    }
+                    },
                     _ => (
                         Some(format!("{}::", symbol.get_name())),
                         None,
@@ -903,22 +956,19 @@ impl AnalysisEngine for PekoAnalyzer {
                     let argument_index =
                         function_call.argument_index_at_position(peko_position.clone());
 
-                    let argument_name = if argument_index < function_call.signature_arguments.len()
-                    {
-                        function_call
-                            .signature_arguments
-                            .get_index(argument_index)
-                            .unwrap()
-                            .0
-                    } else {
-                        function_call
-                            .signature_arguments
-                            .get_index(argument_index - 1)
-                            .unwrap()
-                            .0
-                    };
+                    // Clamp the index to the last valid argument. An index past
+                    // the end maps to the final argument, and an empty argument
+                    // list yields no name.
+                    let last_index = function_call.signature_arguments.len().saturating_sub(1);
+                    let clamped_index = argument_index.min(last_index);
+                    let argument_name = function_call
+                        .signature_arguments
+                        .get_index(clamped_index)
+                        .map(|(name, _)| name);
 
-                    if docinfo.parameter_docs.contains_key(argument_name) {
+                    if let Some(argument_name) = argument_name
+                        && docinfo.parameter_docs.contains_key(argument_name)
+                    {
                         info_markup.push_str(&format!(
                             "\n- {argument_name}: {}",
                             docinfo.parameter_docs[argument_name]

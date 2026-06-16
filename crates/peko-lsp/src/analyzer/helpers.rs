@@ -12,7 +12,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 use peko_core::{
     asts::{
@@ -44,9 +44,9 @@ macro_rules! char_is_whitespace {
 #[macro_export]
 macro_rules! char_is_peko_id_eligible {
     ($ch:expr) => {
-        (($ch >= 'a' && $ch <= 'z')
-            || ($ch >= 'A' && $ch <= 'Z')
-            || ($ch >= '0' && $ch <= '9')
+        ($ch.is_ascii_lowercase()
+            || $ch.is_ascii_uppercase()
+            || $ch.is_ascii_digit()
             || $ch == '_'
             || $ch == '$')
     };
@@ -132,7 +132,17 @@ pub fn parse_peko_source(file: &Path, source: String) -> (Vec<PekoAST>, Diagnost
 
     let mut parsed_asts = default_preloaded_imports();
 
+    // A healthy parse step consumes at least one token, and the token count
+    // cannot exceed the byte length of the source. This cap bounds the loop so
+    // a parse step that consumes no tokens cannot hang the server.
+    let max_iterations = source.len() + 1;
+    let mut iterations = 0;
     while !parser.tokens.finished() {
+        iterations += 1;
+        if iterations > max_iterations {
+            break;
+        }
+
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }
@@ -152,10 +162,11 @@ pub fn parse_peko_source(file: &Path, source: String) -> (Vec<PekoAST>, Diagnost
 // ---------------------------------------------------------------------------
 
 /// Convert a peko_core `PositionData` (1-based line, 0-based byte column) to
-/// the 0-based LSP `Position` the editor expects.
+/// the 0-based LSP `Position` the editor expects. A line value of zero
+/// saturates to line zero rather than underflowing.
 pub fn create_position(peko_position: &PositionData) -> Position {
     Position {
-        line: (peko_position.line - 1) as u32,
+        line: (peko_position.line.saturating_sub(1)) as u32,
         character: peko_position.column as u32,
     }
 }
@@ -163,6 +174,14 @@ pub fn create_position(peko_position: &PositionData) -> Position {
 // ---------------------------------------------------------------------------
 // Scope -> Symbol conversion
 // ---------------------------------------------------------------------------
+
+/// Acquire a read guard on a scope lock and recover the inner value when the
+/// lock is poisoned. A poisoned lock means a writer panicked while holding it.
+/// The scope data remains readable for outline purposes, so recovery keeps the
+/// language server responsive instead of cascading the panic.
+fn read_scope(scope: &RwLock<Scope>) -> RwLockReadGuard<'_, Scope> {
+    scope.read().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Convert a leaf [`ScopeSymbol`] into a [`Symbol`] suitable for the
 /// document-symbol tree. Returns `None` for symbols that should not appear in
@@ -192,7 +211,7 @@ pub fn document_symbol_from_scope_symbol(scope_symbol: &ScopeSymbol) -> Option<S
             start: create_position(&scope_symbol.get_start()),
             end: create_position(&scope_symbol.get_end()),
         },
-        detail: Some(scope_symbol.as_variable().unwrap().value_type.to_string()),
+        detail: scope_symbol.as_variable().map(|v| v.value_type.to_string()),
         children: Vec::new(),
     })
 }
@@ -201,13 +220,13 @@ pub fn document_symbol_from_scope_symbol(scope_symbol: &ScopeSymbol) -> Option<S
 /// declaration inside the scope that originates from the same file. Recurses
 /// into nested function, class, and module scopes.
 pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) -> Vec<Symbol> {
-    let is_function_scope = scope.read().unwrap().scope_name.starts_with("function-");
-    let is_class_scope = scope.read().unwrap().scope_name.starts_with("class-");
+    let is_function_scope = read_scope(&scope).scope_name.starts_with("function-");
+    let is_class_scope = read_scope(&scope).scope_name.starts_with("class-");
 
-    let scope_file = scope.read().unwrap().start.file.clone();
+    let scope_file = read_scope(&scope).start.file.clone();
     let mut scope_children = Vec::new();
 
-    for (_, child_symbol) in &scope.read().unwrap().symbols {
+    for (_, child_symbol) in &read_scope(&scope).symbols {
         if child_symbol.get_start().file != scope_file {
             continue;
         }
@@ -218,18 +237,21 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
     }
 
     if is_function_scope {
-        let function_name = scope.read().unwrap().scope_name[9..].to_string();
+        let function_name = read_scope(&scope)
+            .scope_name
+            .strip_prefix("function-")
+            .unwrap_or_default()
+            .to_string();
 
-        let symbol_details = scope
-            .read()
-            .unwrap()
+        let symbol_details = read_scope(&scope)
             .symbols
             .iter()
             .find(|(symbol_name, _)| symbol_name == &&function_name)
-            .map(|(_, symbol)| {
+            .and_then(|(_, symbol)| {
+                let symbol_function = symbol.as_function()?;
+
                 let mut signature = String::from("fn ");
 
-                let symbol_function = symbol.as_function().unwrap();
                 if symbol_function.generic {
                     signature.push('<');
                     let generics: Vec<&String> =
@@ -254,7 +276,7 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
                 signature.push_str(") => ");
                 signature.push_str(&symbol_function.return_type.to_string());
 
-                signature
+                Some(signature)
             });
 
         return vec![Symbol {
@@ -265,35 +287,43 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
                 SymbolKind::Function
             },
             range: Range {
-                start: create_position(&scope.read().unwrap().start),
-                end: create_position(&scope.read().unwrap().end),
+                start: create_position(&read_scope(&scope).start),
+                end: create_position(&read_scope(&scope).end),
             },
             selection_range: Range {
-                start: create_position(&scope.read().unwrap().start),
-                end: create_position(&scope.read().unwrap().end),
+                start: create_position(&read_scope(&scope).start),
+                end: create_position(&read_scope(&scope).end),
             },
             detail: symbol_details,
             children: scope_children,
         }];
     }
 
-    for subscope in &scope.read().unwrap().scopes {
-        if subscope.read().unwrap().scope_name.is_empty()
-            || subscope.read().unwrap().start.file != scope_file
+    for subscope in &read_scope(&scope).scopes {
+        if read_scope(subscope).scope_name.is_empty()
+            || read_scope(subscope).start.file != scope_file
         {
             continue;
         }
 
-        let scope_name = subscope.read().unwrap().scope_name.clone();
+        let scope_name = read_scope(subscope).scope_name.clone();
         let (name, kind) = match scope_name {
             scope_name if scope_name.starts_with("function-") => {
-                scope_children
-                    .push(document_symbols_from_scope(subscope.clone(), is_class_scope)[0].clone());
+                if let Some(symbol) = document_symbols_from_scope(subscope.clone(), is_class_scope)
+                    .into_iter()
+                    .next()
+                {
+                    scope_children.push(symbol);
+                }
                 continue;
             }
-            scope_name if scope_name.starts_with("class-") => {
-                (scope_name[6..].to_string(), SymbolKind::Class)
-            }
+            scope_name if scope_name.starts_with("class-") => (
+                scope_name
+                    .strip_prefix("class-")
+                    .unwrap_or_default()
+                    .to_string(),
+                SymbolKind::Class,
+            ),
             _ => (scope_name, SymbolKind::Module),
         };
 
@@ -301,12 +331,12 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
             name,
             kind,
             range: Range {
-                start: create_position(&subscope.read().unwrap().start),
-                end: create_position(&subscope.read().unwrap().end),
+                start: create_position(&read_scope(subscope).start),
+                end: create_position(&read_scope(subscope).end),
             },
             selection_range: Range {
-                start: create_position(&subscope.read().unwrap().start),
-                end: create_position(&subscope.read().unwrap().end),
+                start: create_position(&read_scope(subscope).start),
+                end: create_position(&read_scope(subscope).end),
             },
             detail: None,
             children: document_symbols_from_scope(subscope.clone(), is_class_scope),
@@ -324,10 +354,7 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
 /// `tracing` is not enough
 #[allow(dead_code)]
 pub(crate) fn print_to_log(message: impl ToString, logfile: impl AsRef<Path>) {
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(logfile.as_ref())
-        .unwrap();
-
-    writeln!(file, "{}", message.to_string()).unwrap();
+    if let Ok(mut file) = OpenOptions::new().append(true).open(logfile.as_ref()) {
+        let _ = writeln!(file, "{}", message.to_string());
+    }
 }

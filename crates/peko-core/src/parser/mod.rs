@@ -796,7 +796,13 @@ impl PekoParser {
                 break;
             }
 
+            let index_before = self.tokens.get_index();
             block_body.push(self.parse());
+            // If parse() consumed nothing the cursor is stuck. Force one token
+            // of progress so the loop always terminates.
+            if !self.tokens.finished() && self.tokens.get_index() == index_before {
+                self.tokens.increase_index();
+            }
 
             // Eat trailing semicolons and comments.
             while !self.tokens.finished()
@@ -833,7 +839,16 @@ impl PekoParser {
             self.tokens.increase_index();
 
             while !self.tokens.finished() && !self.tokens.current_token().equals(">") {
+                let index_before = self.tokens.get_index();
                 function_generics.push(types::PekoType::from_tokens(self));
+                // If from_tokens consumed nothing the cursor is stuck. Force
+                // one token of progress so the loop always terminates.
+                if !self.tokens.finished()
+                    && !self.tokens.current_token().equals(">")
+                    && self.tokens.get_index() == index_before
+                {
+                    self.tokens.increase_index();
+                }
                 if self.tokens.current_token().equals(",") {
                     self.tokens.increase_index();
                 }
@@ -868,7 +883,16 @@ impl PekoParser {
                 _ => None,
             };
 
+            let index_before = self.tokens.get_index();
             arguments.push((keyword, self.parse()));
+            // If parse() consumed nothing the cursor is stuck. Force one token
+            // of progress so the loop always terminates.
+            if !self.tokens.finished()
+                && !self.tokens.current_token().equals(")")
+                && self.tokens.get_index() == index_before
+            {
+                self.tokens.increase_index();
+            }
 
             if self.tokens.current_token().equals(",") {
                 self.tokens.increase_index();
@@ -1362,7 +1386,10 @@ impl PekoParser {
         if self.tokens.current_token().equals("<") {
             self.tokens.increase_index();
 
-            while !self.tokens.finished() && !self.tokens.current_token().equals(">") {
+            while !self.tokens.finished()
+                && !self.tokens.current_token().equals(">")
+                && !self.tokens.current_token().equals("(")
+            {
                 function_generics.push(PositionedValue::from_token(self.tokens.current_token()));
                 self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
                 self.tokens.increase_index();
@@ -1372,7 +1399,11 @@ impl PekoParser {
                 }
             }
 
-            self.tokens.increase_index();
+            if self.tokens.current_token().equals(">") {
+                self.tokens.increase_index();
+            } else {
+                self.report_diagnostic("expected `>` to close the generic parameter list");
+            }
         }
 
         let (function_arguments, return_type, varargs_type, varargs_name) =
@@ -1460,7 +1491,10 @@ impl PekoParser {
         if self.tokens.current_token().equals("<") {
             self.tokens.increase_index();
 
-            while !self.tokens.finished() && !self.tokens.current_token().equals(">") {
+            while !self.tokens.finished()
+                && !self.tokens.current_token().equals(">")
+                && !self.tokens.current_token().equals("{")
+            {
                 generics.push(PositionedValue::from_token(self.tokens.current_token()));
                 self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
                 self.tokens.increase_index();
@@ -1470,7 +1504,11 @@ impl PekoParser {
                 }
             }
 
-            self.tokens.increase_index();
+            if self.tokens.current_token().equals(">") {
+                self.tokens.increase_index();
+            } else {
+                self.report_diagnostic("expected `>` to close the generic parameter list");
+            }
         }
 
         // Optional `from Parent1, Parent2, ...` clause.
@@ -1483,7 +1521,16 @@ impl PekoParser {
             self.tokens.increase_index();
 
             while !self.tokens.finished() && !self.tokens.current_token().equals("{") {
+                let index_before = self.tokens.get_index();
                 derives_from.push(types::PekoType::from_tokens(self));
+                // If from_tokens consumed nothing the cursor is stuck. Force
+                // one token of progress so the loop always terminates.
+                if !self.tokens.finished()
+                    && !self.tokens.current_token().equals("{")
+                    && self.tokens.get_index() == index_before
+                {
+                    self.tokens.increase_index();
+                }
 
                 if self.tokens.current_token().equals(",") {
                     self.tokens.increase_index();
@@ -2412,7 +2459,16 @@ impl PekoParser {
 
         let mut values = Vec::new();
         while !self.tokens.finished() && !self.tokens.current_token().equals("]") {
+            let index_before = self.tokens.get_index();
             values.push(self.parse());
+            // If parse() consumed nothing the cursor is stuck. Force one token
+            // of progress so the loop always terminates.
+            if !self.tokens.finished()
+                && !self.tokens.current_token().equals("]")
+                && self.tokens.get_index() == index_before
+            {
+                self.tokens.increase_index();
+            }
             if self.tokens.current_token().equals(",") {
                 self.tokens.increase_index();
             }
@@ -2564,7 +2620,13 @@ impl PekoParser {
                 || !self.tokens.get_token_forward(1).equals("/"))
         {
             if self.tokens.current_token().equals("<") {
+                let index_before = self.tokens.get_index();
                 children.push(self.parse());
+                // If parse() consumed nothing (bare non-tag '<') force past it
+                // so the loop always terminates.
+                if !self.tokens.finished() && self.tokens.get_index() == index_before {
+                    self.tokens.increase_index();
+                }
             } else if self.tokens.current_token().equals("{") {
                 // `{expr}` inline child insertion.
                 self.tokens.increase_index();
@@ -3112,8 +3174,8 @@ impl PekoParser {
     /// expression from the current cursor position.
     pub fn parse(&mut self) -> PekoAST {
         // Eat any leading semicolons and comments.
-        while !self.tokens.finished() && self.tokens.current_token().equals(";")
-            || self.tokens.current_token().is_comment()
+        while !self.tokens.finished()
+            && (self.tokens.current_token().equals(";") || self.tokens.current_token().is_comment())
         {
             if self.tokens.current_token().equals(";") {
                 self.tokens.increase_index();

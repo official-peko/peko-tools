@@ -216,7 +216,16 @@ impl PekoType {
                 && parser.tokens.get_index() + *index_forward < parser.tokens.length()
                 && !parser.tokens.get_token_forward(*index_forward).equals(")")
             {
+                let index_before = *index_forward;
                 Self::test_next_tokens_for_type_with_index(parser, index_forward);
+                // If the recursive call made no progress and the current lookahead
+                // token is not the closing ')' or a ',', force past it so this
+                // loop always terminates.
+                if *index_forward == index_before
+                    && !parser.tokens.get_token_forward(*index_forward).equals(")")
+                {
+                    parser.tokens.index_increase_index(index_forward);
+                }
 
                 if parser.tokens.get_token_forward(*index_forward).equals(",") {
                     parser.tokens.index_increase_index(index_forward);
@@ -262,7 +271,16 @@ impl PekoType {
                 && parser.tokens.get_index() + *index_forward < parser.tokens.length()
                 && !parser.tokens.get_token_forward(*index_forward).equals(")")
             {
+                let index_before = *index_forward;
                 Self::test_next_tokens_for_type_with_index(parser, index_forward);
+                // If the recursive call made no progress and the current lookahead
+                // token is not the closing ')' or a ',', force past it so this
+                // loop always terminates.
+                if *index_forward == index_before
+                    && !parser.tokens.get_token_forward(*index_forward).equals(")")
+                {
+                    parser.tokens.index_increase_index(index_forward);
+                }
                 if parser.tokens.get_token_forward(*index_forward).equals(",") {
                     parser.tokens.index_increase_index(index_forward);
                 }
@@ -304,7 +322,16 @@ impl PekoType {
                 && parser.tokens.get_index() + *index_forward < parser.tokens.length()
                 && !parser.tokens.get_token_forward(*index_forward).equals(">")
             {
+                let index_before = *index_forward;
                 Self::test_next_tokens_for_type_with_index(parser, index_forward);
+                // If the recursive call made no progress and the current lookahead
+                // token is not the closing '>' or a ',', force past it so this
+                // loop always terminates.
+                if *index_forward == index_before
+                    && !parser.tokens.get_token_forward(*index_forward).equals(">")
+                {
+                    parser.tokens.index_increase_index(index_forward);
+                }
 
                 if parser.tokens.get_token_forward(*index_forward).equals(",") {
                     parser.tokens.index_increase_index(index_forward);
