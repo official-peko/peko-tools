@@ -17,11 +17,12 @@
 //!
 //! - Each package lives at `<packages_dir>/<name>/`, with one subdirectory
 //!   per installed version (`<name>/<vX.Y.Z>/`).
-//! - `<name>/Package.json` is byte-identical to the bucket's copy *except*
-//!   for the `versions` and `latest` keys, which are rewritten to reflect
-//!   what's actually installed under `<name>/`. Any other fields from the
-//!   bucket Package.json (license, label, custom metadata) pass through
-//!   untouched.
+//! - `<name>/Package.json` is written from the bucket's copy with four
+//!   changes: the `versions` and `latest` keys are rewritten to reflect
+//!   what's actually installed under `<name>/`, the `license` key is
+//!   dropped, and the `description` key is set from the Firestore metadata.
+//!   Any other fields from the bucket Package.json (label, name, custom
+//!   metadata) pass through untouched.
 //! - Version strings are `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`, `v1.2.3`).
 //!
 //! [`Reporter`]: crate::cli::reporting::Reporter
@@ -219,7 +220,6 @@ pub enum Scope {
 #[derive(Debug, Clone)]
 struct RemotePackage {
     name: String,
-    #[allow(dead_code)]
     description: String,
     version: String,
     versions: Vec<String>,
@@ -499,14 +499,14 @@ impl PackageManager {
         self.download_to_file(&zip_url, &zip_tmp).await?;
 
         // Clean any prior partial extraction.
-        if version_dir.exists()
-            && let Err(source) = tokio::fs::remove_dir_all(&version_dir).await
-        {
-            let _ = tokio::fs::remove_file(&zip_tmp).await;
-            return Err(PackageError::Io {
-                path: version_dir,
-                source,
-            });
+        if version_dir.exists() {
+            if let Err(source) = tokio::fs::remove_dir_all(&version_dir).await {
+                let _ = tokio::fs::remove_file(&zip_tmp).await;
+                return Err(PackageError::Io {
+                    path: version_dir,
+                    source,
+                });
+            }
         }
         if let Err(source) = tokio::fs::create_dir_all(&version_dir).await {
             let _ = tokio::fs::remove_file(&zip_tmp).await;
@@ -591,8 +591,8 @@ impl PackageManager {
     /// Rewrite `Package.json` after `remove_version`, the file already
     /// exists; sync `versions[]` and `latest` with what's on disk.
     ///
-    /// Works on the raw JSON value to preserve every field from the
-    /// original `Package.json` (not just those known to `PackageJSON`).
+    /// Works on the raw JSON value. Every field from the original
+    /// `Package.json` other than `license` is kept.
     async fn sync_package_json_from_disk(
         &self,
         pkg_dir: &Path,
@@ -622,6 +622,7 @@ impl PackageManager {
             "latest".to_owned(),
             Value::String(pick_latest(installed_versions)),
         );
+        obj.remove("license");
 
         let bytes =
             serde_json::to_vec_pretty(&value).map_err(|source| PackageError::JsonParse {
@@ -666,9 +667,10 @@ impl PackageManager {
                 source,
             })?;
 
-        // 3. Mutate only `versions` and `latest`. Every other key the
-        //    bucket Package.json contained (license, label, description,
-        //    custom fields, anything) is left exactly as it was.
+        // 3. Set `versions` and `latest` to match what is on disk. Drop the
+        //    `license` key. Set the `description` key from the Firestore
+        //    metadata. Every other key the bucket Package.json contained
+        //    (label, name, custom fields) is left as it was.
         let Some(obj) = value.as_object_mut() else {
             return Err(PackageError::PackageJsonNotObject(json_path));
         };
@@ -686,6 +688,13 @@ impl PackageManager {
             "latest".to_owned(),
             Value::String(pick_latest(installed_versions)),
         );
+        obj.remove("license");
+        if let Some(pkg) = pkg {
+            obj.insert(
+                "description".to_owned(),
+                Value::String(pkg.description.clone()),
+            );
+        }
 
         // 4. Write back, atomically.
         let bytes =
@@ -789,7 +798,7 @@ fn scan_version_folders(pkg_dir: &Path) -> Vec<String> {
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    out.sort_by_key(|a| parse_version(a));
+    out.sort_by(|a, b| parse_version(a).cmp(&parse_version(b)));
     out
 }
 
