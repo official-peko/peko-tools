@@ -117,7 +117,6 @@ impl HostPackage {
     /// metadata file fails to read or parse.
     pub fn from_package_directory(path: impl AsRef<Path>) -> PekoResult<Option<Self>> {
         let path = path.as_ref();
-        println!("Here #1 for {}", path.display());
         let package_json_path = path.join("Package.json");
 
         // No manifest -> not a package. Distinct from manifest-parse errors,
@@ -125,7 +124,6 @@ impl HostPackage {
         if !package_json_path.exists() {
             return Ok(None);
         }
-        println!("Here #2 for {}", path.display());
 
         let manifest_text = read_to_string(&package_json_path)?;
         let package_json: PackageJSON =
@@ -295,11 +293,6 @@ impl PekoPackageIndex {
     ) -> PekoResult<Self> {
         let global_packages =
             PackageRoot::from_directory(global_peko_root.as_ref().join("Packages"))?;
-
-        println!("Following installed:");
-        for package_name in global_packages.installed_packages.keys() {
-            println!(" - {package_name} installed");
-        }
 
         let local_packages = match local_peko_root {
             Some(local_root) => Some(PackageRoot::from_directory(
