@@ -663,7 +663,7 @@ pub trait ExecutionContextAlgorithms<
         loop {
             for (classname, class) in current.read().unwrap().get_classes() {
                 if &class_name.to_string() == classname {
-                    return Some(class.clone());
+                    return Some(class.read().unwrap().clone());
                 }
             }
 
@@ -683,7 +683,7 @@ pub trait ExecutionContextAlgorithms<
         loop {
             for (genname, generic) in current.read().unwrap().get_class_generics() {
                 if &generic_name.to_string() == genname {
-                    return Some(generic.clone());
+                    return Some(generic.read().unwrap().clone());
                 }
             }
 
@@ -700,7 +700,7 @@ pub trait ExecutionContextAlgorithms<
         loop {
             for (funcname, func) in current.read().unwrap().get_functions() {
                 if &function_name.to_string() == funcname {
-                    return Some(func.clone());
+                    return Some(func.iter().map(|f| f.read().unwrap().clone()).collect());
                 }
             }
 
@@ -720,7 +720,7 @@ pub trait ExecutionContextAlgorithms<
         loop {
             for (genname, generic) in current.read().unwrap().get_function_generics() {
                 if &generic_name.to_string() == genname {
-                    return Some(generic.clone());
+                    return Some(generic.read().unwrap().clone());
                 }
             }
 
@@ -740,7 +740,7 @@ pub trait ExecutionContextAlgorithms<
         loop {
             for (varname, var) in current.read().unwrap().get_variables() {
                 if &variable_name.to_string() == varname {
-                    return Some(var.clone());
+                    return Some(var.read().unwrap().clone());
                 }
             }
 
@@ -937,7 +937,10 @@ pub trait ExecutionContextAlgorithms<
                     .get_classes()
                     .contains_key(&class_name)
                 {
-                    contained_in.read().unwrap().get_classes()[&class_name].get_parent_module()
+                    contained_in.read().unwrap().get_classes()[&class_name]
+                        .read()
+                        .unwrap()
+                        .get_parent_module()
                 } else if contained_in
                     .read()
                     .unwrap()
@@ -945,9 +948,13 @@ pub trait ExecutionContextAlgorithms<
                     .contains_key(&class_name_base)
                 {
                     contained_in.read().unwrap().get_class_generics()[&class_name_base]
+                        .read()
+                        .unwrap()
                         .get_parent_module()
                 } else {
                     contained_in.read().unwrap().get_class_generics()[&class_name]
+                        .read()
+                        .unwrap()
                         .get_parent_module()
                 }
             } else {
@@ -986,8 +993,10 @@ pub trait ExecutionContextAlgorithms<
                 .get_class_generics()
                 .contains_key(&class_name_base)
         {
-            let generic =
-                class_parent.read().unwrap().get_class_generics()[&class_name_base].clone();
+            let generic = class_parent.read().unwrap().get_class_generics()[&class_name_base]
+                .read()
+                .unwrap()
+                .clone();
             return self
                 .create_generic_class(&generic, type1.generic_types.clone())
                 .map(|class| class.get_class_type().clone());
@@ -1159,6 +1168,8 @@ pub trait ExecutionContextAlgorithms<
                 // types as the type parameters.
                 let next_generic = next_module.clone().read().unwrap().get_class_generics()
                     [&type_expanded.type_name]
+                    .read()
+                    .unwrap()
                     .clone();
 
                 return self
@@ -1168,7 +1179,12 @@ pub trait ExecutionContextAlgorithms<
             return None;
         }
 
-        Some(next_module.clone().read().unwrap().get_classes()[&class_name].clone())
+        Some(
+            next_module.clone().read().unwrap().get_classes()[&class_name]
+                .read()
+                .unwrap()
+                .clone(),
+        )
     }
 
     /// Returns `true` if `class1` derives from `class2` through any chain

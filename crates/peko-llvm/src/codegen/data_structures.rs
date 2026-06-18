@@ -347,7 +347,7 @@ impl ExecutionClassAttribute for CodegenClassAttribute {
 /// A class's main virtual table: method name to list of overloads.
 #[derive(Clone, new)]
 pub struct CodegenVirtualTable {
-    pub methods: IndexMap<String, Vec<CodegenFunction>>,
+    pub methods: IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>>,
 
     pub struct_index: usize,
     pub llvm_type: LLVMTypeRef,
@@ -361,11 +361,11 @@ impl CodegenVirtualTable {
 }
 
 impl ExecutionClassVirtualTable<CodegenFunction> for CodegenVirtualTable {
-    fn get_methods(&self) -> &IndexMap<String, Vec<CodegenFunction>> {
+    fn get_methods(&self) -> &IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>> {
         &self.methods
     }
 
-    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<CodegenFunction>> {
+    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>> {
         &mut self.methods
     }
 }
@@ -1111,11 +1111,11 @@ pub struct CodegenModule {
     pub top_level_info: Option<TopLevelModuleInfo>,
 
     pub modules: IndexMap<String, Arc<RwLock<CodegenModule>>>,
-    pub functions: IndexMap<String, Vec<CodegenFunction>>,
-    pub variables: IndexMap<String, CodegenVariable>,
-    pub classes: IndexMap<String, CodegenClass>,
-    pub class_generics: IndexMap<String, CodegenClassGeneric>,
-    pub function_generics: IndexMap<String, CodegenFunctionGeneric>,
+    pub functions: IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>>,
+    pub variables: IndexMap<String, Arc<RwLock<CodegenVariable>>>,
+    pub classes: IndexMap<String, Arc<RwLock<CodegenClass>>>,
+    pub class_generics: IndexMap<String, Arc<RwLock<CodegenClassGeneric>>>,
+    pub function_generics: IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>>,
 }
 
 impl CodegenModule {
@@ -1328,23 +1328,23 @@ impl
         &self.modules
     }
 
-    fn get_variables(&self) -> &IndexMap<String, CodegenVariable> {
+    fn get_variables(&self) -> &IndexMap<String, Arc<RwLock<CodegenVariable>>> {
         &self.variables
     }
 
-    fn get_functions(&self) -> &IndexMap<String, Vec<CodegenFunction>> {
+    fn get_functions(&self) -> &IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>> {
         &self.functions
     }
 
-    fn get_function_generics(&self) -> &IndexMap<String, CodegenFunctionGeneric> {
+    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>> {
         &self.function_generics
     }
 
-    fn get_classes(&self) -> &IndexMap<String, CodegenClass> {
+    fn get_classes(&self) -> &IndexMap<String, Arc<RwLock<CodegenClass>>> {
         &self.classes
     }
 
-    fn get_class_generics(&self) -> &IndexMap<String, CodegenClassGeneric> {
+    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<CodegenClassGeneric>>> {
         &self.class_generics
     }
 
@@ -1360,23 +1360,27 @@ impl
         &mut self.modules
     }
 
-    fn get_variables_mut(&mut self) -> &mut IndexMap<String, CodegenVariable> {
+    fn get_variables_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<CodegenVariable>>> {
         &mut self.variables
     }
 
-    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<CodegenFunction>> {
+    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>> {
         &mut self.functions
     }
 
-    fn get_function_generics_mut(&mut self) -> &mut IndexMap<String, CodegenFunctionGeneric> {
+    fn get_function_generics_mut(
+        &mut self,
+    ) -> &mut IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>> {
         &mut self.function_generics
     }
 
-    fn get_classes_mut(&mut self) -> &mut IndexMap<String, CodegenClass> {
+    fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<CodegenClass>>> {
         &mut self.classes
     }
 
-    fn get_class_generics_mut(&mut self) -> &mut IndexMap<String, CodegenClassGeneric> {
+    fn get_class_generics_mut(
+        &mut self,
+    ) -> &mut IndexMap<String, Arc<RwLock<CodegenClassGeneric>>> {
         &mut self.class_generics
     }
 

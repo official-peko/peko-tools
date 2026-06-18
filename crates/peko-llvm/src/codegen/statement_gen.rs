@@ -1290,7 +1290,10 @@ impl PekoValueBuilder for StyleStatementAST {
             .write()
             .unwrap()
             .get_variables_mut()
-            .insert(String::from(stylesheet_name), variable);
+            .insert(
+                String::from(stylesheet_name),
+                Arc::new(RwLock::new(variable)),
+            );
 
         global_variable.value_type.decrease_pointer_depth();
 

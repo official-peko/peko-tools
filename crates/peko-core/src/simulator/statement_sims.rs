@@ -1127,7 +1127,10 @@ impl PekoValueSimulator for StyleStatementAST {
             .write()
             .unwrap()
             .variables
-            .insert(String::from(stylesheet_name), variable);
+            .insert(
+                String::from(stylesheet_name),
+                Arc::new(RwLock::new(variable)),
+            );
 
         simulator_context
             .module_context

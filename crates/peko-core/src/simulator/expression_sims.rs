@@ -1087,8 +1087,11 @@ impl PekoValueSimulator for FunctionCallAST {
                         .methods
                         .contains_key(&function_full_name)
                     {
-                        let method_options =
-                            this_class.main_virtual_table.methods[&function_full_name].clone();
+                        let method_options: Vec<_> = this_class.main_virtual_table.methods
+                            [&function_full_name]
+                            .iter()
+                            .map(|function| function.read().unwrap().clone())
+                            .collect();
                         let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
                         for method_option in method_options {
@@ -1316,38 +1319,47 @@ impl PekoValueSimulator for FunctionCallAST {
                 .contains_key(&function_full_name)
             {
                 function_module.read().unwrap().function_generics[&function_base_name]
+                    .read()
+                    .unwrap()
                     .generic_typenames
                     .iter()
                     .map(|arg_type| arg_type.value.clone())
                     .collect::<Vec<String>>()
             } else {
                 function_module.read().unwrap().class_generics[&function_base_name]
+                    .read()
+                    .unwrap()
                     .generic_typenames
                     .iter()
                     .map(|arg_type| arg_type.value.clone())
                     .collect::<Vec<String>>()
             };
 
-            let function_module_reference = function_module.read().unwrap();
-            // Pull the argument-declaration iterator from either the
+            // Pull the declared argument-type names from either the
             // function's parameter list or the matching constructor.
-            let argument_declarations_iter = if function_module
+            let argument_declaration_types: Vec<String> = if function_module
                 .read()
                 .unwrap()
                 .function_generics
                 .contains_key(&function_full_name)
             {
-                function_module_reference.function_generics[&function_base_name]
+                let generic =
+                    function_module.read().unwrap().function_generics[&function_base_name].clone();
+                let generic = generic.read().unwrap();
+                generic
                     .function
                     .arguments
                     .iter()
+                    .map(|(_, argument_declaration_info)| {
+                        argument_declaration_info.argument_type.to_string()
+                    })
+                    .collect()
             } else {
-                let find_matching_constructor = function_module_reference.class_generics
-                    [&function_base_name]
-                    .class
-                    .methods
-                    .iter()
-                    .find(|method| match method {
+                let generic =
+                    function_module.read().unwrap().class_generics[&function_base_name].clone();
+                let generic = generic.read().unwrap();
+                let find_matching_constructor =
+                    generic.class.methods.iter().find(|method| match method {
                         ClassMethod::Constructor(constructor_info, _) => {
                             constructor_info.arguments.len() == argument_types.len()
                         }
@@ -1370,12 +1382,14 @@ impl PekoValueSimulator for FunctionCallAST {
                     return simulator_context.create_error_value();
                 }
 
-                let matching_constructor = find_matching_constructor.unwrap();
-
-                match matching_constructor {
-                    ClassMethod::Constructor(constructor_info, _) => {
-                        constructor_info.arguments.iter()
-                    }
+                match find_matching_constructor.unwrap() {
+                    ClassMethod::Constructor(constructor_info, _) => constructor_info
+                        .arguments
+                        .iter()
+                        .map(|(_, argument_declaration_info)| {
+                            argument_declaration_info.argument_type.to_string()
+                        })
+                        .collect(),
                     _ => panic!("matching constructor must be a Constructor variant"),
                 }
             };
@@ -1389,18 +1403,16 @@ impl PekoValueSimulator for FunctionCallAST {
             // parameter types, collecting any generic-type matches.
             argument_types
                 .iter()
-                .zip(argument_declarations_iter)
-                .for_each(|(provided_argument_type, (_, argument_declaration_info))| {
-                    let generic_typename = argument_declaration_info.argument_type.to_string();
-
-                    if !needed_generics.contains(&generic_typename)
-                        || collected_generic_types.contains_key(&generic_typename)
+                .zip(argument_declaration_types.iter())
+                .for_each(|(provided_argument_type, generic_typename)| {
+                    if !needed_generics.contains(generic_typename)
+                        || collected_generic_types.contains_key(generic_typename)
                     {
                         return;
                     }
 
                     collected_generic_types
-                        .insert(generic_typename, provided_argument_type.clone());
+                        .insert(generic_typename.clone(), provided_argument_type.clone());
                     needed_generics_count -= 1;
                 });
 
@@ -1635,8 +1647,11 @@ impl PekoValueSimulator for FunctionCallAST {
                     .functions
                     .contains_key(&function_full_name)
             {
-                let function_reference =
-                    function_module.read().unwrap().function_generics[&function_base_name].clone();
+                let function_reference = function_module.read().unwrap().function_generics
+                    [&function_base_name]
+                    .read()
+                    .unwrap()
+                    .clone();
                 let generated_function = simulator_context
                     .create_generic_function(&function_reference, function_generics);
 
@@ -1656,8 +1671,11 @@ impl PekoValueSimulator for FunctionCallAST {
                 }
             }
 
-            let function_choices =
-                function_module.read().unwrap().functions[&function_full_name].clone();
+            let function_choices: Vec<_> = function_module.read().unwrap().functions
+                [&function_full_name]
+                .iter()
+                .map(|function| function.read().unwrap().clone())
+                .collect();
 
             let post_stack = simulator_context.module_context.step_back();
             let function_choice = simulator_context.choose_function(
@@ -2112,7 +2130,10 @@ impl PekoValueSimulator for ObjectConstructionAST {
         // constructor overload (used as expected-type options for
         // argument simulation, enabling better inference for nested
         // literals like `Array()`).
-        let method_options = class_to_create.main_virtual_table.methods["constructor"].clone();
+        let method_options: Vec<_> = class_to_create.main_virtual_table.methods["constructor"]
+            .iter()
+            .map(|function| function.read().unwrap().clone())
+            .collect();
         let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
         for method_option in method_options {
@@ -2178,7 +2199,10 @@ impl PekoValueSimulator for ObjectConstructionAST {
             // Try the strict overload selector first.
             let post_stack = simulator_context.module_context.step_back();
             let constructor_choice = simulator_context.choose_function(
-                class_to_create.main_virtual_table.methods["constructor"].clone(),
+                class_to_create.main_virtual_table.methods["constructor"]
+                    .iter()
+                    .map(|function| function.read().unwrap().clone())
+                    .collect(),
                 argument_types.clone(),
                 if keyword_types.is_empty() {
                     None
@@ -2201,7 +2225,10 @@ impl PekoValueSimulator for ObjectConstructionAST {
                 // Fall back to the diagnostic-recovery selector so
                 // the IDE can still surface a signature.
                 let best_signature_choice = simulator_context.choose_most_similar_function(
-                    class_to_create.main_virtual_table.methods["constructor"].clone(),
+                    class_to_create.main_virtual_table.methods["constructor"]
+                        .iter()
+                        .map(|function| function.read().unwrap().clone())
+                        .collect(),
                     argument_types,
                     if keyword_types.is_empty() {
                         None
@@ -2590,7 +2617,10 @@ impl PekoValueSimulator for ObjectAccessAST {
 
                 // Build per-argument expected-type options from the
                 // method's overload set.
-                let method_options = class.main_virtual_table.methods[&function_name].clone();
+                let method_options: Vec<_> = class.main_virtual_table.methods[&function_name]
+                    .iter()
+                    .map(|function| function.read().unwrap().clone())
+                    .collect();
                 let mut argument_type_options = vec![Vec::new(); function_call.arguments.len()];
 
                 for method_option in method_options {
@@ -2668,7 +2698,10 @@ impl PekoValueSimulator for ObjectAccessAST {
                 // Always populate signature info via the
                 // diagnostic-recovery selector (always returns Some).
                 let best_signature_choice = simulator_context.choose_most_similar_function(
-                    class.main_virtual_table.methods[&function_name].clone(),
+                    class.main_virtual_table.methods[&function_name]
+                        .iter()
+                        .map(|function| function.read().unwrap().clone())
+                        .collect(),
                     argument_types,
                     provided_function_argument_types,
                     true,

@@ -290,9 +290,9 @@ impl
 
         self.module_context.move_out_of_module();
 
-        let mut function_reference =
+        let function_reference =
             module.read().unwrap().get_functions()[&generic_function_name.value].clone();
-        let first_function = function_reference[0].clone();
+        let first_function = function_reference[0].read().unwrap().clone();
 
         let imported_by = module
             .read()
@@ -304,36 +304,34 @@ impl
             .clone();
         for imported_to in imported_by {
             let imported_to_uuid = imported_to.read().unwrap().get_uuid().unwrap();
-            for (idx, function) in function_reference.iter_mut().enumerate() {
-                if function.function_value.contains_key(&imported_to_uuid)
-                    || (function.imported_from.is_some()
-                        && function
-                            .imported_from
-                            .as_mut()
-                            .unwrap()
-                            .write()
-                            .unwrap()
-                            .functions
-                            .get_mut(&generic_function_name.value)
-                            .unwrap()[idx]
-                            .function_value
-                            .contains_key(&imported_to_uuid))
+            for function in function_reference.iter() {
+                if function
+                    .read()
+                    .unwrap()
+                    .function_value
+                    .contains_key(&imported_to_uuid)
                 {
                     continue;
                 }
 
+                let (function_type, variadic, qualified_name, external) = {
+                    let function = function.read().unwrap();
+                    (
+                        function.get_type(),
+                        function.visibility.variadic,
+                        function.qualified_name.clone(),
+                        function.visibility.external,
+                    )
+                };
+
                 self.module_context
                     .move_to_module(module.clone(), false, false);
                 let function_llvm_type = self
-                    .get_llvm_type_full(&function.get_type(), true, function.visibility.variadic)
+                    .get_llvm_type_full(&function_type, true, variadic)
                     .unwrap();
                 self.module_context.move_out_of_module();
 
-                let owned_name = cstr(
-                    function
-                        .qualified_name
-                        .to_string(!function.visibility.external),
-                );
+                let owned_name = cstr(qualified_name.to_string(!external));
 
                 let new_function_value = CodegenValue::new(
                     unsafe {
@@ -348,7 +346,7 @@ impl
                             function_llvm_type,
                         )
                     },
-                    function.get_type(),
+                    function_type,
                 );
 
                 unsafe {
@@ -358,20 +356,11 @@ impl
                     );
                 }
 
-                if let Some(imported_from) = function.imported_from.as_mut() {
-                    imported_from
-                        .write()
-                        .unwrap()
-                        .functions
-                        .get_mut(&generic_function_name.value)
-                        .unwrap()[idx]
-                        .function_value
-                        .insert(imported_to_uuid.clone(), new_function_value);
-                } else {
-                    function
-                        .function_value
-                        .insert(imported_to_uuid.clone(), new_function_value);
-                }
+                function
+                    .write()
+                    .unwrap()
+                    .function_value
+                    .insert(imported_to_uuid.clone(), new_function_value);
             }
         }
 
@@ -413,21 +402,41 @@ impl
                     // Only act on classes whose descriptor is defined in
                     // the generic's module (has the module's own UUID) but
                     // not yet declared in the importing module.
-                    if !class.type_descriptor.contains_key(&module_uuid) {
+                    let (
+                        has_module_descriptor,
+                        has_imported_descriptor,
+                        attribute_types,
+                        class_type,
+                    ) = {
+                        let class = class.read().unwrap();
+                        (
+                            class.type_descriptor.contains_key(&module_uuid),
+                            class.type_descriptor.contains_key(&imported_to_uuid),
+                            class
+                                .attributes
+                                .values()
+                                .map(|attribute| attribute.attribute_type.clone())
+                                .collect::<Vec<_>>(),
+                            class.class_type.clone(),
+                        )
+                    };
+
+                    if !has_module_descriptor {
                         continue;
                     }
-                    if class.type_descriptor.contains_key(&imported_to_uuid) {
+                    if has_imported_descriptor {
                         continue;
                     }
-                    let managed_offset_count = class
-                        .attributes
-                        .iter()
-                        .filter(|(_, attr)| self.is_managed(&attr.attribute_type))
-                        .count();
+                    let mut managed_offset_count = 0;
+                    for attribute_type in &attribute_types {
+                        if self.is_managed(attribute_type) {
+                            managed_offset_count += 1;
+                        }
+                    }
                     self.module_context
                         .move_to_module(imported_to.clone(), false, false);
                     self.declare_class_descriptor(
-                        &class.class_type.to_mangled_string(),
+                        &class_type.to_mangled_string(),
                         managed_offset_count,
                     );
                     self.module_context.move_out_of_module();
@@ -503,8 +512,23 @@ impl
 
         self.module_context.move_out_of_module();
 
-        let mut class_reference =
+        let class_reference =
             module.read().unwrap().get_classes()[&generic_class_name.value].clone();
+
+        let class_type = class_reference.read().unwrap().class_type.clone();
+        let class_type_string = class_type.to_string();
+
+        // Snapshot the instantiated overloads to declare into importers.
+        let method_entries: Vec<(String, Arc<RwLock<CodegenFunction>>)> = {
+            let class_read = class_reference.read().unwrap();
+            let mut entries = Vec::new();
+            for (method_name, method_options) in class_read.main_virtual_table.methods.iter() {
+                for option in method_options.iter() {
+                    entries.push((method_name.clone(), Arc::clone(option)));
+                }
+            }
+            entries
+        };
 
         let imported_by = module
             .read()
@@ -527,24 +551,30 @@ impl
             // import_modules. The declaration's managed-offset count must match
             // the definition.
             if !class_reference
+                .read()
+                .unwrap()
                 .type_descriptor
                 .contains_key(&imported_to_uuid)
             {
-                let managed_offset_count = {
-                    let mut count = 0;
-                    for (_, attribute) in class_reference.attributes.iter() {
-                        if self.is_managed(&attribute.attribute_type) {
-                            count += 1;
-                        }
+                let attribute_types: Vec<PekoType> = class_reference
+                    .read()
+                    .unwrap()
+                    .attributes
+                    .values()
+                    .map(|attribute| attribute.attribute_type.clone())
+                    .collect();
+                let mut managed_offset_count = 0;
+                for attribute_type in &attribute_types {
+                    if self.is_managed(attribute_type) {
+                        managed_offset_count += 1;
                     }
-                    count
-                };
+                }
 
                 let descriptor_declaration = {
                     self.module_context
                         .move_to_module(imported_to.clone(), false, false);
                     let declaration = self.declare_class_descriptor(
-                        &class_reference.class_type.to_mangled_string(),
+                        &class_type.to_mangled_string(),
                         managed_offset_count,
                     );
                     self.module_context.move_out_of_module();
@@ -552,191 +582,163 @@ impl
                 };
 
                 class_reference
+                    .write()
+                    .unwrap()
                     .type_descriptor
                     .insert(imported_to_uuid.clone(), descriptor_declaration);
             }
 
-            for (method_name, method_options) in
-                class_reference.main_virtual_table.methods.iter_mut()
-            {
-                for (idx, option) in method_options.iter_mut().enumerate() {
-                    if option.function_value.contains_key(&imported_to_uuid)
-                        || (class_reference.imported_from.is_some()
-                            && class_reference
-                                .imported_from
-                                .as_ref()
-                                .unwrap()
-                                .read()
-                                .unwrap()
-                                .classes
-                                .get(&generic_class_name.value)
-                                .unwrap()
-                                .main_virtual_table
-                                .methods[method_name][idx]
-                                .function_value
-                                .contains_key(&imported_to_uuid))
-                    {
-                        continue;
-                    }
+            for (method_name, option) in method_entries.iter() {
+                if option
+                    .read()
+                    .unwrap()
+                    .function_value
+                    .contains_key(&imported_to_uuid)
+                {
+                    continue;
+                }
 
-                    self.module_context
-                        .move_to_module(module.clone(), false, false);
+                let (
+                    option_type,
+                    option_variadic,
+                    option_return_type,
+                    option_arguments,
+                    option_qualified,
+                    option_parent_class_info,
+                ) = {
+                    let option = option.read().unwrap();
+                    (
+                        option.get_type(),
+                        option.visibility.variadic,
+                        option.return_type.clone(),
+                        option.arguments.clone(),
+                        option.qualified_name.clone(),
+                        option.parent_class_info.clone(),
+                    )
+                };
 
-                    let function_llvm_type = self
-                        .get_llvm_type_full(&option.get_type(), true, option.visibility.variadic)
-                        .unwrap();
+                self.module_context
+                    .move_to_module(module.clone(), false, false);
 
-                    self.module_context.move_out_of_module();
+                let function_llvm_type = self
+                    .get_llvm_type_full(&option_type, true, option_variadic)
+                    .unwrap();
 
-                    let mut parent_method: Option<CodegenValue> = None;
-                    let mut parent_idx: i32 = -1;
-                    if let Some(parent_class_info) = &&option.parent_class_info
-                        && parent_class_info.0.to_string() != class_reference.class_type.to_string()
-                    {
-                        for (parent_option_idx, parent_option) in
-                            parent_class_info.1.read().unwrap().classes[&option
-                                .parent_class_info
-                                .as_ref()
-                                .unwrap()
-                                .0
-                                .declutter()
-                                .to_string()]
-                                .main_virtual_table
-                                .methods[method_name]
-                                .iter()
-                                .enumerate()
-                        {
-                            if !self.types_equal(&parent_option.return_type, &option.return_type)
-                                || parent_option.arguments.len() != option.arguments.len()
-                            {
-                                continue;
-                            }
+                self.module_context.move_out_of_module();
 
-                            let mut breakout = false;
-                            for ((_, argument1), (_, argument2)) in parent_option
-                                .arguments
-                                .iter()
-                                .zip(option.arguments.iter())
-                                .skip(1)
-                            {
-                                if !self
-                                    .types_equal(&argument1.argument_type, &argument2.argument_type)
-                                {
-                                    breakout = true;
-                                    break;
-                                }
-                            }
-
-                            if breakout {
-                                continue;
-                            }
-
-                            if parent_option.function_value.contains_key(&imported_to_uuid) {
-                                parent_method =
-                                    Some(parent_option.function_value[&imported_to_uuid].clone());
-                            } else {
-                                parent_idx = parent_option_idx as i32;
-                            }
-                            break;
-                        }
-                    }
-
-                    let new_function_value = match parent_method {
-                        Some(value) => value,
-                        None => {
-                            let owned_name = cstr(option.qualified_name.to_string(true));
-                            CodegenValue::new(
-                                unsafe {
-                                    core::LLVMAddFunction(
-                                        imported_to
-                                            .read()
-                                            .unwrap()
-                                            .get_top_level()
-                                            .unwrap()
-                                            .llvm_module,
-                                        owned_name.as_ptr(),
-                                        function_llvm_type,
-                                    )
-                                },
-                                option.get_type(),
-                            )
-                        }
+                let mut parent_method: Option<CodegenValue> = None;
+                let mut parent_slot: Option<Arc<RwLock<CodegenFunction>>> = None;
+                if let Some((parent_type, parent_module)) = &option_parent_class_info
+                    && parent_type.to_string() != class_type_string
+                {
+                    let parent_class_name = parent_type.declutter().to_string();
+                    let parent_options: Vec<Arc<RwLock<CodegenFunction>>> = {
+                        let parent_module_read = parent_module.read().unwrap();
+                        parent_module_read.classes[&parent_class_name]
+                            .read()
+                            .unwrap()
+                            .main_virtual_table
+                            .methods[method_name]
+                            .iter()
+                            .map(Arc::clone)
+                            .collect()
                     };
 
-                    unsafe {
-                        core::LLVMSetLinkage(
-                            new_function_value.llvm_value,
-                            llvm_sys_180::LLVMLinkage::LLVMExternalLinkage,
-                        );
-                    }
-
-                    if parent_idx >= 0 {
-                        option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .1
-                            .write()
-                            .unwrap()
-                            .classes
-                            .get_mut(
-                                &option
-                                    .parent_class_info
-                                    .as_ref()
-                                    .unwrap()
-                                    .0
-                                    .declutter()
-                                    .to_string(),
+                    for parent_option in parent_options {
+                        let (parent_return, parent_arguments, parent_value) = {
+                            let parent_option = parent_option.read().unwrap();
+                            (
+                                parent_option.return_type.clone(),
+                                parent_option.arguments.clone(),
+                                parent_option.function_value.get(&imported_to_uuid).cloned(),
                             )
-                            .unwrap()
-                            .main_virtual_table
-                            .methods
-                            .get_mut(method_name)
-                            .unwrap()[parent_idx as usize]
-                            .function_value
-                            .insert(imported_to_uuid.clone(), new_function_value.clone());
-                    }
+                        };
 
-                    if class_reference.imported_from.is_some() {
-                        module
-                            .write()
-                            .unwrap()
-                            .get_classes_mut()
-                            .get_mut(&generic_class_name.value)
-                            .unwrap()
-                            .imported_from
-                            .as_mut()
-                            .unwrap()
-                            .write()
-                            .unwrap()
-                            .classes
-                            .get_mut(&generic_class_name.value)
-                            .unwrap()
-                            .main_virtual_table
-                            .methods[method_name][idx]
-                            .function_value
-                            .insert(imported_to_uuid.clone(), new_function_value);
-                        continue;
-                    } else {
-                        option
-                            .function_value
-                            .insert(imported_to_uuid.clone(), new_function_value);
+                        if !self.types_equal(&parent_return, &option_return_type)
+                            || parent_arguments.len() != option_arguments.len()
+                        {
+                            continue;
+                        }
+
+                        let mut breakout = false;
+                        for ((_, argument1), (_, argument2)) in
+                            parent_arguments.iter().zip(option_arguments.iter()).skip(1)
+                        {
+                            if !self.types_equal(&argument1.argument_type, &argument2.argument_type)
+                            {
+                                breakout = true;
+                                break;
+                            }
+                        }
+
+                        if breakout {
+                            continue;
+                        }
+
+                        if let Some(value) = parent_value {
+                            parent_method = Some(value);
+                        } else {
+                            parent_slot = Some(parent_option);
+                        }
+                        break;
                     }
                 }
+
+                let new_function_value = match parent_method {
+                    Some(value) => value,
+                    None => {
+                        let owned_name = cstr(option_qualified.to_string(true));
+                        CodegenValue::new(
+                            unsafe {
+                                core::LLVMAddFunction(
+                                    imported_to
+                                        .read()
+                                        .unwrap()
+                                        .get_top_level()
+                                        .unwrap()
+                                        .llvm_module,
+                                    owned_name.as_ptr(),
+                                    function_llvm_type,
+                                )
+                            },
+                            option_type,
+                        )
+                    }
+                };
+
+                unsafe {
+                    core::LLVMSetLinkage(
+                        new_function_value.llvm_value,
+                        llvm_sys_180::LLVMLinkage::LLVMExternalLinkage,
+                    );
+                }
+
+                if let Some(parent_slot) = parent_slot {
+                    parent_slot
+                        .write()
+                        .unwrap()
+                        .function_value
+                        .insert(imported_to_uuid.clone(), new_function_value.clone());
+                }
+
+                option
+                    .write()
+                    .unwrap()
+                    .function_value
+                    .insert(imported_to_uuid.clone(), new_function_value);
             }
         }
 
-        module
-            .write()
-            .unwrap()
-            .get_classes_mut()
-            .insert(generic_class_name.value.clone(), class_reference.clone());
+        module.write().unwrap().get_classes_mut().insert(
+            generic_class_name.value.clone(),
+            Arc::clone(&class_reference),
+        );
 
         self.reset_context(context);
         self.generic_types.clear();
         self.generic_types.extend(previous_context_generic_types);
 
-        Some(class_reference)
+        Some(class_reference.read().unwrap().clone())
     }
 
     fn apply_operator(
@@ -909,7 +911,10 @@ impl
 
         // Pick the best-matching overload from the function's option set.
         let function_to_call = self.choose_function(
-            next_module.read().unwrap().get_functions()[&function_name_type.type_name].clone(),
+            next_module.read().unwrap().get_functions()[&function_name_type.type_name]
+                .iter()
+                .map(|option| option.read().unwrap().clone())
+                .collect(),
             argument_types,
             None,
             false,
@@ -985,7 +990,10 @@ impl
             .methods
             .contains_key(&method_name_str)
         {
-            object_class.main_virtual_table.methods[&method_name_str].clone()
+            object_class.main_virtual_table.methods[&method_name_str]
+                .iter()
+                .map(|option| option.read().unwrap().clone())
+                .collect()
         } else {
             return Err(format!(
                 "could not find method type '{}' on object of type '{}'",

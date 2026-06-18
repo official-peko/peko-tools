@@ -141,10 +141,12 @@ pub trait ExecutionClassAttribute {
 /// argument-type list at call sites.
 pub trait ExecutionClassVirtualTable<FunctionType> {
     /// Method-name -> overload-list map, preserving declaration order.
-    fn get_methods(&self) -> &IndexMap<String, Vec<FunctionType>>;
+    /// Each overload is held behind a lock shared by all modules
+    /// that reference the function.
+    fn get_methods(&self) -> &IndexMap<String, Vec<Arc<RwLock<FunctionType>>>>;
 
     /// Mutable view of the method-name -> overload-list map.
-    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<FunctionType>>;
+    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<FunctionType>>>>;
 }
 
 /// A declared class, including its type, parent class (if any), attribute map, and
@@ -315,34 +317,46 @@ pub trait ExecutionModule<
     fn get_modules_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ModuleType>>>;
 
     /// Function map (name -> overload list), preserving declaration order.
-    fn get_functions(&self) -> &IndexMap<String, Vec<FunctionType>>;
+    /// Each overload is held behind a lock shared by all modules
+    /// that reference the function.
+    fn get_functions(&self) -> &IndexMap<String, Vec<Arc<RwLock<FunctionType>>>>;
 
     /// Mutable view of the function map.
-    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<FunctionType>>;
+    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<FunctionType>>>>;
 
     /// Variable map (name -> variable data), preserving declaration order.
-    fn get_variables(&self) -> &IndexMap<String, VariableType>;
+    /// Each variable is held behind a lock shared by all modules
+    /// that reference the variable.
+    fn get_variables(&self) -> &IndexMap<String, Arc<RwLock<VariableType>>>;
 
     /// Mutable view of the variable map.
-    fn get_variables_mut(&mut self) -> &mut IndexMap<String, VariableType>;
+    fn get_variables_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<VariableType>>>;
 
-    /// Class map (name -> class data), preserving declaration order.
-    fn get_classes(&self) -> &IndexMap<String, ClassType>;
+    /// Class map (name -> class data), preserving declaration order. Each
+    /// class is held behind a lock shared by all modules that
+    /// reference the class.
+    fn get_classes(&self) -> &IndexMap<String, Arc<RwLock<ClassType>>>;
 
     /// Mutable view of the class map.
-    fn get_classes_mut(&mut self) -> &mut IndexMap<String, ClassType>;
+    fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ClassType>>>;
 
     /// Generic-class map (name -> generic-class data), preserving
     /// declaration order. Keyed on the bare name without type parameters.
-    fn get_class_generics(&self) -> &IndexMap<String, ClassGenericType>;
+    /// Each entry is held behind a lock shared by all modules that
+    /// reference the generic.
+    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<ClassGenericType>>>;
 
     /// Mutable view of the generic-class map.
-    fn get_class_generics_mut(&mut self) -> &mut IndexMap<String, ClassGenericType>;
+    fn get_class_generics_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ClassGenericType>>>;
 
     /// Generic-function map (name -> generic-function data), preserving
     /// declaration order. Keyed on the bare name without type parameters.
-    fn get_function_generics(&self) -> &IndexMap<String, FunctionGenericType>;
+    /// Each entry is held behind a lock shared by all modules that
+    /// reference the generic.
+    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<FunctionGenericType>>>;
 
     /// Mutable view of the generic-function map.
-    fn get_function_generics_mut(&mut self) -> &mut IndexMap<String, FunctionGenericType>;
+    fn get_function_generics_mut(
+        &mut self,
+    ) -> &mut IndexMap<String, Arc<RwLock<FunctionGenericType>>>;
 }

@@ -126,6 +126,8 @@ impl ScopeManager for PekoCodegenContext {
             .read()
             .unwrap()
             .get_variables()["current_line"]
+            .read()
+            .unwrap()
             .clone();
         let file_global_variable = self
             .module_context
@@ -133,10 +135,13 @@ impl ScopeManager for PekoCodegenContext {
             .read()
             .unwrap()
             .get_variables()["current_file"]
+            .read()
+            .unwrap()
             .clone();
 
         // Capture the previous values so the caller can restore them.
         let uuid = self.get_owning_module_uuid();
+
         let previous_line_global_value =
             self.load_value(&line_global_variable.variable_value[&uuid]);
         // current_file holds a ptr addrspace(1) value. load_value resolves
@@ -188,6 +193,8 @@ impl ScopeManager for PekoCodegenContext {
             .read()
             .unwrap()
             .get_variables()["current_line"]
+            .read()
+            .unwrap()
             .clone();
         let file_global_variable = self
             .module_context
@@ -195,6 +202,8 @@ impl ScopeManager for PekoCodegenContext {
             .read()
             .unwrap()
             .get_variables()["current_file"]
+            .read()
+            .unwrap()
             .clone();
 
         let uuid = self.get_owning_module_uuid();

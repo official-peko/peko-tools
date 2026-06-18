@@ -377,18 +377,27 @@ impl HighLevelCodegen for PekoCodegenContext {
         )?;
 
         // Wire each method into its assigned vtable slot.
+        let uuid = self.get_owning_module_uuid();
         for (_, functions) in &class.main_virtual_table.methods {
             for function in functions {
+                let (function_type, virtual_table_index, function_value) = {
+                    let function = function.read().unwrap();
+                    (
+                        function.get_type(),
+                        function.virtual_table_index,
+                        function.function_value[&uuid].clone(),
+                    )
+                };
+
                 let function_element = self.get_vtable_method(
                     &allocate_class_vtable,
                     class.main_virtual_table.llvm_type,
-                    &function.get_type(),
-                    function.virtual_table_index,
+                    &function_type,
+                    virtual_table_index,
                     false,
                 );
 
-                let uuid = &self.get_owning_module_uuid();
-                self.build_store(&function_element, &function.function_value[uuid]);
+                self.build_store(&function_element, &function_value);
             }
         }
 

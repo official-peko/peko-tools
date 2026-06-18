@@ -223,7 +223,10 @@ impl PekoValueBuilder for NewVariableAST {
                 .write()
                 .unwrap()
                 .get_variables_mut()
-                .insert(self.name.value.clone(), global_variable);
+                .insert(
+                    self.name.value.clone(),
+                    Arc::new(RwLock::new(global_variable)),
+                );
         } else {
             codegen_context
                 .module_context
@@ -231,7 +234,10 @@ impl PekoValueBuilder for NewVariableAST {
                 .write()
                 .unwrap()
                 .get_variables_mut()
-                .insert(self.name.value.clone(), global_variable);
+                .insert(
+                    self.name.value.clone(),
+                    Arc::new(RwLock::new(global_variable)),
+                );
         }
 
         let current_file = codegen_context.get_current_file().to_path_buf();
@@ -272,14 +278,14 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                 .get_function_generics_mut()
                 .insert(
                     self.function_name.value.clone(),
-                    CodegenFunctionGeneric::new(
+                    Arc::new(RwLock::new(CodegenFunctionGeneric::new(
                         self.visibility.clone(),
                         self.generic_types.clone(),
                         self_reference,
                         current_module,
                         current_file,
                         None,
-                    ),
+                    ))),
                 );
 
             return codegen_context.create_null_pointer();
@@ -463,7 +469,10 @@ impl PekoValueBuilder for FunctionDeclarationAST {
 
         // Look for an existing definition with exactly-matching arg types.
         let find_function_definition = codegen_context.choose_function(
-            function_module.read().unwrap().get_functions()[&self.function_name.value].clone(),
+            function_module.read().unwrap().get_functions()[&self.function_name.value]
+                .iter()
+                .map(|option| option.read().unwrap().clone())
+                .collect(),
             argument_types.clone(),
             None,
             false,
@@ -551,7 +560,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                     .get_functions_mut()
                     .get_mut(&self.function_name.value)
                     .unwrap()
-                    .push(function_reference.clone());
+                    .push(Arc::new(RwLock::new(function_reference.clone())));
                 function_reference
             }
         };
@@ -1130,14 +1139,14 @@ impl PekoValueBuilder for ClassAST {
                 .get_class_generics_mut()
                 .insert(
                     self.class_name.value.clone(),
-                    CodegenClassGeneric::new(
+                    Arc::new(RwLock::new(CodegenClassGeneric::new(
                         self.visibility.clone(),
                         self.generics.clone(),
                         self_reference,
                         current_module,
                         current_file,
                         None,
-                    ),
+                    ))),
                 );
             return codegen_context.create_null_pointer();
         }
@@ -1264,7 +1273,17 @@ impl PekoValueBuilder for ClassAST {
             .write()
             .unwrap()
             .get_classes_mut()
-            .insert(self.class_name.value.clone(), class);
+            .insert(self.class_name.value.clone(), Arc::new(RwLock::new(class)));
+
+        // Shared handle to the class just inserted. Method-signature
+        // generation mutates the class through this handle.
+        let stored_class = codegen_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_classes()[&self.class_name.value]
+            .clone();
 
         // --- Materialize the class struct body (layout pass) ---
         //
@@ -1296,12 +1315,9 @@ impl PekoValueBuilder for ClassAST {
         for (attribute_name, attribute) in &self.attributes {
             // Reject duplicate attribute names (against the slots already in the
             // map: vtable + inherited).
-            let already_present = codegen_context
-                .module_context
-                .current_module()
+            let already_present = stored_class
                 .read()
                 .unwrap()
-                .get_classes()[&self.class_name.value]
                 .attributes
                 .contains_key(&attribute_name.value);
             if already_present || class_attributes.contains_key(&attribute_name.value) {
@@ -1322,14 +1338,7 @@ impl PekoValueBuilder for ClassAST {
 
             // struct index = current attribute count (vtable + inherited + the
             // own attributes appended so far), matching declaration order.
-            let current_struct_index = codegen_context
-                .module_context
-                .current_module()
-                .read()
-                .unwrap()
-                .get_classes()[&self.class_name.value]
-                .attributes
-                .len();
+            let current_struct_index = stored_class.read().unwrap().attributes.len();
 
             // Placeholder layout type from the RAW attribute type (no expand).
             let attribute_llvm_type =
@@ -1340,36 +1349,24 @@ impl PekoValueBuilder for ClassAST {
             // method-signature generation, when expansion is safe.
             let raw_attribute_type = attribute.attribute_type.as_ref().clone();
 
-            codegen_context
-                .module_context
-                .current_module()
-                .write()
-                .unwrap()
-                .get_classes_mut()
-                .get_mut(&self.class_name.value)
-                .unwrap()
-                .attributes
-                .insert(
-                    attribute_name.value.clone(),
-                    CodegenClassAttribute::new(
-                        attribute.visibility.clone(),
-                        raw_attribute_type,
-                        current_struct_index,
-                        attribute_llvm_type,
-                    ),
-                );
+            stored_class.write().unwrap().attributes.insert(
+                attribute_name.value.clone(),
+                CodegenClassAttribute::new(
+                    attribute.visibility.clone(),
+                    raw_attribute_type,
+                    current_struct_index,
+                    attribute_llvm_type,
+                ),
+            );
         }
 
         // Build the struct body from the COMPLETE attributes map (vtable slot,
         // inherited attributes, own attributes) in order -- the same source the
         // original code used. Snapshot the cached placeholder llvm_types under
         // the read lock; they are layout-correct, so no expansion is needed.
-        let placeholder_field_types = codegen_context
-            .module_context
-            .current_module()
+        let placeholder_field_types = stored_class
             .read()
             .unwrap()
-            .get_classes()[&self.class_name.value]
             .attributes
             .iter()
             .map(|(_, attr)| attr.llvm_type)
@@ -1383,25 +1380,15 @@ impl PekoValueBuilder for ClassAST {
 
         for class_method in &self.methods {
             // Initialize the method's overload list when it is first seen.
-            if !codegen_context
-                .module_context
-                .current_module()
+            if !stored_class
                 .read()
-                .unwrap()
-                .get_classes()
-                .get(&self.class_name.value)
                 .unwrap()
                 .main_virtual_table
                 .methods
                 .contains_key(&class_method.get_info().name.value)
             {
-                codegen_context
-                    .module_context
-                    .current_module()
+                stored_class
                     .write()
-                    .unwrap()
-                    .get_classes_mut()
-                    .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
                     .methods
@@ -1516,17 +1503,12 @@ impl PekoValueBuilder for ClassAST {
 
             // Look for an existing overload that this method should
             // replace (override).
-            let current_method_overloads = codegen_context
-                .module_context
-                .current_module()
-                .read()
-                .unwrap()
-                .get_classes()
-                .get(&self.class_name.value)
-                .unwrap()
-                .main_virtual_table
-                .methods[&class_method.get_info().name.value]
-                .clone();
+            let current_method_overloads: Vec<CodegenFunction> =
+                stored_class.read().unwrap().main_virtual_table.methods
+                    [&class_method.get_info().name.value]
+                    .iter()
+                    .map(|option| option.read().unwrap().clone())
+                    .collect();
 
             let mut method_base_info = if current_method_overloads.is_empty() {
                 None
@@ -1587,16 +1569,7 @@ impl PekoValueBuilder for ClassAST {
                     method_base.1.virtual_table_index
                 } else {
                     let mut current_methods_length = 0;
-                    for (_, method_list) in &codegen_context
-                        .module_context
-                        .current_module()
-                        .write()
-                        .unwrap()
-                        .get_classes_mut()
-                        .get_mut(&self.class_name.value)
-                        .unwrap()
-                        .main_virtual_table
-                        .methods
+                    for (_, method_list) in &stored_class.read().unwrap().main_virtual_table.methods
                     {
                         current_methods_length += method_list.len();
                     }
@@ -1606,59 +1579,40 @@ impl PekoValueBuilder for ClassAST {
                 codegen_context.module_context.current_module().clone(),
                 None,
                 Some((
-                    codegen_context
-                        .module_context
-                        .current_module()
-                        .read()
-                        .unwrap()
-                        .classes[&self.class_name.value]
-                        .class_type
-                        .clone(),
+                    stored_class.read().unwrap().class_type.clone(),
                     codegen_context.module_context.current_module().clone(),
                 )),
             );
 
             // Install the method either as an override or as a new
-            // entry on the overload list.
+            // entry on the overload list. An override replaces the
+            // inherited slot with a fresh handle so the shared parent
+            // method is left untouched.
             if let Some((base_idx, _)) = method_base_info {
-                codegen_context
-                    .module_context
-                    .current_module()
+                stored_class
                     .write()
-                    .unwrap()
-                    .get_classes_mut()
-                    .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
-                    .methods[&class_method.get_info().name.value][base_idx] =
-                    codegen_function.clone();
+                    .methods
+                    .get_mut(&class_method.get_info().name.value)
+                    .unwrap()[base_idx] = Arc::new(RwLock::new(codegen_function.clone()));
             } else {
-                codegen_context
-                    .module_context
-                    .current_module()
+                stored_class
                     .write()
-                    .unwrap()
-                    .get_classes_mut()
-                    .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
                     .methods
                     .get_mut(&class_method.get_info().name.value)
                     .unwrap()
-                    .push(codegen_function.clone());
+                    .push(Arc::new(RwLock::new(codegen_function.clone())));
             }
 
             function_values.push(codegen_function);
         }
 
         // Materialize the vtable struct body from the function types.
-        let all_main_functions = codegen_context
-            .module_context
-            .current_module()
-            .write()
-            .unwrap()
-            .get_classes_mut()
-            .get_mut(&self.class_name.value)
+        let all_main_functions = stored_class
+            .read()
             .unwrap()
             .main_virtual_table
             .methods
@@ -1667,7 +1621,8 @@ impl PekoValueBuilder for ClassAST {
         let mut function_llvm_types = Vec::new();
         for (_, func_overloads) in &all_main_functions {
             for func in func_overloads {
-                if let Some(llvm_type) = codegen_context.get_llvm_type(&func.get_type()) {
+                let func_type = func.read().unwrap().get_type();
+                if let Some(llvm_type) = codegen_context.get_llvm_type(&func_type) {
                     function_llvm_types.push(llvm_type);
                 }
             }
@@ -1714,13 +1669,8 @@ impl PekoValueBuilder for ClassAST {
             // Update the real type on the already-present entry, preserving its
             // struct index and placeholder llvm_type. A missing entry here means
             // the layout pass rejected it as a duplicate; skip it consistently.
-            if let Some(existing) = codegen_context
-                .module_context
-                .current_module()
+            if let Some(existing) = stored_class
                 .write()
-                .unwrap()
-                .get_classes_mut()
-                .get_mut(&self.class_name.value)
                 .unwrap()
                 .attributes
                 .get_mut(&attribute_name.value)
@@ -1741,14 +1691,14 @@ impl PekoValueBuilder for ClassAST {
         // `is_managed` / `emit_type_descriptor`, which need `&mut self`.
         let (attribute_info, datalayout) = {
             let module = codegen_context.module_context.current_module();
-            let class_ref = module.read().unwrap();
-            let class_entry = &class_ref.get_classes()[&self.class_name.value];
             let datalayout = unsafe {
                 llvm_sys_180::target::LLVMGetModuleDataLayout(
-                    class_ref.get_top_level().unwrap().llvm_module,
+                    module.read().unwrap().get_top_level().unwrap().llvm_module,
                 )
             };
-            let info = class_entry
+            let info = stored_class
+                .read()
+                .unwrap()
                 .attributes
                 .iter()
                 .map(|(_, attr)| (attr.attribute_type.clone(), attr.struct_index))
@@ -1773,13 +1723,8 @@ impl PekoValueBuilder for ClassAST {
             codegen_context.emit_class_descriptor(&class_type.to_mangled_string(), managed_offsets);
 
         let owning_uuid = codegen_context.get_owning_module_uuid();
-        codegen_context
-            .module_context
-            .current_module()
+        stored_class
             .write()
-            .unwrap()
-            .get_classes_mut()
-            .get_mut(&self.class_name.value)
             .unwrap()
             .type_descriptor
             .insert(owning_uuid, descriptor);
@@ -1949,10 +1894,12 @@ impl PekoValueBuilder for ClassAST {
                         codegen_context.get_function_argument(&method_codegen_value, 0),
                     );
 
-                    let super_constructor_overloads =
+                    let super_constructor_overloads: Vec<CodegenFunction> =
                         parent_class.clone().unwrap().main_virtual_table.methods
                             [&String::from("constructor")]
-                            .clone();
+                            .iter()
+                            .map(|option| option.read().unwrap().clone())
+                            .collect();
 
                     let best_super_overload = codegen_context.choose_function(
                         super_constructor_overloads,

@@ -221,15 +221,17 @@ impl ExecutionClassAttribute for SimulatorClassAttribute {
 pub struct SimulatorClassVirtualTable {
     /// Method-name -> overload-list. Overload selection happens at the
     /// call-site via [`crate::execution::ExecutionContextAlgorithms`].
-    pub methods: IndexMap<String, Vec<SimulatorFunction>>,
+    /// Each overload is held behind a lock shared by all modules that
+    /// reference the method.
+    pub methods: IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>>,
 }
 
 impl ExecutionClassVirtualTable<SimulatorFunction> for SimulatorClassVirtualTable {
-    fn get_methods(&self) -> &IndexMap<String, Vec<SimulatorFunction>> {
+    fn get_methods(&self) -> &IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> {
         &self.methods
     }
 
-    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<SimulatorFunction>> {
+    fn get_methods_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> {
         &mut self.methods
     }
 }
@@ -457,20 +459,25 @@ pub struct SimulatorModule {
     /// Sub-modules.
     pub modules: IndexMap<String, Arc<RwLock<SimulatorModule>>>,
 
-    /// Function overload sets, indexed by function name.
-    pub functions: IndexMap<String, Vec<SimulatorFunction>>,
+    /// Function overload sets, indexed by function name. Each overload is
+    /// held behind a lock shared by all modules that reference it.
+    pub functions: IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>>,
 
-    /// Top-level variables.
-    pub variables: IndexMap<String, SimulatorVariable>,
+    /// Top-level variables. Each is held behind a lock shared by all
+    /// modules that reference it.
+    pub variables: IndexMap<String, Arc<RwLock<SimulatorVariable>>>,
 
-    /// Classes.
-    pub classes: IndexMap<String, SimulatorClass>,
+    /// Classes. Each is held behind a lock shared by all modules that
+    /// reference it.
+    pub classes: IndexMap<String, Arc<RwLock<SimulatorClass>>>,
 
-    /// Generic class declarations awaiting type substitution.
-    pub class_generics: IndexMap<String, SimulatorClassGeneric>,
+    /// Generic class declarations awaiting type substitution. Each is held
+    /// behind a lock shared by all modules that reference it.
+    pub class_generics: IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>>,
 
-    /// Generic function declarations awaiting type substitution.
-    pub function_generics: IndexMap<String, SimulatorFunctionGeneric>,
+    /// Generic function declarations awaiting type substitution. Each is
+    /// held behind a lock shared by all modules that reference it.
+    pub function_generics: IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>>,
 
     /// The module's top-level scope, used by tooling for symbol lookup.
     pub scope: Arc<RwLock<Scope>>,
@@ -556,23 +563,23 @@ impl
         &self.modules
     }
 
-    fn get_variables(&self) -> &IndexMap<String, SimulatorVariable> {
+    fn get_variables(&self) -> &IndexMap<String, Arc<RwLock<SimulatorVariable>>> {
         &self.variables
     }
 
-    fn get_functions(&self) -> &IndexMap<String, Vec<SimulatorFunction>> {
+    fn get_functions(&self) -> &IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> {
         &self.functions
     }
 
-    fn get_function_generics(&self) -> &IndexMap<String, SimulatorFunctionGeneric> {
+    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>> {
         &self.function_generics
     }
 
-    fn get_classes(&self) -> &IndexMap<String, SimulatorClass> {
+    fn get_classes(&self) -> &IndexMap<String, Arc<RwLock<SimulatorClass>>> {
         &self.classes
     }
 
-    fn get_class_generics(&self) -> &IndexMap<String, SimulatorClassGeneric> {
+    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>> {
         &self.class_generics
     }
 
@@ -588,23 +595,27 @@ impl
         &mut self.modules
     }
 
-    fn get_variables_mut(&mut self) -> &mut IndexMap<String, SimulatorVariable> {
+    fn get_variables_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<SimulatorVariable>>> {
         &mut self.variables
     }
 
-    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<SimulatorFunction>> {
+    fn get_functions_mut(&mut self) -> &mut IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> {
         &mut self.functions
     }
 
-    fn get_function_generics_mut(&mut self) -> &mut IndexMap<String, SimulatorFunctionGeneric> {
+    fn get_function_generics_mut(
+        &mut self,
+    ) -> &mut IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>> {
         &mut self.function_generics
     }
 
-    fn get_classes_mut(&mut self) -> &mut IndexMap<String, SimulatorClass> {
+    fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<SimulatorClass>>> {
         &mut self.classes
     }
 
-    fn get_class_generics_mut(&mut self) -> &mut IndexMap<String, SimulatorClassGeneric> {
+    fn get_class_generics_mut(
+        &mut self,
+    ) -> &mut IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>> {
         &mut self.class_generics
     }
 

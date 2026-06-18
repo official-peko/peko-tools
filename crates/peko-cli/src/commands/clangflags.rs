@@ -9,8 +9,8 @@ use std::process::ExitCode;
 
 use peko_core::target::{Architecture, OperatingSystem};
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 
 /// GTK / system include subdirectories needed on Linux. Each is joined
 /// onto `Compiler/toolchains/linux/gtk/`.

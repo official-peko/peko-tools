@@ -28,8 +28,8 @@ use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{
-    BooleanOperation, CodegenArg, CodegenValue, NumericalOperation, is_managed_pointer,
-    managed_pointer_type,
+    BooleanOperation, CodegenArg, CodegenFunction, CodegenValue, NumericalOperation,
+    is_managed_pointer, managed_pointer_type,
 };
 
 impl PekoValueBuilder for ArrayAST {
@@ -372,12 +372,14 @@ impl PekoValueBuilder for ObjectConstructionAST {
                     codegen_context.generated_kw_args.clone().unwrap(),
                 )
             } else {
-                let method_options = get_codegen_class
+                let method_options: Vec<CodegenFunction> = get_codegen_class
                     .as_ref()
                     .unwrap()
                     .main_virtual_table
                     .methods["constructor"]
-                    .clone();
+                    .iter()
+                    .map(|option| option.read().unwrap().clone())
+                    .collect();
                 let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
                 for method_option in method_options {
@@ -767,6 +769,8 @@ impl PekoValueBuilder for ObjectAccessAST {
 
                 let (previous_line, previous_file) = if !class.main_virtual_table.methods
                     [&function_name][0]
+                    .read()
+                    .unwrap()
                     .visibility
                     .notrack
                 {
@@ -784,7 +788,11 @@ impl PekoValueBuilder for ObjectAccessAST {
                 // Collect the expected argument-type sets across all
                 // overloads, so each call-site argument can be
                 // type-inferred against its valid type options.
-                let method_options = class.main_virtual_table.methods[&function_name].clone();
+                let method_options: Vec<CodegenFunction> = class.main_virtual_table.methods
+                    [&function_name]
+                    .iter()
+                    .map(|option| option.read().unwrap().clone())
+                    .collect();
                 let mut argument_type_options = vec![Vec::new(); function_call.arguments.len()];
 
                 for method_option in method_options {
@@ -845,6 +853,8 @@ impl PekoValueBuilder for ObjectAccessAST {
                 );
 
                 if !class.main_virtual_table.methods[&function_name][0]
+                    .read()
+                    .unwrap()
                     .visibility
                     .notrack
                 {
@@ -932,11 +942,15 @@ impl PekoValueBuilder for ObjectAccessAST {
                     .contains_key(&variable_name)
                 {
                     let object_vtable = codegen_context.get_object_vtable(&object, true);
+                    let first_method = class.main_virtual_table.methods[&variable_name][0]
+                        .read()
+                        .unwrap()
+                        .clone();
                     return codegen_context.get_vtable_method(
                         &object_vtable,
                         class.main_virtual_table.llvm_type,
-                        &class.main_virtual_table.methods[&variable_name][0].get_type(),
-                        class.main_virtual_table.methods[&variable_name][0].virtual_table_index,
+                        &first_method.get_type(),
+                        first_method.virtual_table_index,
                         true,
                     );
                 }
@@ -1479,6 +1493,8 @@ impl PekoValueBuilder for VariableReferenceAST {
                 .read()
                 .unwrap()
                 .get_variables()[&self.variable_name.value]
+                .read()
+                .unwrap()
                 .clone();
 
             if variable_reference.variable_visibility.private
@@ -2086,8 +2102,11 @@ impl PekoValueBuilder for FunctionCallAST {
                         .methods
                         .contains_key(&function_full_name)
                     {
-                        let method_options =
-                            this_class.main_virtual_table.methods[&function_full_name].clone();
+                        let method_options: Vec<CodegenFunction> =
+                            this_class.main_virtual_table.methods[&function_full_name]
+                                .iter()
+                                .map(|option| option.read().unwrap().clone())
+                                .collect();
                         let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
                         for method_option in method_options {
@@ -2143,6 +2162,8 @@ impl PekoValueBuilder for FunctionCallAST {
 
                         let (previous_line, previous_file) =
                             if !this_class.main_virtual_table.methods[&function_full_name][0]
+                                .read()
+                                .unwrap()
                                 .visibility
                                 .notrack
                             {
@@ -2173,6 +2194,8 @@ impl PekoValueBuilder for FunctionCallAST {
                         }
 
                         if !this_class.main_virtual_table.methods[&function_full_name][0]
+                            .read()
+                            .unwrap()
                             .visibility
                             .notrack
                         {
@@ -2267,41 +2290,57 @@ impl PekoValueBuilder for FunctionCallAST {
                 .contains_key(&function_full_name)
             {
                 function_module.read().unwrap().get_function_generics()[&function_base_name]
+                    .read()
+                    .unwrap()
                     .generic_typenames
                     .iter()
                     .map(|arg_type| arg_type.value.clone())
                     .collect::<Vec<String>>()
             } else {
                 function_module.read().unwrap().get_class_generics()[&function_base_name]
+                    .read()
+                    .unwrap()
                     .generic_typenames
                     .iter()
                     .map(|arg_type| arg_type.value.clone())
                     .collect::<Vec<String>>()
             };
 
-            let function_module_reference = function_module.read().unwrap();
-            let argument_declarations_iter = if function_module
+            let argument_declaration_types: Vec<_> = if function_module
                 .read()
                 .unwrap()
                 .get_function_generics()
                 .contains_key(&function_full_name)
             {
-                function_module_reference.get_function_generics()[&function_base_name]
+                let function_generic = function_module.read().unwrap().get_function_generics()
+                    [&function_base_name]
+                    .clone();
+                function_generic
+                    .read()
+                    .unwrap()
                     .function
                     .arguments
-                    .iter()
+                    .values()
+                    .map(|argument_declaration_info| {
+                        argument_declaration_info.argument_type.clone()
+                    })
+                    .collect()
             } else {
-                let find_matching_constructor = function_module_reference.get_class_generics()
+                let class_generic = function_module.read().unwrap().get_class_generics()
                     [&function_base_name]
-                    .class
-                    .methods
-                    .iter()
-                    .find(|method| match method {
-                        ClassMethod::Constructor(constructor_info, _) => {
-                            constructor_info.arguments.len() == arguments.len()
-                        }
-                        _ => false,
-                    });
+                    .clone();
+                let class_generic_read = class_generic.read().unwrap();
+                let find_matching_constructor =
+                    class_generic_read
+                        .class
+                        .methods
+                        .iter()
+                        .find(|method| match method {
+                            ClassMethod::Constructor(constructor_info, _) => {
+                                constructor_info.arguments.len() == arguments.len()
+                            }
+                            _ => false,
+                        });
 
                 if find_matching_constructor.is_none() {
                     codegen_context
@@ -2320,9 +2359,13 @@ impl PekoValueBuilder for FunctionCallAST {
                 }
 
                 match find_matching_constructor.unwrap() {
-                    ClassMethod::Constructor(constructor_info, _) => {
-                        constructor_info.arguments.iter()
-                    }
+                    ClassMethod::Constructor(constructor_info, _) => constructor_info
+                        .arguments
+                        .values()
+                        .map(|argument_declaration_info| {
+                            argument_declaration_info.argument_type.clone()
+                        })
+                        .collect(),
                     _ => panic!("this error is impossible"),
                 }
             };
@@ -2333,9 +2376,11 @@ impl PekoValueBuilder for FunctionCallAST {
             // Pass 1: walk the supplied arguments against the function's
             // declared argument types, recording each declared generic
             // typename's match to a provided argument type.
-            arguments.iter().zip(argument_declarations_iter).for_each(
-                |(provided_argument, (_, argument_declaration_info))| {
-                    let generic_typename = argument_declaration_info.argument_type.to_string();
+            arguments
+                .iter()
+                .zip(argument_declaration_types.iter())
+                .for_each(|(provided_argument, declared_type)| {
+                    let generic_typename = declared_type.to_string();
 
                     if !needed_generics.contains(&generic_typename)
                         || collected_generic_types.contains_key(&generic_typename)
@@ -2346,8 +2391,7 @@ impl PekoValueBuilder for FunctionCallAST {
                     collected_generic_types
                         .insert(generic_typename, provided_argument.value_type.clone());
                     needed_generics_count -= 1;
-                },
-            );
+                });
 
             // Pass 2: if any generics are still unresolved, try to
             // pull them from the inference type (e.g. assigning to
@@ -2521,6 +2565,8 @@ impl PekoValueBuilder for FunctionCallAST {
             {
                 let function_reference = function_module.read().unwrap().get_function_generics()
                     [&function_base_name]
+                    .read()
+                    .unwrap()
                     .clone();
 
                 let generated_function =
@@ -2543,8 +2589,11 @@ impl PekoValueBuilder for FunctionCallAST {
                 }
             }
 
-            let function_choices =
-                function_module.read().unwrap().get_functions()[&function_full_name].clone();
+            let function_choices: Vec<CodegenFunction> =
+                function_module.read().unwrap().get_functions()[&function_full_name]
+                    .iter()
+                    .map(|option| option.read().unwrap().clone())
+                    .collect();
 
             let function_choice = codegen_context.choose_function(
                 function_choices,

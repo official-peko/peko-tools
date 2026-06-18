@@ -28,12 +28,13 @@ use llvm_sys_180::target_machine::LLVMTargetRef;
 use peko_core::asts::data_structures::{PositionedValue, UnpackItem};
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::target::{OperatingSystem, PekoTarget};
+use peko_core::types::PekoType;
 
 use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::cstr;
-use crate::codegen::data_structures::{CodegenModule, CodegenValue};
+use crate::codegen::data_structures::{CodegenFunction, CodegenModule, CodegenValue};
 
 /// Cross-module wiring and binary / IR output.
 pub trait ModuleManager {
@@ -130,28 +131,48 @@ impl ModuleManager for PekoCodegenContext {
             };
         }
 
+        // Top-level UUID of the module being imported. A symbol is owned
+        // by `from` when its declaring module shares this UUID; symbols
+        // that `from` itself imported have a different one and are skipped.
+        let from_top_uuid = from.read().unwrap().get_uuid();
+
+        // The extern module holds external declarations whose parent is the
+        // module that declared them, not the extern module itself. Every
+        // symbol the extern module holds is owned by it for import purposes.
+        let is_extern_import = Arc::ptr_eq(&from, &self.module_context.extern_module);
+
         // Import global variables.
         let variables = from.read().unwrap().variables.clone();
-        for (variable_name, mut variable) in variables {
-            if variable.imported_from.is_some() {
+        for (variable_name, variable) in variables {
+            let variable_parent = variable.read().unwrap().parent.clone();
+            if !is_extern_import && variable_parent.read().unwrap().get_uuid() != from_top_uuid {
                 continue;
             }
 
+            let variable_type = variable.read().unwrap().variable_type.clone();
             self.module_context
                 .move_to_module(from.clone(), false, false);
-            let variable_llvm_type = self.get_llvm_type(&variable.variable_type).unwrap();
+            let variable_llvm_type = self.get_llvm_type(&variable_type).unwrap();
             self.module_context.move_out_of_module();
 
             let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
 
-            if !variable.variable_value.contains_key(&to_uuid) {
-                let variable_qualified_name = cstr(
-                    variable
-                        .qualified_name
-                        .as_ref()
-                        .unwrap()
-                        .to_string(!variable.variable_visibility.external),
-                );
+            if !variable
+                .read()
+                .unwrap()
+                .variable_value
+                .contains_key(&to_uuid)
+            {
+                let (qualified_name, external, variable_type_inner) = {
+                    let variable = variable.read().unwrap();
+                    (
+                        variable.qualified_name.clone(),
+                        variable.variable_visibility.external,
+                        variable.variable_type.clone(),
+                    )
+                };
+                let variable_qualified_name =
+                    cstr(qualified_name.as_ref().unwrap().to_string(!external));
 
                 let new_variable_value = CodegenValue::new(
                     unsafe {
@@ -167,17 +188,14 @@ impl ModuleManager for PekoCodegenContext {
                         core::LLVMSetExternallyInitialized(llvm_value, 1);
                         llvm_value
                     },
-                    variable.variable_type.clone(),
+                    variable_type_inner,
                 );
 
                 variable
+                    .write()
+                    .unwrap()
                     .variable_value
                     .insert(to_uuid.clone(), new_variable_value);
-
-                from.write()
-                    .unwrap()
-                    .variables
-                    .insert(variable_name.clone(), variable.clone());
             }
 
             if unpacked_symbols.is_empty()
@@ -201,47 +219,45 @@ impl ModuleManager for PekoCodegenContext {
                 );
             }
 
-            variable.imported_from = Some(from.clone());
             to.write()
                 .unwrap()
                 .variables
-                .insert(variable_name, variable);
+                .insert(variable_name, Arc::clone(&variable));
         }
 
         // Import global functions.
         let functions = from.read().unwrap().functions.clone();
-        for (function_name, mut function_options) in functions {
-            for (idx, function) in function_options.iter_mut().enumerate() {
+        for (function_name, function_options) in functions {
+            for function in function_options.iter() {
                 let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
-                if function.function_value.contains_key(&to_uuid)
-                    || (function.imported_from.is_some()
-                        && function
-                            .imported_from
-                            .as_mut()
-                            .unwrap()
-                            .write()
-                            .unwrap()
-                            .functions
-                            .get_mut(&function_name)
-                            .unwrap()[idx]
-                            .function_value
-                            .contains_key(&to_uuid))
+                if function
+                    .read()
+                    .unwrap()
+                    .function_value
+                    .contains_key(&to_uuid)
                 {
                     continue;
                 }
 
+                let (function_type, variadic, qualified_name, external, gc_safepoint) = {
+                    let function = function.read().unwrap();
+                    (
+                        function.get_type(),
+                        function.visibility.variadic,
+                        function.qualified_name.clone(),
+                        function.visibility.external,
+                        function.visibility.gc_safepoint,
+                    )
+                };
+
                 self.module_context
                     .move_to_module(from.clone(), false, false);
                 let function_llvm_type = self
-                    .get_llvm_type_full(&function.get_type(), true, function.visibility.variadic)
+                    .get_llvm_type_full(&function_type, true, variadic)
                     .unwrap();
                 self.module_context.move_out_of_module();
 
-                let function_qualified_name = cstr(
-                    function
-                        .qualified_name
-                        .to_string(!function.visibility.external),
-                );
+                let function_qualified_name = cstr(qualified_name.to_string(!external));
 
                 let new_function_value = CodegenValue::new(
                     unsafe {
@@ -251,7 +267,7 @@ impl ModuleManager for PekoCodegenContext {
                             function_llvm_type,
                         )
                     },
-                    function.get_type(),
+                    function_type,
                 );
 
                 unsafe {
@@ -268,40 +284,33 @@ impl ModuleManager for PekoCodegenContext {
                 // entrypoints always collect and so are never leaf. This
                 // mirrors the marking applied where the function is first
                 // declared.
-                let unmangled_name = function.qualified_name.to_string(false);
+                let unmangled_name = qualified_name.to_string(false);
                 let is_gc_alloc_entrypoint =
                     unmangled_name == "peko_gc_alloc_object" || unmangled_name == "peko_gc_alloc";
-                if function.visibility.external
-                    && !function.visibility.gc_safepoint
-                    && !is_gc_alloc_entrypoint
-                {
+                if external && !gc_safepoint && !is_gc_alloc_entrypoint {
                     crate::codegen::builders::functions::set_gc_leaf_attribute(
                         new_function_value.llvm_value,
                     );
                 }
 
-                if let Some(imported_from) = function.imported_from.as_mut() {
-                    imported_from
-                        .write()
-                        .unwrap()
-                        .functions
-                        .get_mut(&function_name)
-                        .unwrap()[idx]
-                        .function_value
-                        .insert(to_uuid, new_function_value);
-                } else {
-                    function.function_value.insert(to_uuid, new_function_value);
-                }
+                function
+                    .write()
+                    .unwrap()
+                    .function_value
+                    .insert(to_uuid, new_function_value);
             }
 
-            if matches!(function_options.first(), Some(option) if option.imported_from.is_some()) {
+            // Publish only symbols `from` owns; skip re-exports.
+            let owned = match function_options.first() {
+                Some(option) => {
+                    let parent = option.read().unwrap().parent.clone();
+                    is_extern_import || parent.read().unwrap().get_uuid() == from_top_uuid
+                }
+                None => is_extern_import,
+            };
+            if !owned {
                 continue;
             }
-
-            from.write()
-                .unwrap()
-                .functions
-                .insert(function_name.clone(), function_options.clone());
 
             if unpacked_symbols.is_empty()
                 || (!unpack_all
@@ -322,10 +331,6 @@ impl ModuleManager for PekoCodegenContext {
                         .unwrap()
                         .0,
                 );
-            }
-
-            for function in function_options.iter_mut() {
-                function.imported_from = Some(from.clone());
             }
 
             to.write()
@@ -336,178 +341,177 @@ impl ModuleManager for PekoCodegenContext {
 
         // Import class methods.
         let classes = from.read().unwrap().classes.clone();
-        for (class_name, mut class) in classes {
-            for (method_name, method_options) in class.main_virtual_table.methods.iter_mut() {
-                for (idx, option) in method_options.iter_mut().enumerate() {
-                    let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
-                    if option.function_value.contains_key(&to_uuid)
-                        || (class.imported_from.is_some()
-                            && class
-                                .imported_from
-                                .as_mut()
-                                .unwrap()
-                                .write()
-                                .unwrap()
-                                .classes
-                                .get_mut(&class_name)
-                                .unwrap()
-                                .main_virtual_table
-                                .methods[method_name][idx]
-                                .function_value
-                                .contains_key(&to_uuid))
-                    {
-                        continue;
-                    }
-
-                    self.module_context
-                        .move_to_module(from.clone(), false, false);
-
-                    let function_llvm_type = self
-                        .get_llvm_type_full(&option.get_type(), true, option.visibility.variadic)
-                        .unwrap();
-
-                    self.module_context.move_out_of_module();
-
-                    // Find the method's parent-class slot (if any) to
-                    // reuse the same `LLVMValueRef` across overrides.
-                    let mut parent_method: Option<CodegenValue> = None;
-                    let mut parent_idx: i32 = -1;
-                    if let Some(parent_class_info) = &option.parent_class_info
-                        && parent_class_info.0.to_string() != class.class_type.to_string()
-                    {
-                        for (parent_option_idx, parent_option) in
-                            parent_class_info.1.read().unwrap().classes[&option
-                                .parent_class_info
-                                .as_ref()
-                                .unwrap()
-                                .0
-                                .declutter()
-                                .to_string()]
-                                .main_virtual_table
-                                .methods[method_name]
-                                .iter()
-                                .enumerate()
-                        {
-                            if !self.types_equal(&parent_option.return_type, &option.return_type)
-                                || parent_option.arguments.len() != option.arguments.len()
-                            {
-                                continue;
-                            }
-
-                            let mut breakout = false;
-                            for ((_, argument1), (_, argument2)) in parent_option
-                                .arguments
-                                .iter()
-                                .zip(option.arguments.iter())
-                                .skip(1)
-                            {
-                                if !self
-                                    .types_equal(&argument1.argument_type, &argument2.argument_type)
-                                {
-                                    breakout = true;
-                                    break;
-                                }
-                            }
-
-                            if breakout {
-                                continue;
-                            }
-
-                            if parent_option.function_value.contains_key(&to_uuid) {
-                                parent_method =
-                                    Some(parent_option.function_value[&to_uuid].clone());
-                            } else {
-                                parent_idx = parent_option_idx as i32;
-                            }
-                            break;
-                        }
-                    }
-
-                    let new_function_value = match parent_method {
-                        Some(value) => value,
-                        None => {
-                            let option_qualified_name = cstr(option.qualified_name.to_string(true));
-                            CodegenValue::new(
-                                unsafe {
-                                    core::LLVMAddFunction(
-                                        to.read().unwrap().get_top_level().unwrap().llvm_module,
-                                        option_qualified_name.as_ptr(),
-                                        function_llvm_type,
-                                    )
-                                },
-                                option.get_type(),
-                            )
-                        }
-                    };
-
-                    unsafe {
-                        core::LLVMSetLinkage(
-                            new_function_value.llvm_value,
-                            llvm_sys_180::LLVMLinkage::LLVMExternalLinkage,
-                        );
-                    }
-
-                    if parent_idx >= 0 {
-                        option
-                            .parent_class_info
-                            .as_ref()
-                            .unwrap()
-                            .1
-                            .write()
-                            .unwrap()
-                            .classes
-                            .get_mut(
-                                &option
-                                    .parent_class_info
-                                    .as_ref()
-                                    .unwrap()
-                                    .0
-                                    .declutter()
-                                    .to_string(),
-                            )
-                            .unwrap()
-                            .main_virtual_table
-                            .methods
-                            .get_mut(method_name)
-                            .unwrap()[parent_idx as usize]
-                            .function_value
-                            .insert(to_uuid.clone(), new_function_value.clone());
-                    }
-
-                    if let Some(imported_from) = class.imported_from.as_mut() {
-                        imported_from
-                            .write()
-                            .unwrap()
-                            .classes
-                            .get_mut(&class_name)
-                            .unwrap()
-                            .main_virtual_table
-                            .methods[method_name][idx]
-                            .function_value
-                            .insert(to_uuid, new_function_value);
-                        continue;
-                    } else {
-                        option.function_value.insert(to_uuid, new_function_value);
+        for (class_name, class) in classes {
+            // Snapshot the overloads to declare into `to`. Each overload is
+            // shared, so declaring records the importing module's UUID in
+            // the overload's value map.
+            let method_entries: Vec<(String, Arc<RwLock<CodegenFunction>>)> = {
+                let class_read = class.read().unwrap();
+                let mut entries = Vec::new();
+                for (method_name, method_options) in class_read.main_virtual_table.methods.iter() {
+                    for option in method_options.iter() {
+                        entries.push((method_name.clone(), Arc::clone(option)));
                     }
                 }
+                entries
+            };
+
+            let class_type = class.read().unwrap().class_type.clone();
+            let class_type_string = class_type.to_string();
+
+            for (method_name, option) in method_entries {
+                let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
+                if option.read().unwrap().function_value.contains_key(&to_uuid) {
+                    continue;
+                }
+
+                let (
+                    option_type,
+                    option_variadic,
+                    option_return_type,
+                    option_arguments,
+                    option_qualified,
+                    option_parent_class_info,
+                ) = {
+                    let option = option.read().unwrap();
+                    (
+                        option.get_type(),
+                        option.visibility.variadic,
+                        option.return_type.clone(),
+                        option.arguments.clone(),
+                        option.qualified_name.clone(),
+                        option.parent_class_info.clone(),
+                    )
+                };
+
+                self.module_context
+                    .move_to_module(from.clone(), false, false);
+
+                let function_llvm_type = self
+                    .get_llvm_type_full(&option_type, true, option_variadic)
+                    .unwrap();
+
+                self.module_context.move_out_of_module();
+
+                // Find the method's parent-class slot (if any) to
+                // reuse the same `LLVMValueRef` across overrides.
+                let mut parent_method: Option<CodegenValue> = None;
+                let mut parent_slot: Option<Arc<RwLock<CodegenFunction>>> = None;
+                if let Some((parent_type, parent_module)) = &option_parent_class_info
+                    && parent_type.to_string() != class_type_string
+                {
+                    let parent_class_name = parent_type.declutter().to_string();
+                    let parent_options: Vec<Arc<RwLock<CodegenFunction>>> = {
+                        let parent_module_read = parent_module.read().unwrap();
+                        parent_module_read.classes[&parent_class_name]
+                            .read()
+                            .unwrap()
+                            .main_virtual_table
+                            .methods[&method_name]
+                            .iter()
+                            .map(Arc::clone)
+                            .collect()
+                    };
+
+                    for parent_option in parent_options {
+                        let (parent_return, parent_arguments, parent_value) = {
+                            let parent_option = parent_option.read().unwrap();
+                            (
+                                parent_option.return_type.clone(),
+                                parent_option.arguments.clone(),
+                                parent_option.function_value.get(&to_uuid).cloned(),
+                            )
+                        };
+
+                        if !self.types_equal(&parent_return, &option_return_type)
+                            || parent_arguments.len() != option_arguments.len()
+                        {
+                            continue;
+                        }
+
+                        let mut breakout = false;
+                        for ((_, argument1), (_, argument2)) in
+                            parent_arguments.iter().zip(option_arguments.iter()).skip(1)
+                        {
+                            if !self.types_equal(&argument1.argument_type, &argument2.argument_type)
+                            {
+                                breakout = true;
+                                break;
+                            }
+                        }
+
+                        if breakout {
+                            continue;
+                        }
+
+                        if let Some(value) = parent_value {
+                            parent_method = Some(value);
+                        } else {
+                            parent_slot = Some(parent_option);
+                        }
+                        break;
+                    }
+                }
+
+                let new_function_value = match parent_method {
+                    Some(value) => value,
+                    None => {
+                        let option_qualified_name = cstr(option_qualified.to_string(true));
+                        CodegenValue::new(
+                            unsafe {
+                                core::LLVMAddFunction(
+                                    to.read().unwrap().get_top_level().unwrap().llvm_module,
+                                    option_qualified_name.as_ptr(),
+                                    function_llvm_type,
+                                )
+                            },
+                            option_type,
+                        )
+                    }
+                };
+
+                unsafe {
+                    core::LLVMSetLinkage(
+                        new_function_value.llvm_value,
+                        llvm_sys_180::LLVMLinkage::LLVMExternalLinkage,
+                    );
+                }
+
+                if let Some(parent_slot) = parent_slot {
+                    parent_slot
+                        .write()
+                        .unwrap()
+                        .function_value
+                        .insert(to_uuid.clone(), new_function_value.clone());
+                }
+
+                option
+                    .write()
+                    .unwrap()
+                    .function_value
+                    .insert(to_uuid, new_function_value);
             }
 
             let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
-            if !class.type_descriptor.contains_key(&to_uuid) {
-                let managed_offset_count = {
-                    let mut count = 0;
-                    for (_, attribute) in class.attributes.iter() {
-                        if self.is_managed(&attribute.attribute_type) {
-                            count += 1;
-                        }
+            if !class.read().unwrap().type_descriptor.contains_key(&to_uuid) {
+                let attribute_types: Vec<PekoType> = class
+                    .read()
+                    .unwrap()
+                    .attributes
+                    .values()
+                    .map(|attribute| attribute.attribute_type.clone())
+                    .collect();
+                let mut managed_offset_count = 0;
+                for attribute_type in &attribute_types {
+                    if self.is_managed(attribute_type) {
+                        managed_offset_count += 1;
                     }
-                    count
-                };
+                }
 
                 let descriptor_declaration = {
                     self.module_context.move_to_module(to.clone(), false, false);
                     let declaration = self.declare_class_descriptor(
-                        &class.class_type.to_mangled_string(),
+                        &class_type.to_mangled_string(),
                         managed_offset_count,
                     );
                     self.module_context.move_out_of_module();
@@ -515,29 +519,17 @@ impl ModuleManager for PekoCodegenContext {
                 };
 
                 class
+                    .write()
+                    .unwrap()
                     .type_descriptor
-                    .insert(to_uuid.clone(), descriptor_declaration.clone());
-
-                if let Some(imported_from) = class.imported_from.as_mut() {
-                    imported_from
-                        .write()
-                        .unwrap()
-                        .classes
-                        .get_mut(&class_name)
-                        .unwrap()
-                        .type_descriptor
-                        .insert(to_uuid, descriptor_declaration.clone());
-                }
+                    .insert(to_uuid, descriptor_declaration);
             }
 
-            if class.imported_from.is_some() {
+            // Publish only classes `from` owns; skip re-exports.
+            let class_parent = class.read().unwrap().parent.clone();
+            if !is_extern_import && class_parent.read().unwrap().get_uuid() != from_top_uuid {
                 continue;
             }
-
-            from.write()
-                .unwrap()
-                .classes
-                .insert(class_name.clone(), class.clone());
 
             if unpacked_symbols.is_empty()
                 || (!unpack_all
@@ -559,13 +551,16 @@ impl ModuleManager for PekoCodegenContext {
                 );
             }
 
-            class.imported_from = Some(from.clone());
-            to.write().unwrap().classes.insert(class_name, class);
+            to.write()
+                .unwrap()
+                .classes
+                .insert(class_name, Arc::clone(&class));
         }
 
         // Import function generic templates.
-        for (function_name, mut function) in from.read().unwrap().function_generics.clone() {
-            if function.imported_from.is_some()
+        for (function_name, function) in from.read().unwrap().function_generics.clone() {
+            let function_module = function.read().unwrap().module.clone();
+            if (!is_extern_import && function_module.read().unwrap().get_uuid() != from_top_uuid)
                 || unpacked_symbols.is_empty()
                 || (!unpack_all
                     && !current_symbols
@@ -587,16 +582,16 @@ impl ModuleManager for PekoCodegenContext {
                 );
             }
 
-            function.imported_from = Some(from.clone());
             to.write()
                 .unwrap()
                 .function_generics
-                .insert(function_name, function);
+                .insert(function_name, Arc::clone(&function));
         }
 
         // Import class generic templates.
-        for (class_name, mut class) in from.read().unwrap().class_generics.clone() {
-            if class.imported_from.is_some()
+        for (class_name, class) in from.read().unwrap().class_generics.clone() {
+            let class_module = class.read().unwrap().module.clone();
+            if (!is_extern_import && class_module.read().unwrap().get_uuid() != from_top_uuid)
                 || unpacked_symbols.is_empty()
                 || (!unpack_all
                     && !current_symbols
@@ -616,8 +611,10 @@ impl ModuleManager for PekoCodegenContext {
                 );
             }
 
-            class.imported_from = Some(from.clone());
-            to.write().unwrap().class_generics.insert(class_name, class);
+            to.write()
+                .unwrap()
+                .class_generics
+                .insert(class_name, Arc::clone(&class));
         }
 
         // Recurse into submodules.

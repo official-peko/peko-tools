@@ -245,7 +245,7 @@ impl PekoValueSimulator for NewVariableAST {
                 .write()
                 .unwrap()
                 .variables
-                .insert(self.name.value.clone(), variable);
+                .insert(self.name.value.clone(), Arc::new(RwLock::new(variable)));
 
             simulator_context.current_expected_type_options = previous_expected_type;
             return SimulatorValue::Value(types::PekoType::simple_type("default"));
@@ -283,7 +283,7 @@ impl PekoValueSimulator for NewVariableAST {
             .write()
             .unwrap()
             .variables
-            .insert(self.name.value.clone(), variable);
+            .insert(self.name.value.clone(), Arc::new(RwLock::new(variable)));
 
         simulator_context.current_expected_type_options = previous_expected_type;
         SimulatorValue::Value(types::PekoType::simple_type("default"))
@@ -336,7 +336,10 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 .write()
                 .unwrap()
                 .function_generics
-                .insert(self.function_name.value.clone(), function);
+                .insert(
+                    self.function_name.value.clone(),
+                    Arc::new(RwLock::new(function)),
+                );
 
             if let Some(scope) = simulator_context.current_scope.as_mut() {
                 scope.write().unwrap().symbols.insert(
@@ -530,8 +533,11 @@ impl PekoValueSimulator for FunctionDeclarationAST {
 
         // Check whether this declaration overrides an existing overload
         // (signature must be exactly equal, not just similar).
-        let function_choices =
-            function_module.write().unwrap().functions[&self.function_name.value].clone();
+        let function_choices = function_module.write().unwrap().functions
+            [&self.function_name.value]
+            .iter()
+            .map(|f| f.read().unwrap().clone())
+            .collect();
         let find_function_definition = simulator_context.choose_function_and_index(
             function_choices,
             argument_types
@@ -575,7 +581,7 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 .unwrap()
                 .functions
                 .get_mut(&self.function_name.value)
-                .unwrap()[function_definition.0] = peko_function;
+                .unwrap()[function_definition.0] = Arc::new(RwLock::new(peko_function));
         } else {
             function_module
                 .write()
@@ -583,7 +589,7 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 .functions
                 .get_mut(&self.function_name.value)
                 .unwrap()
-                .push(peko_function);
+                .push(Arc::new(RwLock::new(peko_function)));
         }
 
         // No body: nothing to simulate. Restore state and exit.
@@ -1219,14 +1225,14 @@ impl PekoValueSimulator for ClassAST {
                 .class_generics
                 .insert(
                     self.class_name.value.clone(),
-                    SimulatorClassGeneric::new(
+                    Arc::new(RwLock::new(SimulatorClassGeneric::new(
                         self.visibility.clone(),
                         self.generics.clone(),
                         self_reference,
                         current_module,
                         current_scope,
                         current_file,
-                    ),
+                    ))),
                 );
 
             // Surface attribute symbols on the class scope.
@@ -1370,6 +1376,8 @@ impl PekoValueSimulator for ClassAST {
                             .unwrap()
                             .main_virtual_table
                             .methods["constructor"][0]
+                            .read()
+                            .unwrap()
                             .arguments
                         {
                             constructor_arguments
@@ -1534,7 +1542,7 @@ impl PekoValueSimulator for ClassAST {
             .write()
             .unwrap()
             .classes
-            .insert(self.class_name.value.clone(), class);
+            .insert(self.class_name.value.clone(), Arc::new(RwLock::new(class)));
 
         // Simulate each attribute: type-check, then add to both the
         // class's attribute map and the scope's symbol table.
@@ -1585,6 +1593,8 @@ impl PekoValueSimulator for ClassAST {
                 .classes
                 .get_mut(&self.class_name.value)
                 .unwrap()
+                .write()
+                .unwrap()
                 .attributes
                 .insert(
                     attribute_name.value.clone(),
@@ -1616,25 +1626,23 @@ impl PekoValueSimulator for ClassAST {
         // for each method and insert it into the class's virtual
         // table, overriding by signature equality.
         for class_method in &self.methods {
-            if !simulator_context
+            let class_ref = simulator_context
                 .module_context
                 .current_module()
                 .read()
                 .unwrap()
-                .classes
-                .get(&self.class_name.value)
+                .classes[&self.class_name.value]
+                .clone();
+
+            if !class_ref
+                .read()
                 .unwrap()
                 .main_virtual_table
                 .methods
                 .contains_key(&class_method.get_info().name.value)
             {
-                simulator_context
-                    .module_context
-                    .current_module()
+                class_ref
                     .write()
-                    .unwrap()
-                    .classes
-                    .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
                     .methods
@@ -1676,36 +1684,17 @@ impl PekoValueSimulator for ClassAST {
 
             // Look for an existing overload with an exact signature
             // match. method_index = -1 means no match found.
-            if !simulator_context
-                .module_context
-                .current_module()
-                .read()
-                .unwrap()
-                .classes
-                .get(&self.class_name.value)
-                .unwrap()
-                .main_virtual_table
-                .methods[&class_method.get_info().name.value]
-                .is_empty()
-            {
+            let existing_overloads: Vec<SimulatorFunction> =
+                class_ref.read().unwrap().main_virtual_table.methods
+                    [&class_method.get_info().name.value]
+                    .iter()
+                    .map(|function| function.read().unwrap().clone())
+                    .collect();
+
+            if !existing_overloads.is_empty() {
                 let mut method_index = -1;
 
-                let current_module_reference = simulator_context
-                    .module_context
-                    .current_module()
-                    .read()
-                    .unwrap()
-                    .clone();
-                let method_choice_iterator = current_module_reference
-                    .classes
-                    .get(&self.class_name.value)
-                    .unwrap()
-                    .main_virtual_table
-                    .methods[&class_method.get_info().name.value]
-                    .iter()
-                    .enumerate();
-
-                for (current_method_index, method_choice) in method_choice_iterator {
+                for (current_method_index, method_choice) in existing_overloads.iter().enumerate() {
                     if method_choice.arguments.len() != class_method.get_info().arguments.len() {
                         continue;
                     }
@@ -1734,34 +1723,21 @@ impl PekoValueSimulator for ClassAST {
 
                 if method_index >= 0 {
                     function_added_to_vtable = true;
-                    simulator_context
-                        .module_context
-                        .current_module()
-                        .write()
-                        .unwrap()
-                        .classes
-                        .get_mut(&self.class_name.value)
-                        .unwrap()
-                        .main_virtual_table
-                        .methods[&class_method.get_info().name.value]
-                        [method_index as usize] = simulator_function.clone();
+                    class_ref.write().unwrap().main_virtual_table.methods
+                        [&class_method.get_info().name.value][method_index as usize] =
+                        Arc::new(RwLock::new(simulator_function.clone()));
                 }
             }
 
             if !function_added_to_vtable {
-                simulator_context
-                    .module_context
-                    .current_module()
+                class_ref
                     .write()
-                    .unwrap()
-                    .classes
-                    .get_mut(&self.class_name.value)
                     .unwrap()
                     .main_virtual_table
                     .methods
                     .get_mut(&class_method.get_info().name.value)
                     .unwrap()
-                    .push(simulator_function);
+                    .push(Arc::new(RwLock::new(simulator_function)));
             }
         }
 
@@ -2010,7 +1986,9 @@ impl PekoValueSimulator for ClassAST {
 
                     let super_constructor_overloads =
                         parent_class.clone().unwrap().main_virtual_table.methods["constructor"]
-                            .clone();
+                            .iter()
+                            .map(|function| function.read().unwrap().clone())
+                            .collect();
 
                     let best_super_overload = simulator_context.choose_function(
                         super_constructor_overloads,
@@ -2096,47 +2074,36 @@ impl PekoValueSimulator for ClassAST {
         // Collect the first-constructor arguments (or attribute list
         // for the implicit constructor) for IDE signature help.
         let mut constructor_arguments = IndexMap::new();
-        if simulator_context
+        let class_ref = simulator_context
             .module_context
             .current_module()
-            .write()
+            .read()
             .unwrap()
-            .classes
-            .get_mut(&self.class_name.value)
+            .classes[&self.class_name.value]
+            .clone();
+        if class_ref
+            .read()
             .unwrap()
             .main_virtual_table
             .methods
             .contains_key("constructor")
         {
-            let first_constructor = simulator_context
-                .module_context
-                .current_module()
-                .write()
-                .unwrap()
-                .classes
-                .get_mut(&self.class_name.value)
+            let first_constructor = class_ref
+                .read()
                 .unwrap()
                 .main_virtual_table
                 .methods
                 .get("constructor")
                 .unwrap()[0]
+                .read()
+                .unwrap()
                 .clone();
 
             for (argument_name, argument_info) in first_constructor.arguments {
                 constructor_arguments.insert(argument_name, argument_info.argument_type);
             }
         } else {
-            for (attribute_name, attribute_info) in simulator_context
-                .module_context
-                .current_module()
-                .write()
-                .unwrap()
-                .classes
-                .get_mut(&self.class_name.value)
-                .unwrap()
-                .attributes
-                .clone()
-            {
+            for (attribute_name, attribute_info) in class_ref.read().unwrap().attributes.clone() {
                 constructor_arguments.insert(attribute_name, attribute_info.attribute_type);
             }
         }

@@ -859,7 +859,7 @@ impl PekoSimulatorContext {
         for (method_name, method_functions) in &object_class.main_virtual_table.methods {
             // Only take the first overload — completion just needs the
             // name and a representative signature.
-            let first_function = method_functions[0].clone();
+            let first_function = method_functions[0].read().unwrap().clone();
 
             // Skip private methods unless we're inside the class (i.e.
             // accessing via `this`).
@@ -1488,8 +1488,12 @@ impl
 
         // Capture a reference to the newly-generated function before
         // restoring the context.
-        let function_reference =
-            Some(module.read().unwrap().functions[&generic_function_name.value][0].clone());
+        let function_reference = Some(
+            module.read().unwrap().functions[&generic_function_name.value][0]
+                .read()
+                .unwrap()
+                .clone(),
+        );
 
         self.reset_context(context);
         self.generic_types.clear();
@@ -1561,8 +1565,12 @@ impl
 
         self.module_context.move_out_of_module();
 
-        let class_reference =
-            Some(module.read().unwrap().classes[&generic_class_name.value].clone());
+        let class_reference = Some(
+            module.read().unwrap().classes[&generic_class_name.value]
+                .read()
+                .unwrap()
+                .clone(),
+        );
 
         self.reset_context(context);
         self.generic_types.clear();
@@ -1602,7 +1610,10 @@ impl
             .collect();
 
         let function_to_call = self.choose_function(
-            next_module.read().unwrap().functions[&function_name_type.type_name].clone(),
+            next_module.read().unwrap().functions[&function_name_type.type_name]
+                .iter()
+                .map(|f| f.read().unwrap().clone())
+                .collect(),
             argument_types,
             None,
             false,
@@ -1651,7 +1662,10 @@ impl
             .methods
             .contains_key(&method_name_str)
         {
-            class.main_virtual_table.methods[&method_name_str].clone()
+            class.main_virtual_table.methods[&method_name_str]
+                .iter()
+                .map(|f| f.read().unwrap().clone())
+                .collect()
         } else {
             return Err(format!(
                 "no method `{method_name_str}` on type `{object_value_type}`. Check the method name, that the method is declared on this class (or a parent), and that you are accessing it via the correct object",
