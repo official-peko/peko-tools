@@ -10,13 +10,6 @@ generator, the command line interface, and the language server. This is a
 Cargo workspace that holds the four crates together so they share a single
 dependency graph, a single lockfile, and one release cadence.
 
-## Status
-
-This project is pre-1.0 and in active development. Every published build is a
-prerelease, the public API and the language surface can change between
-versions, and binaries are not yet intended for production use. The version
-series stays in the 0.x range until the first stable launch.
-
 ## Crates
 
 | Crate | Role |
