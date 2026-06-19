@@ -193,10 +193,52 @@ impl PekoAnalyzer {
             .map(|idx| idx.get_external_modules())
             .unwrap_or_default();
 
+        // Copy the preloaded modules in, but keep the extern module
+        // request-local. The resolver reads top_level_modules["extern"]
+        // while declarations write module_context.extern_module, and the
+        // two must stay the same object. Pulling the preloaded "extern"
+        // straight into top_level_modules would replace the fresh one and
+        // break that pairing, so externs the analyzed file declares would
+        // never resolve.
+        let mut preloaded_modules = self.preloaded_modules.clone();
+        let preloaded_extern = preloaded_modules.remove("extern");
+
         simulator_context
             .module_context
             .top_level_modules
-            .extend(self.preloaded_modules.clone());
+            .extend(preloaded_modules);
+
+        // Seed the request-local extern module with the preloaded extern
+        // symbols. The Arcs are shared, so resolution sees the runtime and
+        // standard externs, while externs declared by the analyzed file go
+        // into this request-local module only and do not leak across files.
+        if let Some(preloaded_extern) = preloaded_extern {
+            let request_extern = simulator_context.module_context.extern_module.clone();
+            let source = preloaded_extern.read().unwrap();
+            let mut destination = request_extern.write().unwrap();
+
+            for (name, overloads) in &source.functions {
+                destination
+                    .functions
+                    .insert(name.clone(), overloads.clone());
+            }
+            for (name, variable) in &source.variables {
+                destination.variables.insert(name.clone(), variable.clone());
+            }
+            for (name, class) in &source.classes {
+                destination.classes.insert(name.clone(), class.clone());
+            }
+            for (name, generic) in &source.function_generics {
+                destination
+                    .function_generics
+                    .insert(name.clone(), generic.clone());
+            }
+            for (name, generic) in &source.class_generics {
+                destination
+                    .class_generics
+                    .insert(name.clone(), generic.clone());
+            }
+        }
 
         simulator_context
     }
@@ -415,9 +457,16 @@ impl PekoAnalyzer {
                 .get_available_symbols_from_position(peko_position)
         };
 
+        // A `module::` access lists another module's public surface, so
+        // private symbols are dropped along with hidden ones. A bare
+        // in-scope search keeps private symbols, which the declaring module
+        // can reach.
+        let cross_module_access = !module_full_name.is_empty();
         let mut index = 0;
         while index < available_symbols.len() {
-            if available_symbols[index].get_visibility().hidden
+            let visibility = available_symbols[index].get_visibility();
+            if visibility.hidden
+                || (cross_module_access && visibility.private)
                 || available_symbols[index]
                     .get_name()
                     .chars()
@@ -511,7 +560,27 @@ impl AnalysisEngine for PekoAnalyzer {
             .scope
             .clone();
 
-        helpers::document_symbols_from_scope(scope, false)
+        // Keep only symbols declared in this file. Imported modules and
+        // symbols pulled in by an unpack import are defined elsewhere, and
+        // the implicit default imports carry a zero position that reorders
+        // the breadcrumb trail. File paths are canonicalized so that
+        // logically-equal paths compare equal, with a raw-path fallback for
+        // in-memory documents that do not exist on disk.
+        let current_file = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+        let mut top_level_scope = scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        top_level_scope.symbols.retain(|_, symbol| {
+            let symbol_file = symbol.get_start().file;
+            let symbol_file = symbol_file
+                .canonicalize()
+                .unwrap_or_else(|_| symbol_file.clone());
+            symbol_file == current_file
+        });
+
+        helpers::document_symbols_from_scope(Arc::new(RwLock::new(top_level_scope)), false)
     }
 
     fn hover(&self, path: &Path, position: &Position) -> Option<HoverInfo> {
