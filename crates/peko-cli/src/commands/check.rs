@@ -2,12 +2,20 @@
 
 use std::process::ExitCode;
 
-use crate::cli::reporting::Reporter;
 use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
 
 /// Execute the `check` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
-    if cli_info.perform_deep_root_checkup() {
+    if cli_info.flags.has_flag("rehash") {
+        if cli_info.create_root_hash() {
+            reporter.success("Successfully create root hash");
+            ExitCode::SUCCESS
+        } else {
+            reporter.success("Could not create root hash");
+            ExitCode::FAILURE
+        }
+    } else if cli_info.perform_deep_root_checkup() {
         reporter.success("Peko toolchain installation looks healthy");
         ExitCode::SUCCESS
     } else {

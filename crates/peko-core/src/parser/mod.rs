@@ -462,29 +462,40 @@ impl PekoParser {
                 }
                 self.tokens.increase_index();
 
-                // Extract the example source from the enclosed `{ ... }`,
-                // tracking nesting so inner braces don't end the block early.
+                // Read the example source from the enclosed `{ ... }`. Every
+                // documentation line inside the block begins with a `///`
+                // marker, which delimits the line and is stripped. Brace
+                // depth tracks nested `{` and `}` so inner braces stay in the
+                // text, and the block ends at the matching `}` at depth zero.
+                // Each line is read whole, so inline `//` comments and other
+                // line content stay attached to their line.
                 let mut closing_braces = 0;
                 let mut source_code = String::new();
 
-                while !(self.tokens.finished()
-                    || self.tokens.current_token().equals("}") && closing_braces == 0)
-                    && self.tokens.current_token().equals("///")
+                while !self.tokens.finished()
+                    && !(self.tokens.current_token().equals("}") && closing_braces == 0)
                 {
-                    while self.tokens.current_token().equals("///")
-                        && self.tokens.current_token().has_trailing_newline()
-                    {
-                        self.tokens.increase_index();
-                        source_code.push('\n');
-                    }
-
+                    // Content with no leading marker, for example a one-line
+                    // `@example { ... }`, is appended as a single line.
                     if !self.tokens.current_token().equals("///") {
-                        break;
+                        if self.tokens.current_token().equals("{") {
+                            closing_braces += 1;
+                        } else if self.tokens.current_token().equals("}") {
+                            closing_braces -= 1;
+                        }
+                        source_code.push_str(
+                            &self.tokens.current_token().get_value_with_whitespace(false),
+                        );
+                        self.tokens.increase_index();
+                        continue;
                     }
 
-                    // Preserve indentation from the original source by
-                    // copying any non-leading whitespace.
-                    if self.tokens.current_token().following_whitespace.len() > 1 {
+                    let blank_line = self.tokens.current_token().has_trailing_newline();
+
+                    // Carry indentation that follows the conventional single
+                    // space after the marker.
+                    let mut line = String::new();
+                    if !blank_line {
                         for ws in self
                             .tokens
                             .current_token()
@@ -492,39 +503,31 @@ impl PekoParser {
                             .iter()
                             .skip(1)
                         {
-                            source_code.push(ws.get_value());
+                            line.push(ws.get_value());
                         }
                     }
 
                     self.tokens.increase_index(); // eat the '///'
 
-                    while !(self.tokens.finished()
-                        || self.tokens.current_token().has_trailing_newline()
-                        || self.tokens.current_token().equals("}") && closing_braces == 0)
+                    // Read the rest of the line up to the next marker, the
+                    // block close at depth zero, or the end of input.
+                    while !self.tokens.finished()
+                        && !self.tokens.current_token().equals("///")
+                        && !(self.tokens.current_token().equals("}") && closing_braces == 0)
                     {
                         if self.tokens.current_token().equals("{") {
                             closing_braces += 1;
                         } else if self.tokens.current_token().equals("}") {
                             closing_braces -= 1;
                         }
-                        source_code.push_str(
+                        line.push_str(
                             &self.tokens.current_token().get_value_with_whitespace(false),
                         );
                         self.tokens.increase_index();
                     }
 
-                    // Trailing token of the line unless it's the closing `}`.
-                    if !self.tokens.current_token().equals("}") || closing_braces != 0 {
-                        if self.tokens.current_token().equals("{") {
-                            closing_braces += 1;
-                        } else if self.tokens.current_token().equals("}") {
-                            closing_braces -= 1;
-                        }
-                        source_code.push_str(
-                            &self.tokens.current_token().get_value_with_whitespace(false),
-                        );
-                        self.tokens.increase_index();
-                    }
+                    source_code.push_str(line.trim_end());
+                    source_code.push('\n');
                 }
 
                 if !self.tokens.current_token().equals("}") {
@@ -573,6 +576,16 @@ impl PekoParser {
                         break;
                     }
                     self.tokens.increase_index(); // eat the '///'
+
+                    // A `@param` or `@example` directive after the blank line
+                    // ends this item. The marker is already consumed, so the
+                    // outer loop sees the `@` and parses the next directive.
+                    if self.tokens.current_token().equals("@")
+                        && (self.tokens.get_token_forward(1).equals("param")
+                            || self.tokens.get_token_forward(1).equals("example"))
+                    {
+                        break;
+                    }
                 }
 
                 while !self.tokens.finished() && !self.tokens.current_token().has_trailing_newline()

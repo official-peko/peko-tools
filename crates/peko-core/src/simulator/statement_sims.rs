@@ -715,19 +715,24 @@ impl PekoValueSimulator for ImportStatementAST {
             module_name.clone()
         };
 
-        // A plain import that binds a name already bound to a different
-        // module file is a conflict. Unpack imports cannot conflict
-        // because their identity is the unique module id.
+        // A plain import conflicts only when the current module has already
+        // bound a module under this name in this analysis. The current module
+        // and its scope are rebuilt for each analysis, so this check carries
+        // no state between analyses. A name that exists only in the global
+        // registry because another module imported it, for example `json`
+        // pulled in by `ui`, is a global module this module has not imported,
+        // so it is not a conflict here. Unpack imports cannot conflict because
+        // their identity is the unique module id.
         let conflicting_import = if has_unpack_list {
             false
         } else {
-            simulator_context
-                .module_context
-                .top_level_modules
-                .get(&import_as_module_name)
-                .map(|existing| existing.read().unwrap().file.clone())
-                .map(|existing_file| existing_file != module_entry_file_path)
-                .unwrap_or(false)
+            let current_module_arc = simulator_context.module_context.current_module();
+            let current_module = current_module_arc.read().unwrap();
+            let current_scope = current_module.scope.read().unwrap();
+            matches!(
+                current_scope.symbols.get(&import_as_module_name),
+                Some(ScopeSymbol::Module(..))
+            )
         };
 
         if conflicting_import {

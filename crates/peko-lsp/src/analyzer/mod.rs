@@ -109,20 +109,21 @@ impl PekoAnalyzer {
         Some(analyzer)
     }
 
-    /// Walk upward from `project_folder` looking for a `.peko/project/config.pkbin`
-    /// marker. If one is found within five parents, the directory containing
-    /// the marker becomes the project root.
+    /// Walk upward from `project_folder` looking for a directory that
+    /// contains a `.peko` subdirectory. That directory is the project root,
+    /// matching the CLI compilation root, which is the parent of `.peko/`.
+    /// The search climbs up to five parents.
     pub fn set_project_folder(&mut self, mut project_folder: PathBuf) {
         let mut search_limit = 5;
         while search_limit > 0
+            && !project_folder.join(".peko").is_dir()
             && let Some(parent) = project_folder.parent()
-            && !project_folder.join(".peko/project/config.pkbin").exists()
         {
             project_folder = parent.to_path_buf();
             search_limit -= 1;
         }
 
-        self.project_root = if project_folder.join(".peko/project/config.pkbin").exists() {
+        self.project_root = if project_folder.join(".peko").is_dir() {
             Some(project_folder)
         } else {
             None
@@ -182,11 +183,16 @@ impl PekoAnalyzer {
             self.project_root.clone().unwrap_or(file),
         );
 
+        // The package index appends `Packages` to each input it is given,
+        // so the project-local directory passed here is `<project>/.peko`
+        // and the index reads `<project>/.peko/Packages`. The argument is
+        // passed only when that directory exists, since the index errors on
+        // a missing path.
         let local_packages = self
             .project_root
             .as_ref()
-            .map(|root| root.join(".peko/packages"))
-            .filter(|p| p.exists());
+            .map(|root| root.join(".peko"))
+            .filter(|dot_peko| dot_peko.join("Packages").is_dir());
 
         let package_indexer = PekoPackageIndex::new(&self.peko_root, local_packages.as_deref());
         simulator_context.external_modules = package_indexer

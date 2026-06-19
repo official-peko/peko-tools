@@ -5,3 +5,7 @@ that all expected directories and binaries are present. Use this when
 something seems wrong with your install.
 
 This command takes no options.
+
+
+OPTIONS
+    --rehash              rehashes the root toolchain
