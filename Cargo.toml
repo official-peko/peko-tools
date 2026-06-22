@@ -3,15 +3,15 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "LicenseRef-PSAL-1.0"
 authors = ["Peko UI Technologies LLC"]
 repository = "https://github.com/peko-lang/peko"
 
 [workspace.dependencies]
-peko-core = { version = "0.1.0", path = "crates/peko-core" }
-peko-llvm = { version = "0.1.0", path = "crates/peko-llvm" }
+peko-core = { version = "1.0.0", path = "crates/peko-core" }
+peko-llvm = { version = "1.0.0", path = "crates/peko-llvm" }
 
 tokio = { version = "1.47" }
 thiserror = "2"

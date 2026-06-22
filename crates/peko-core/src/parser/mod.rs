@@ -472,8 +472,8 @@ impl PekoParser {
                 let mut closing_braces = 0;
                 let mut source_code = String::new();
 
-                while !self.tokens.finished()
-                    && !(self.tokens.current_token().equals("}") && closing_braces == 0)
+                while !(self.tokens.finished()
+                    || self.tokens.current_token().equals("}") && closing_braces == 0)
                 {
                     // Content with no leading marker, for example a one-line
                     // `@example { ... }`, is appended as a single line.
@@ -511,9 +511,9 @@ impl PekoParser {
 
                     // Read the rest of the line up to the next marker, the
                     // block close at depth zero, or the end of input.
-                    while !self.tokens.finished()
-                        && !self.tokens.current_token().equals("///")
-                        && !(self.tokens.current_token().equals("}") && closing_braces == 0)
+                    while !(self.tokens.finished()
+                        || self.tokens.current_token().equals("///")
+                        || self.tokens.current_token().equals("}") && closing_braces == 0)
                     {
                         if self.tokens.current_token().equals("{") {
                             closing_braces += 1;
