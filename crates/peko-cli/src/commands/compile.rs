@@ -13,9 +13,9 @@ use peko_llvm::codegen::builders::modules::ModuleManager;
 
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
-use crate::commands::toolchain_sysroot;
 use crate::execution;
 use crate::project::PekoProject;
+use crate::toolchain::resolve_for_target;
 
 /// Where the intermediate object file lives, either at an explicit
 /// path the user gave (`--object --output=PATH`), or in a tempfile we
@@ -165,20 +165,20 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 
     // Otherwise, link the object into a binary.
-    let Some(sysroot) = toolchain_sysroot(
-        cli_info.get_peko_root(),
-        &target_operating_system,
-        &target_architecture,
-    ) else {
-        reporter.error("unsupported target operating system or architecture");
-        return ExitCode::FAILURE;
+    let resolved = match resolve_for_target(cli_info.get_peko_root(), &output_target) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            reporter.error(format!("could not resolve toolchain: {e}"));
+            return ExitCode::FAILURE;
+        }
     };
 
     peko_llvm::linker::lld_link(
         output_target,
         object_choice.path().to_path_buf(),
         compile_outcome.codegen_context.files_to_link,
-        sysroot,
+        &resolved.toolchain,
+        &resolved.dir,
         output_path,
         cli_info.flags.has_flag("shared"),
         None,

@@ -35,7 +35,7 @@ use data_structures::{
 };
 use indexmap::IndexMap;
 
-use crate::ExternalModuleInfo;
+use crate::{ExternalModuleInfo, ExternalModuleVersion};
 use crate::asts::PekoAST;
 use crate::asts::data_structures::{PositionData, PositionedValue, StringChunk};
 use crate::asts::expressions::ObjectConstructionAST;
@@ -342,13 +342,23 @@ pub trait ExecutionContextAlgorithms<
         std::cmp::Ordering::Equal
     }
 
-    /// Picks the greatest version from a list by numeric component
-    /// comparison. Returns `None` when the list is empty.
-    fn latest_version(versions: &[String]) -> Option<String> {
+    /// Selects an installed version of an external module.
+    ///
+    /// A pin that names an installed version wins. Otherwise the greatest
+    /// version by numeric component comparison is chosen. Returns `None` when
+    /// no versions are installed.
+    fn select_external_version<'v>(
+        versions: &'v [ExternalModuleVersion],
+        pin: Option<&str>,
+    ) -> Option<&'v ExternalModuleVersion> {
+        if let Some(pin) = pin
+            && let Some(found) = versions.iter().find(|entry| entry.version == pin)
+        {
+            return Some(found);
+        }
         versions
             .iter()
-            .max_by(|left, right| Self::compare_versions(left, right))
-            .cloned()
+            .max_by(|left, right| Self::compare_versions(&left.version, &right.version))
     }
 
     /// Resolves a name inside a local directory using the local precedence
@@ -481,6 +491,7 @@ pub trait ExecutionContextAlgorithms<
         let mut is_registry = false;
         let mut new_root_folder = root_folder.clone();
         let mut root_token = String::from("project");
+        let mut registry_entry_file: Option<String> = None;
 
         // base_dir is the directory the next segment resolves against.
         // walk_segments are the segments still to resolve from base_dir.
@@ -497,24 +508,17 @@ pub trait ExecutionContextAlgorithms<
                 .to_path_buf();
             walk_segments = &path_ids[1..];
         } else if let Some(module_info) = self.get_external_modules().get(first) {
-            // Registry package. The version pin selects the directory, or
-            // the latest version when no pin was given or the pin is
-            // missing from the published set.
+            // Registry package. The version pin selects the installed version,
+            // or the latest version when no pin was given or the pin is missing
+            // from the installed set. Submodules and the entry resolve within
+            // the version's source root.
             is_registry = true;
             root_token = String::from(first);
 
-            let package_dir = if module_info.versions.is_empty() {
-                module_info.directory.clone()
-            } else {
-                let chosen = match version {
-                    Some(pin) if module_info.versions.iter().any(|v| v == pin) => String::from(pin),
-                    _ => Self::latest_version(&module_info.versions)?,
-                };
-                module_info.directory.join(chosen)
-            };
-
-            new_root_folder = package_dir.clone();
-            base_dir = package_dir;
+            let chosen = Self::select_external_version(&module_info.versions, version)?;
+            new_root_folder = chosen.source_root.clone();
+            base_dir = chosen.source_root.clone();
+            registry_entry_file = Some(chosen.entry_file.clone());
             walk_segments = &path_ids[1..];
         } else {
             // Plain local name relative to the importing file's directory.
@@ -525,7 +529,8 @@ pub trait ExecutionContextAlgorithms<
         // A registry import with no further segments uses the package
         // entry directly.
         if is_registry && walk_segments.is_empty() {
-            let current_file = base_dir.join("main.peko");
+            let entry = registry_entry_file.as_deref().unwrap_or("main.peko");
+            let current_file = base_dir.join(entry);
             return self.finish_resolution(
                 first,
                 path_ids,
@@ -616,10 +621,8 @@ pub trait ExecutionContextAlgorithms<
         } else {
             ExternalModuleInfo::new(
                 String::from(path_ids.last().map(String::as_str).unwrap_or(first)),
-                Vec::new(),
                 String::from("local module"),
-                entry_dir,
-                entry_name,
+                vec![ExternalModuleVersion::new(String::new(), entry_dir, entry_name)],
             )
         };
 

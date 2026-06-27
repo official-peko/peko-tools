@@ -1,55 +1,18 @@
 //! `peko clangflags`: print the clang flags peko_core would pass when
 //! compiling a C/C++/Objective-C source for a given target.
 //!
-//! Used by Pekoscript projects that bring along native sources and need
-//! to invoke clang themselves with the same flags Peko uses.
+//! The flags come from the installed toolchain's `toolchain.toml` (its target
+//! triple, C++ standard, compile flags, and include directories), so a project
+//! that brings native sources can invoke clang with the same flags Peko uses.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
+use peko_core::config::resolve_flag;
 use peko_core::target::{Architecture, OperatingSystem};
 
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
-
-/// GTK / system include subdirectories needed on Linux. Each is joined
-/// onto `Compiler/toolchains/linux/gtk/`.
-const LINUX_GTK_SUBDIRS: &[&str] = &[
-    "webkitgtk-4.0",
-    "at-spi-2.0",
-    "at-spi2-atk",
-    "atk-1.0",
-    "blkid",
-    "cairo",
-    "dbus",
-    "dbus-1.0",
-    "freetype2",
-    "fribidi",
-    "gdk-pixbuf-2.0",
-    "gio-unix-2.0",
-    "glib-2.0",
-    "glib-include",
-    "gtk-3.0",
-    "harfbuzz",
-    "libmount",
-    "libpng16",
-    "libsoup-2.4",
-    "libxml2",
-    "pango-1.0",
-    "pixman-1",
-    "uuid",
-];
-
-/// Windows include subdirectories needed on Windows.
-const WINDOWS_INCLUDE_SUBDIRS: &[&str] = &[
-    "msvc-inc",
-    "msvc-inc/msclr",
-    "ucrt-inc",
-    "um-inc",
-    "shared-inc",
-    "winrt-inc",
-    "webview2/build/native/include",
-];
+use crate::toolchain::{InstallManifest, resolve_toolchain};
 
 /// Execute the `clangflags` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
@@ -62,135 +25,58 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         None => return ExitCode::FAILURE,
     };
 
-    let mut include_directories: Vec<PathBuf> = Vec::new();
-    let toolchains = cli_info.get_peko_root().join("Compiler/toolchains");
-
-    let (target_specific_flags, target_triple) = match target_operating_system {
-        OperatingSystem::Android => {
-            let android = toolchains.join("android");
-            include_directories.extend([
-                android.join("sysroot/usr/include/c++/v1"),
-                android.join("include"),
-                android.join("sysroot/usr/include/aarch64-linux-android"),
-                android.join("sysroot/usr/include"),
-            ]);
-            (
-                "-fPIC".to_owned(),
-                "aarch64-unknown-linux-android22".to_owned(),
-            )
+    let peko_root = cli_info.get_peko_root();
+    let manifest = match InstallManifest::load(peko_root) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            reporter.error(format!("could not read versions.json: {e}"));
+            return ExitCode::FAILURE;
         }
-
-        OperatingSystem::IOS => {
-            let (sysroot, arch) = match target_architecture {
-                Architecture::Arm => {
-                    let arm_root = toolchains.join("ios/arm64");
-                    include_directories.push(arm_root.join("include/c++"));
-                    (arm_root, "arm64")
-                }
-                Architecture::X86_64 => (toolchains.join("ios/x86_64"), "x86_64"),
-                Architecture::Unknown => {
-                    reporter.error("unsupported target CPU architecture");
-                    return ExitCode::FAILURE;
-                }
-            };
-            (
-                format!(
-                    "-fobjc-arc -isysroot {}",
-                    sysroot.join("iPhoneOS.sdk").display()
-                ),
-                format!("{arch}-apple-ios"),
-            )
-        }
-
-        OperatingSystem::Linux => {
-            let (sysroot, arch) = match target_architecture {
-                Architecture::Arm => (toolchains.join("linux/arm"), "aarch64"),
-                Architecture::X86_64 => (toolchains.join("linux/x86_64"), "x86_64"),
-                Architecture::Unknown => {
-                    reporter.error("unsupported target CPU architecture");
-                    return ExitCode::FAILURE;
-                }
-            };
-            include_directories.push(sysroot.join("include"));
-            include_directories.push(sysroot.join(format!("{arch}-linux-gnu/include/c++/14.3.0")));
-            include_directories.push(sysroot.join(format!(
-                "{arch}-linux-gnu/include/c++/14.3.0/{arch}-linux-gnu"
-            )));
-            include_directories
-                .push(sysroot.join(format!("{arch}-linux-gnu/include/c++/14.3.0/backward")));
-            include_directories.push(sysroot.join(format!("{arch}-linux-gnu/sysroot/usr/include")));
-
-            let gtk_dir = toolchains.join("linux/gtk");
-            for sub in LINUX_GTK_SUBDIRS {
-                include_directories.push(gtk_dir.join(sub));
-            }
-
-            (String::new(), format!("{arch}-pc-linux"))
-        }
-
-        OperatingSystem::MacOS => {
-            let (sysroot, arch) = match target_architecture {
-                Architecture::Arm => (toolchains.join("macos/arm64"), "aarch64"),
-                Architecture::X86_64 => (toolchains.join("macos/x86_64"), "x86_64"),
-                Architecture::Unknown => {
-                    reporter.error("unsupported target CPU architecture");
-                    return ExitCode::FAILURE;
-                }
-            };
-            (
-                format!("-isysroot {}", sysroot.join("MacOSX.sdk").display()),
-                format!("{arch}-apple-macosx"),
-            )
-        }
-
-        OperatingSystem::Windows => {
-            let windows = toolchains.join("windows");
-            for sub in WINDOWS_INCLUDE_SUBDIRS {
-                include_directories.push(windows.join(sub));
-            }
-            (
-                "-Wno-microsoft-anon-tag -Wno-ignored-pragma-intrinsic \
-                 -Wno-ignored-attributes -Wno-pragma-pack \
-                 -Wno-nonportable-include-path -D_DLL"
-                    .to_owned(),
-                "x86_64-pc-win32".to_owned(),
-            )
-        }
-
-        OperatingSystem::Unknown => {
-            reporter.error("unsupported target operating system");
+    };
+    let resolved = match resolve_toolchain(
+        peko_root,
+        &manifest,
+        target_operating_system,
+        target_architecture,
+    ) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            reporter.error(format!("could not resolve toolchain: {e}"));
             return ExitCode::FAILURE;
         }
     };
 
-    // Render `-I<dir>` for each include directory.
-    let mut include_directories_arg = String::new();
-    for dir in &include_directories {
-        include_directories_arg.push_str("-I");
-        include_directories_arg.push_str(&dir.to_string_lossy());
-        include_directories_arg.push(' ');
+    let build = &resolved.toolchain.build;
+    let dir = &resolved.dir;
+
+    let mut parts: Vec<String> = vec!["-c".to_owned()];
+
+    // `--nostd` suppresses the `-std=` flag (useful when compiling plain C or
+    // Objective-C).
+    if !cli_info.flags.has_flag("nostd")
+        && let Some(cxx_std) = &build.cxx_std
+    {
+        parts.push(format!("-std={cxx_std}"));
     }
 
-    // --nostd suppresses the `-std=c++17` flag (useful when compiling
-    // plain C or Objective-C).
-    let std_flag = if cli_info.flags.has_flag("nostd") {
-        ""
-    } else {
-        "-std=c++17"
-    };
+    parts.push("-target".to_owned());
+    parts.push(resolved.toolchain.meta.triple.clone());
 
-    // Print the result to stdout. Errors and informational lines go to
-    // stderr via `reporter`; the actual clang-flags output is the
-    // command's product and goes to stdout so it can be captured.
-    println!(
-        "-c {std_flag} -target {target_triple} {target_specific_flags} {include_directories_arg}"
-    );
+    for flag in &build.c_flags {
+        parts.push(resolve_flag(dir, flag));
+    }
+    for include in &build.include {
+        parts.push(format!("-I{}", dir.join(include).display()));
+    }
 
+    // The flags are the command's product and go to stdout so they can be
+    // captured; errors and help go to stderr via the reporter.
+    println!("{}", parts.join(" "));
     ExitCode::SUCCESS
 }
 
-/// Validate and parse the `--os=<value>` flag. Reports the error
-/// through `reporter` and returns `None` if missing or invalid.
+/// Validate and parse the `--os=<value>` flag. Reports the error through
+/// `reporter` and returns `None` if missing or invalid.
 fn require_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem> {
     if !cli_info.flags.has_flag("os") {
         reporter.error(format!(
@@ -229,8 +115,8 @@ fn require_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem
     }
 }
 
-/// Validate and parse the `--arch=<value>` flag. Reports the error
-/// through `reporter` and returns `None` if missing or invalid.
+/// Validate and parse the `--arch=<value>` flag. Reports the error through
+/// `reporter` and returns `None` if missing or invalid.
 fn require_arch(cli_info: &CLIInfo, reporter: &Reporter) -> Option<Architecture> {
     if !cli_info.flags.has_flag("arch") {
         reporter.error(format!(

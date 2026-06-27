@@ -1,12 +1,9 @@
-peko update [OPTIONS] <PACKAGE>
+peko update
 
-Updates an installed package to its latest published version. The
-package must already be installed.
+Re-resolves the project's dependencies and refreshes peko.lock.
 
-OPTIONS
-    --global              update the package in the global store rather
-                          than in the current project
+Ignores the existing lockfile and selects the highest versions that satisfy
+the [dependencies] table in peko.toml, downloads them, and rewrites peko.lock.
 
 EXAMPLES
-    peko update some_pkg
-    peko update some_pkg --global
+    peko update

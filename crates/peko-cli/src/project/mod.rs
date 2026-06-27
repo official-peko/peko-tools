@@ -1,15 +1,13 @@
-//! Peko project metadata: parsing, serialization, and on-disk discovery.
+//! Peko project metadata: discovery, the runtime project model, and app icon
+//! rendering.
 //!
-//! A "Peko project" is a directory tree containing a `.peko/project/config.pkbin`
-//! file describing the project's name, optional UI metadata (bundle id, app
-//! version, target platforms, app icon), plus an `incremental/` directory that
-//! caches per-file build artifacts between runs. UI projects also carry an
-//! `assets/` directory at the project root whose files are the asset set.
-//!
-//! The configuration binary uses a simple custom format: a magic header,
-//! followed by typed blocks (`PROJECTCONFIG`, `TARGETPLATFORMS`, `APPICON`),
-//! each terminated by 8 null bytes. [`PekoBinaryReader`] provides the streaming
-//! parse primitives; [`PekoProject::from_binary_file`] drives them.
+//! A "Peko project" is a directory tree containing a `peko.toml` manifest that
+//! names the project and, for UI applications, carries the bundle id, app
+//! version, target platforms, and a square PNG app icon. Discovery loads the
+//! manifest through [`peko_core::config::Manifest`] and builds a
+//! [`PekoProject`] around it. The project root also holds a `.peko/incremental`
+//! directory that caches per-file build artifacts between runs, and UI projects
+//! carry an `assets/` directory whose files are the asset set.
 
 use std::collections::BTreeMap;
 use std::env::current_dir;
@@ -18,42 +16,42 @@ use std::path::{Path, PathBuf};
 
 use derive_new::new;
 use image::{DynamicImage, EncodableLayout};
+use peko_core::config::{ConfigError, LoadedManifest, Manifest, Project, Ui};
 use thiserror::Error;
 
 use crate::bundler::cartool::{carinfo, carwriter};
 use crate::execution::incremental::ProjectIncrementalMap;
 
-/// One failure mode for project loading and parsing.
+/// One failure mode for project loading.
 #[derive(Debug, Error)]
 pub enum ProjectError {
-    /// No project config was found in the searched directory or any parent
-    /// within the search-depth limit.
-    #[error("couldn't find project in the current directory or its parents")]
+    /// No `peko.toml` was found in the searched directory or any parent within
+    /// the search-depth limit.
+    #[error("couldn't find a peko.toml in the current directory or its parents")]
     NotFound,
 
-    /// The project root was located but `main.peko` is missing.
-    #[error("couldn't find project entrypoint main.peko in {0}")]
+    /// The manifest was located but its entry source file is missing.
+    #[error("couldn't find project entrypoint {0}")]
     MissingEntrypoint(PathBuf),
 
-    /// The config binary exists but couldn't be read.
-    #[error("couldn't read Peko binary at {path}: {source}")]
-    Unreadable {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    /// The app icon could not be decoded, or is not square.
+    #[error("couldn't load app icon at {path}: {detail}")]
+    Icon { path: PathBuf, detail: String },
 
-    /// The config binary path didn't have enough parent directories to be a
-    /// valid project layout (we expect `<root>/.peko/project/config.pkbin`).
-    #[error("Peko binary at {0} is not inside a valid project directory layout")]
-    InvalidLayout(PathBuf),
-
-    /// The config binary parsed inconsistently with what the format requires.
-    #[error("Peko binary ({path}) is corrupt: {detail}")]
-    Corrupt { path: PathBuf, detail: String },
+    /// The manifest failed to load or parse.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 }
 
-/// App icon stored as raw pixel data plus the originating image width.
+/// The toolchain-relative path of the default app icon blob.
+const DEFAULT_ICON_BIN: &str = "Compiler/bundling/defaulticon.bin";
+
+/// The pixel width and height of the default app icon.
+const DEFAULT_ICON_SIZE: u32 = 1024;
+
+/// App icon stored as RGBA pixel data plus the originating image width.
+///
+/// The image is square, so the width also gives the height.
 #[derive(Debug, Clone, new)]
 pub struct ProjectIcon {
     pub icon_pixel_data: Vec<u8>,
@@ -61,6 +59,81 @@ pub struct ProjectIcon {
 }
 
 impl ProjectIcon {
+    /// Decode a square PNG app icon from disk into RGBA pixels.
+    ///
+    /// A non-square image is rejected. Any image format the `image` crate
+    /// recognizes is accepted and converted to RGBA.
+    pub fn from_png<P: AsRef<Path>>(path: P) -> Result<ProjectIcon, ProjectError> {
+        let path = path.as_ref();
+        let image = image::open(path).map_err(|source| ProjectError::Icon {
+            path: path.to_path_buf(),
+            detail: source.to_string(),
+        })?;
+
+        if image.width() != image.height() {
+            return Err(ProjectError::Icon {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "app icon must be square, got {}x{}",
+                    image.width(),
+                    image.height()
+                ),
+            });
+        }
+
+        let width = image.width();
+        Ok(ProjectIcon::new(image.into_rgba8().into_raw(), width))
+    }
+
+    /// Load the toolchain's default app icon.
+    ///
+    /// The default is a square block of BGRA pixels at
+    /// `Compiler/bundling/defaulticon.bin` under the Peko root named by
+    /// `PEKO_ROOT_PATH`. Its pixels are converted to RGBA, the same form a
+    /// decoded PNG yields.
+    pub fn default_icon() -> Result<ProjectIcon, ProjectError> {
+        let Some(peko_root) = std::env::var_os("PEKO_ROOT_PATH") else {
+            return Err(ProjectError::Icon {
+                path: PathBuf::from(DEFAULT_ICON_BIN),
+                detail: "PEKO_ROOT_PATH is not set, so the default app icon could not be found"
+                    .to_owned(),
+            });
+        };
+
+        ProjectIcon::from_bgra_bin(Path::new(&peko_root).join(DEFAULT_ICON_BIN), DEFAULT_ICON_SIZE)
+    }
+
+    /// Load a square app icon from a raw BGRA pixel blob.
+    ///
+    /// The file holds `width * width * 4` bytes in BGRA order. The pixels are
+    /// converted to RGBA.
+    pub fn from_bgra_bin<P: AsRef<Path>>(
+        path: P,
+        width: u32,
+    ) -> Result<ProjectIcon, ProjectError> {
+        let path = path.as_ref();
+        let mut pixels = std::fs::read(path).map_err(|source| ProjectError::Icon {
+            path: path.to_path_buf(),
+            detail: source.to_string(),
+        })?;
+
+        let expected = (width as usize) * (width as usize) * 4;
+        if pixels.len() != expected {
+            return Err(ProjectError::Icon {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "expected {expected} bytes for a {width}x{width} BGRA icon, found {}",
+                    pixels.len()
+                ),
+            });
+        }
+
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Ok(ProjectIcon::new(pixels, width))
+    }
+
     /// Returns this image's bytes resized to the desired dimensions.
     pub fn resize(&self, width: u32, height: u32) -> ProjectIcon {
         let rgba_image = DynamicImage::ImageRgba8(
@@ -82,9 +155,14 @@ impl ProjectIcon {
         )
     }
 
-    /// Returns the icon's pixel data converted from the project's stored
-    /// BGRA ordering to RGBA.
+    /// Returns the icon's pixel data in RGBA order.
     pub fn get_rgba_pixels(&self) -> Vec<u8> {
+        self.icon_pixel_data.clone()
+    }
+
+    /// Returns the icon's pixel data in BGRA order, the channel order the CAR
+    /// renderer stores.
+    fn bgra_pixels(&self) -> Vec<u8> {
         let mut buffer = self.icon_pixel_data.clone();
         for pixel in buffer.chunks_exact_mut(4) {
             pixel.swap(0, 2);
@@ -198,7 +276,7 @@ impl ProjectIcon {
                         ],
                         asset_data: Box::new(carinfo::ValueBlock::CELMImageData(
                             carinfo::CELMImageData::new(
-                                iconx1024.icon_pixel_data.clone(),
+                                iconx1024.bgra_pixels(),
                                 false,
                                 1024,
                             ),
@@ -265,7 +343,7 @@ impl ProjectIcon {
                         ],
                         asset_data: Box::new(carinfo::ValueBlock::CELMImageData(
                             carinfo::CELMImageData::new(
-                                iconx1024.icon_pixel_data.clone(),
+                                iconx1024.bgra_pixels(),
                                 false,
                                 1024,
                             ),
@@ -401,151 +479,6 @@ pub struct PekoProject {
     pub ui_project_info: Option<UIProjectInfo>,
 }
 
-/// Streaming reader over a Peko project binary's bytes.
-///
-/// Each `parse_*` method reads and advances. Tag and nullspace parses return
-/// `bool` (matched / not matched), while typed reads return `Option` and
-/// fail to `None` when the cursor would run past the end of the buffer.
-pub struct PekoBinaryReader {
-    index: usize,
-    bytes: Vec<u8>,
-}
-
-impl PekoBinaryReader {
-    /// Creates a reader over the given bytes, starting at index 0.
-    pub fn new(bytes: Vec<u8>) -> PekoBinaryReader {
-        PekoBinaryReader { index: 0, bytes }
-    }
-
-    /// `true` if the cursor still points at a readable byte.
-    pub fn inbounds(&self) -> bool {
-        self.index < self.bytes.len()
-    }
-
-    /// `true` if the cursor has not yet moved past one-past-the-end. The
-    /// inclusive form is used after an advance to confirm the read stayed
-    /// within the buffer.
-    pub fn inbounds_inclusive(&self) -> bool {
-        self.index <= self.bytes.len()
-    }
-
-    /// Skip past a magic tag. Returns `false` if the tag bytes don't match
-    /// at the cursor.
-    pub fn parse_magic(&mut self, magic: impl AsRef<str>) -> bool {
-        if !self.inbounds() {
-            return false;
-        }
-
-        for byte in magic.as_ref().bytes() {
-            if self.index >= self.bytes.len() || self.bytes[self.index] != byte {
-                return false;
-            }
-            self.index += 1;
-        }
-
-        self.inbounds_inclusive()
-    }
-
-    /// Skip past 8 null bytes (the block terminator).
-    pub fn parse_nullspace(&mut self) -> bool {
-        if !self.inbounds() {
-            return false;
-        }
-
-        for _ in 0..8 {
-            if self.index >= self.bytes.len() || self.bytes[self.index] != 0 {
-                return false;
-            }
-            self.index += 1;
-        }
-
-        self.inbounds_inclusive()
-    }
-
-    /// Parse one byte.
-    pub fn parse_u8(&mut self) -> Option<u8> {
-        if !self.inbounds() {
-            return None;
-        }
-        let byte_index = self.index;
-        self.index += 1;
-        if !self.inbounds_inclusive() {
-            return None;
-        }
-        Some(self.bytes[byte_index])
-    }
-
-    /// Parse a big-endian `u32`.
-    pub fn parse_u32(&mut self) -> Option<u32> {
-        let mut bytes_u32 = [0u8; 4];
-        for slot in &mut bytes_u32 {
-            if !self.inbounds() {
-                return None;
-            }
-            *slot = self.bytes[self.index];
-            self.index += 1;
-        }
-
-        if !self.inbounds_inclusive() {
-            return None;
-        }
-        Some(u32::from_be_bytes(bytes_u32))
-    }
-
-    /// Parse a byte-per-char string of the provided length.
-    ///
-    /// Each byte becomes one `char` (Latin-1 style), preserving the
-    /// project binary's original encoding. Use [`parse_bytes`] when the
-    /// payload is binary data rather than text.
-    ///
-    /// [`parse_bytes`]: PekoBinaryReader::parse_bytes
-    pub fn parse_string(&mut self, string_length: u32) -> Option<String> {
-        let mut string = String::new();
-        for _ in 0..string_length {
-            if !self.inbounds() {
-                return None;
-            }
-            string.push(self.bytes[self.index] as char);
-            self.index += 1;
-        }
-
-        if !self.inbounds_inclusive() {
-            return None;
-        }
-        Some(string)
-    }
-
-    /// Read `length` bytes out of the buffer and advance the cursor past
-    /// them. Returns `None` if fewer than `length` bytes remain.
-    pub fn parse_bytes(&mut self, length: u32) -> Option<Vec<u8>> {
-        let length = length as usize;
-        let end = self.index.checked_add(length)?;
-        if end > self.bytes.len() {
-            return None;
-        }
-        let slice = self.bytes[self.index..end].to_vec();
-        self.index = end;
-        Some(slice)
-    }
-
-    /// The current cursor index into the buffer.
-    pub fn get_index(&self) -> usize {
-        self.index
-    }
-
-    /// The reader's underlying byte buffer.
-    pub fn get_raw_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    /// Manually advance the cursor by `count` bytes (without bounds
-    /// checking, callers must ensure the advance stays within the
-    /// buffer).
-    pub fn increase_index_by(&mut self, count: usize) {
-        self.index += count;
-    }
-}
-
 impl PekoProject {
     /// Construct a project from already-resolved fields.
     pub fn new(
@@ -564,7 +497,7 @@ impl PekoProject {
         }
     }
 
-    /// The project's entrypoint source file (`<root>/main.peko`).
+    /// The project's entrypoint source file.
     pub fn get_entrypoint(&self) -> &Path {
         &self.entry_file
     }
@@ -600,253 +533,70 @@ impl PekoProject {
     }
 
     /// Locate and load the project that owns `directory` or any of its
-    /// nearest ancestor directories (up to a small fixed search depth).
+    /// nearest ancestor directories.
+    ///
+    /// Discovery walks upward for a `peko.toml` through
+    /// [`Manifest::discover`](peko_core::config::Manifest::discover).
     pub fn from_directory<P: AsRef<Path>>(directory: P) -> Result<PekoProject, ProjectError> {
-        let mut project_folder = directory.as_ref().to_path_buf();
-        let mut search_limit = 5;
-
-        while search_limit > 0
-            && project_folder.parent().is_some()
-            && !project_folder.join(".peko/project/config.pkbin").exists()
-        {
-            project_folder = project_folder.parent().unwrap().to_path_buf();
-            search_limit -= 1;
-        }
-
-        if search_limit == 0 || !project_folder.join(".peko/project/config.pkbin").exists() {
-            return Err(ProjectError::NotFound);
-        }
-
-        Self::from_binary_file(project_folder.join(".peko/project/config.pkbin"))
+        let loaded = match Manifest::discover(directory.as_ref()) {
+            Ok(loaded) => loaded,
+            Err(ConfigError::NotFound) => return Err(ProjectError::NotFound),
+            Err(other) => return Err(ProjectError::Config(other)),
+        };
+        Self::from_loaded_manifest(loaded)
     }
 
-    /// Parse a project's metadata out of an on-disk config binary.
-    pub fn from_binary_file<P: AsRef<Path>>(binary_path: P) -> Result<PekoProject, ProjectError> {
-        let binary_path = binary_path.as_ref();
-
-        if !binary_path.exists() {
-            return Err(ProjectError::NotFound);
+    /// Build a project from a discovered manifest and its root.
+    fn from_loaded_manifest(loaded: LoadedManifest) -> Result<PekoProject, ProjectError> {
+        let root = loaded.root.clone();
+        let entry_file = loaded.entry();
+        if !entry_file.exists() {
+            return Err(ProjectError::MissingEntrypoint(entry_file));
         }
 
-        let path_cannon =
-            binary_path
-                .canonicalize()
-                .map_err(|source| ProjectError::Unreadable {
-                    path: binary_path.to_path_buf(),
-                    source,
-                })?;
-
-        // From `<root>/.peko/project/config.pkbin`, walk up three levels for
-        // the project root. If the layout is wrong, surface a typed error
-        // rather than panicking.
-        let project_root = path_cannon
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .ok_or_else(|| ProjectError::InvalidLayout(path_cannon.clone()))?
-            .to_path_buf();
-
-        let incremental_dir = project_root.join(".peko/incremental");
+        let incremental_dir = root.join(".peko/incremental");
         let incremental_info =
             ProjectIncrementalMap::from_incremental_directory(&incremental_dir, true);
         if incremental_info.is_none() && incremental_dir.exists() {
             let _ = std::fs::remove_dir_all(&incremental_dir);
         }
 
-        if !project_root.join("main.peko").exists() {
-            return Err(ProjectError::MissingEntrypoint(project_root.clone()));
-        }
-
-        let raw = std::fs::read(binary_path).map_err(|source| ProjectError::Unreadable {
-            path: binary_path.to_path_buf(),
-            source,
-        })?;
-        let mut binary_reader = PekoBinaryReader::new(raw);
-
-        let corrupt = |detail: &str| ProjectError::Corrupt {
-            path: path_cannon.clone(),
-            detail: detail.to_owned(),
+        let ui_project_info = match &loaded.manifest {
+            Manifest::Application(app) => match &app.ui {
+                Some(ui) => Some(build_ui_info(&root, &app.project, ui)?),
+                None => None,
+            },
+            Manifest::Package(_) => None,
         };
-
-        if !binary_reader.parse_magic("PEKOPROJECT") || !binary_reader.parse_nullspace() {
-            return Err(corrupt("couldn't find PEKOPROJECT tag"));
-        }
-
-        if !binary_reader.parse_magic("PROJECTCONFIG") {
-            return Err(corrupt("couldn't find PROJECTCONFIG block"));
-        }
-
-        let project_type = binary_reader
-            .parse_u8()
-            .ok_or_else(|| corrupt("truncated PROJECTCONFIG block"))?;
-
-        let name_length = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated project name length"))?;
-        let project_name = binary_reader
-            .parse_string(name_length)
-            .ok_or_else(|| corrupt("truncated project name"))?;
-
-        if project_type == 1 {
-            return Ok(PekoProject {
-                root: project_root.clone(),
-                entry_file: project_root.join("main.peko"),
-                incremental_info,
-                name: project_name,
-                ui_project_info: None,
-            });
-        }
-
-        let id_length = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated project id length"))?;
-        let project_id = binary_reader
-            .parse_string(id_length)
-            .ok_or_else(|| corrupt("truncated project id"))?;
-
-        let version_length = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated project version length"))?;
-        let project_version = binary_reader
-            .parse_string(version_length)
-            .ok_or_else(|| corrupt("truncated project version"))?;
-
-        if !binary_reader.parse_nullspace() {
-            return Err(corrupt("couldn't find PROJECTCONFIG block terminator"));
-        }
-
-        // ----- Target platforms ----------------------------------------
-        if !binary_reader.parse_magic("TARGETPLATFORMS") {
-            return Err(corrupt("couldn't find TARGETPLATFORMS block"));
-        }
-
-        let mut target_platforms = Vec::new();
-        let target_platform_count = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated TARGETPLATFORMS count"))?;
-        for _ in 0..target_platform_count {
-            let raw = binary_reader
-                .parse_u8()
-                .ok_or_else(|| corrupt("truncated TARGETPLATFORMS entry"))?;
-            target_platforms.push(
-                decode_platform(raw)
-                    .ok_or_else(|| corrupt("found unknown target in TARGETPLATFORMS block"))?,
-            );
-        }
-
-        if !binary_reader.parse_nullspace() {
-            return Err(corrupt("couldn't find TARGETPLATFORMS block terminator"));
-        }
-
-        // ----- App icon -------------------------------------------------
-        if !binary_reader.parse_magic("APPICON") {
-            return Err(corrupt("couldn't find APPICON block"));
-        }
-
-        let image_width = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated APPICON width"))?;
-        let byte_length = binary_reader
-            .parse_u32()
-            .ok_or_else(|| corrupt("truncated APPICON byte length"))?;
-        let image_bytes = binary_reader
-            .parse_bytes(byte_length)
-            .ok_or_else(|| corrupt("app icon bytes in APPICON block corrupt"))?;
-
-        if !binary_reader.parse_nullspace() {
-            return Err(corrupt("couldn't find APPICON block terminator"));
-        }
 
         Ok(PekoProject {
-            root: project_root.clone(),
-            entry_file: project_root.join("main.peko"),
-            name: project_name,
+            name: loaded.manifest.name().to_owned(),
+            root,
+            entry_file,
             incremental_info,
-            ui_project_info: Some(UIProjectInfo::new(
-                project_id,
-                project_version,
-                target_platforms,
-                ProjectIcon::new(image_bytes, image_width),
-            )),
+            ui_project_info,
         })
     }
-
-    /// Serialize this project to its binary configuration format.
-    pub fn to_binary(&self) -> Vec<u8> {
-        let mut final_project_binary = Vec::new();
-
-        // ----- Magic header --------------------------------------------
-        final_project_binary.extend("PEKOPROJECT".bytes());
-        final_project_binary.extend([0; 8]);
-
-        // ----- Project config ------------------------------------------
-        final_project_binary.extend("PROJECTCONFIG".bytes());
-        final_project_binary.push(if self.ui_project_info.is_some() { 0 } else { 1 });
-
-        final_project_binary.extend((self.name.len() as u32).to_be_bytes());
-        final_project_binary.extend(self.name.bytes());
-
-        let Some(ui_project_info) = self.ui_project_info.as_ref() else {
-            return final_project_binary;
-        };
-
-        final_project_binary.extend((ui_project_info.bundle_id.len() as u32).to_be_bytes());
-        final_project_binary.extend(ui_project_info.bundle_id.bytes());
-
-        final_project_binary.extend((ui_project_info.version.len() as u32).to_be_bytes());
-        final_project_binary.extend(ui_project_info.version.bytes());
-
-        final_project_binary.extend([0; 8]);
-
-        // ----- Target platforms ----------------------------------------
-        final_project_binary.extend("TARGETPLATFORMS".bytes());
-        final_project_binary.extend((ui_project_info.platforms.len() as u32).to_be_bytes());
-
-        for platform in &ui_project_info.platforms {
-            final_project_binary.push(encode_platform(platform));
-        }
-
-        final_project_binary.extend([0; 8]);
-
-        // ----- App icon ------------------------------------------------
-        final_project_binary.extend("APPICON".bytes());
-        final_project_binary.extend(ui_project_info.icon.width.to_be_bytes());
-        final_project_binary
-            .extend((ui_project_info.icon.icon_pixel_data.len() as u32).to_be_bytes());
-        final_project_binary.extend(&ui_project_info.icon.icon_pixel_data);
-
-        final_project_binary.extend([0; 8]);
-
-        final_project_binary
-    }
 }
 
-/// Decode the on-disk numeric platform tag.
-fn decode_platform(raw: u8) -> Option<peko_core::target::OperatingSystem> {
-    use peko_core::target::OperatingSystem;
-    match raw {
-        0 => Some(OperatingSystem::Android),
-        1 => Some(OperatingSystem::IOS),
-        2 => Some(OperatingSystem::MacOS),
-        3 => Some(OperatingSystem::Linux),
-        4 => Some(OperatingSystem::Windows),
-        _ => None,
-    }
-}
-
-/// Encode an [`OperatingSystem`] into its on-disk numeric tag.
+/// Assemble UI metadata from an application manifest's `[project]` and `[ui]`
+/// tables.
 ///
-/// [`OperatingSystem`]: peko_core::target::OperatingSystem
-fn encode_platform(platform: &peko_core::target::OperatingSystem) -> u8 {
-    use peko_core::target::OperatingSystem;
-    match platform {
-        OperatingSystem::Android => 0,
-        OperatingSystem::IOS => 1,
-        OperatingSystem::MacOS => 2,
-        OperatingSystem::Linux => 3,
-        OperatingSystem::Windows => 4,
-        OperatingSystem::Unknown => panic!("Shouldn't be here"),
-    }
+/// The app icon is loaded from the square PNG that `[ui].icon` names, resolved
+/// relative to the project root. A UI manifest without an icon falls back to
+/// the toolchain's default icon.
+fn build_ui_info(root: &Path, project: &Project, ui: &Ui) -> Result<UIProjectInfo, ProjectError> {
+    let icon = match ui.icon.as_ref() {
+        Some(icon_path) => ProjectIcon::from_png(root.join(icon_path))?,
+        None => ProjectIcon::default_icon()?,
+    };
+
+    Ok(UIProjectInfo::new(
+        project.bundle.clone().unwrap_or_default(),
+        project.version.to_string(),
+        project.target_platforms.clone(),
+        icon,
+    ))
 }
 
 /// Recursively collect asset files under `dir` into `index`.

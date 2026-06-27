@@ -65,18 +65,21 @@ macro_rules! commands {
 }
 
 commands! {
-    add        => "install a package from the registry",
+    add        => "add a dependency to peko.toml and install it",
     build      => "build the project for one or more target platforms",
     check      => "verify the Peko toolchain installation is healthy",
     clangflags => "print clang flags peko_core would pass to the C compiler",
     compile    => "compile a single Pekoscript file to an object or binary",
+    install    => "resolve, download, and lock the project's dependencies",
     keys       => "manage per-project signing keys",
-    pkg        => "package a host package for distribution",
+    pkg        => "scaffold and pack a library package",
     project    => "create or inspect a Pekoscript project",
-    remove     => "uninstall a package from the project",
+    publish    => "pack and publish a package to the registry",
+    remove     => "remove a dependency from peko.toml and re-resolve",
     run        => "build and run the project, with optional hot reload",
     test       => "type-check a Pekoscript file without producing output",
-    update     => "update an installed package to a newer version",
+    toolchain  => "inspect and install build toolchains",
+    update     => "re-resolve dependencies and refresh peko.lock",
     version    => "print the cli version and exit",
 }
 
@@ -103,39 +106,3 @@ pub fn platform_label(os: &OperatingSystem) -> Option<&'static str> {
     }
 }
 
-/// The path to the sysroot directory for a given (os, arch) target,
-/// rooted at `peko_root`. Returns `None` for unsupported combinations
-/// (Unknown OS, or an arch not supported by the OS).
-///
-/// Used by `compile` and `run` to pick the link sysroot. The set of
-/// directories is hardcoded against the static toolchain layout
-/// shipped with the cli. If toolchain layout is ever made dynamic,
-/// this helper is the single place that reads the layout.
-pub fn toolchain_sysroot(
-    peko_root: &std::path::Path,
-    os: &OperatingSystem,
-    arch: &peko_core::target::Architecture,
-) -> Option<std::path::PathBuf> {
-    use peko_core::target::Architecture;
-    let toolchains = peko_root.join("Compiler/toolchains");
-    match os {
-        OperatingSystem::Android => Some(toolchains.join("android")),
-        OperatingSystem::Windows => Some(toolchains.join("windows")),
-        OperatingSystem::IOS => match arch {
-            Architecture::Arm => Some(toolchains.join("ios/arm64")),
-            Architecture::X86_64 => Some(toolchains.join("ios/x86_64")),
-            Architecture::Unknown => None,
-        },
-        OperatingSystem::Linux => match arch {
-            Architecture::Arm => Some(toolchains.join("linux/arm")),
-            Architecture::X86_64 => Some(toolchains.join("linux/x86_64")),
-            Architecture::Unknown => None,
-        },
-        OperatingSystem::MacOS => match arch {
-            Architecture::Arm => Some(toolchains.join("macos/arm64")),
-            Architecture::X86_64 => Some(toolchains.join("macos/x86_64")),
-            Architecture::Unknown => None,
-        },
-        OperatingSystem::Unknown => None,
-    }
-}

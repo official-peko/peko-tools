@@ -1,18 +1,16 @@
-//! `peko project`: create, view, and modify Peko projects.
+//! `peko project`: create, view, and inspect Peko projects.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use eframe::egui;
 use egui::{ColorImage, TextureHandle};
-use peko_core::target::OperatingSystem;
 use rustyline::Editor;
 use rustyline::history::FileHistory;
 
-use crate::bundler;
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
-use crate::project::{PekoProject, ProjectIcon, UIProjectInfo};
+use crate::project::PekoProject;
 
 // ---------------------------------------------------------------------------
 // Top-level dispatcher
@@ -29,7 +27,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    // `new` is special since it doesn't require a project to exist yet.
+    // `new` scaffolds a project, so it does not need one to already exist.
     if subcommand == "new" {
         return execute_new(cli_info, reporter);
     }
@@ -39,17 +37,12 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         Ok(p) => p,
         Err(e) => {
             reporter.error(format!("could not load project: {e}"));
-            reporter.help(format!(
-                "run '{} project new' to create a new project here",
-                cli_info.executable
-            ));
+            reporter.help("create a peko.toml in the project root to define a project");
             return ExitCode::FAILURE;
         }
     };
 
     match subcommand.as_str() {
-        "modify" => execute_modify(cli_info, reporter, project),
-        "set-icon" => execute_set_icon(cli_info, reporter, project),
         "add-asset" => execute_add_asset(cli_info, reporter, project),
         "remove-asset" => execute_remove_asset(cli_info, reporter, project),
         "show-info" => execute_show_info(reporter, project),
@@ -72,6 +65,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
 // Subcommand: new
 // ---------------------------------------------------------------------------
 
+/// `peko project new`: scaffold a fresh project, prompting for its details.
 fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     println!("---------------------");
     println!(">> Create a project <<");
@@ -88,300 +82,200 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let project_is_ui = confirmation_prompt(&mut rl, "* UI project (Y/n) => ", true);
 
     let project_name = match rl.readline("* Project name     => ") {
-        Ok(name) => name,
+        Ok(name) => name.trim().to_owned(),
         Err(e) => {
             reporter.error(format!("could not read project name: {e}"));
             return ExitCode::FAILURE;
         }
     };
+    if project_name.is_empty() {
+        reporter.error("project name cannot be empty");
+        return ExitCode::FAILURE;
+    }
+
+    let mut bundle_id = String::new();
+    if project_is_ui {
+        bundle_id = match rl.readline("* Bundle ID        => ") {
+            Ok(value) => value.trim().to_owned(),
+            Err(e) => {
+                reporter.error(format!("could not read bundle id: {e}"));
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+
+    let version = match rl.readline_with_initial("* Project version  => ", ("0.1.0", "")) {
+        Ok(value) => normalize_version(&value),
+        Err(e) => {
+            reporter.error(format!("could not read project version: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
 
     let cwd = match std::env::current_dir() {
-        Ok(d) => d,
+        Ok(dir) => dir,
         Err(e) => {
             reporter.error(format!("cannot read current directory: {e}"));
             return ExitCode::FAILURE;
         }
     };
-    let project_root_folder = cwd.join(&project_name);
+    let project_root = cwd.join(&project_name);
 
-    let mut peko_project = PekoProject::new(
-        project_name.clone(),
-        project_root_folder.clone(),
-        None,
-        project_root_folder.join("main.peko"),
-        None,
-    );
-
-    if project_is_ui {
-        let bundle_id = match rl.readline("* Bundle ID        => ") {
-            Ok(v) => v,
-            Err(e) => {
-                reporter.error(format!("could not read bundle id: {e}"));
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let version = match rl.readline_with_initial("* Project version  => ", ("v0.1.0", "")) {
-            Ok(v) => v,
-            Err(e) => {
-                reporter.error(format!("could not read project version: {e}"));
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let default_icon_path = cli_info
-            .get_peko_root()
-            .join("Compiler/bundling/defaulticon.bin");
-        let default_icon_bytes = match std::fs::read(&default_icon_path) {
-            Ok(b) => b,
-            Err(e) => {
-                reporter.error(format!(
-                    "could not read default icon at {}: {e}",
-                    default_icon_path.display()
-                ));
-                return ExitCode::FAILURE;
-            }
-        };
-
-        peko_project.ui_project_info = Some(UIProjectInfo::new(
-            bundle_id,
-            version,
-            vec![
-                OperatingSystem::Android,
-                OperatingSystem::IOS,
-                OperatingSystem::Linux,
-                OperatingSystem::MacOS,
-                OperatingSystem::Windows,
-            ],
-            ProjectIcon::new(default_icon_bytes, 1024),
-        ));
-    }
-
-    // Clobber an existing project folder only with --force.
-    if project_root_folder.exists() {
+    if project_root.exists() {
         if !cli_info.flags.has_flag("force") {
             reporter.error(format!(
-                "project already exists at {}",
-                project_root_folder.display()
+                "a folder named '{project_name}' already exists here"
             ));
             reporter.help(format!(
-                "run '{} project new --force' to overwrite",
+                "run '{} project new --force' to overwrite it",
                 cli_info.executable
             ));
             return ExitCode::FAILURE;
         }
-        reporter.info(format!(
-            "--force specified, removing existing {}",
-            project_root_folder.display()
-        ));
-        let removal = if project_root_folder.is_dir() {
-            std::fs::remove_dir_all(&project_root_folder)
+        reporter.info(format!("--force specified, removing existing '{project_name}'"));
+        let removal = if project_root.is_dir() {
+            std::fs::remove_dir_all(&project_root)
         } else {
-            std::fs::remove_file(&project_root_folder)
+            std::fs::remove_file(&project_root)
         };
         if let Err(e) = removal {
-            reporter.error(format!("could not remove existing project folder: {e}"));
+            reporter.error(format!("could not remove existing '{project_name}': {e}"));
             return ExitCode::FAILURE;
         }
     }
 
-    // Scaffold the project directory tree.
-    let base_dirs = [
-        project_root_folder.clone(),
-        project_root_folder.join(".peko/project"),
-    ];
-    for dir in &base_dirs {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            reporter.error(format!("could not create {}: {e}", dir.display()));
-            return ExitCode::FAILURE;
-        }
-    }
-
+    let mut directories = vec![project_root.join("source")];
     if project_is_ui {
-        let ui_dirs = [
-            project_root_folder.join("assets"),
-            project_root_folder.join("pages/index"),
-        ];
-        for dir in &ui_dirs {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                reporter.error(format!("could not create {}: {e}", dir.display()));
-                return ExitCode::FAILURE;
-            }
-        }
-
-        // Starter files for a UI project.
-        let starter_files: &[(PathBuf, &[u8])] = &[
-            (project_root_folder.join("root_styles.scss"), b""),
-            (
-                project_root_folder.join("pages/index/page.peko"),
-                INDEX_PAGE_TEMPLATE.as_bytes(),
-            ),
-            (
-                project_root_folder.join("pages/index/page_styles.scss"),
-                b"",
-            ),
-        ];
-        for (path, bytes) in starter_files {
-            if let Err(e) = std::fs::write(path, bytes) {
-                reporter.error(format!("could not write {}: {e}", path.display()));
-                return ExitCode::FAILURE;
-            }
-        }
-
-        if let Err(e) = bundler::regenerate_application_bundle_files(&peko_project) {
-            reporter.error(format!("could not generate bundling config files: {e}"));
+        directories.push(project_root.join("assets"));
+        directories.push(project_root.join("source/pages/index"));
+    }
+    for directory in &directories {
+        if let Err(e) = std::fs::create_dir_all(directory) {
+            reporter.error(format!("could not create {}: {e}", directory.display()));
             return ExitCode::FAILURE;
         }
     }
 
-    // Root entrypoint.
-    let main_peko_path = project_root_folder.join("main.peko");
-    let main_peko_bytes = if project_is_ui {
-        ui_main_peko_template(&project_name).into_bytes()
+    let manifest = if project_is_ui {
+        UI_MANIFEST_TEMPLATE
+            .replace("{name}", &project_name)
+            .replace("{bundle}", &bundle_id)
+            .replace("{version}", &version)
     } else {
-        CLI_MAIN_PEKO_TEMPLATE.as_bytes().to_vec()
+        CLI_MANIFEST_TEMPLATE
+            .replace("{name}", &project_name)
+            .replace("{version}", &version)
     };
-    if let Err(e) = std::fs::write(&main_peko_path, &main_peko_bytes) {
-        reporter.error(format!("could not write {}: {e}", main_peko_path.display()));
-        return ExitCode::FAILURE;
-    }
 
-    // Persist project config.
-    let config_path = project_root_folder.join(".peko/project/config.pkbin");
-    if let Err(e) = std::fs::write(&config_path, peko_project.to_binary()) {
-        reporter.error(format!(
-            "could not write project config to {}: {e}",
-            config_path.display()
+    let main_peko = if project_is_ui {
+        ui_main_peko_template(&project_name)
+    } else {
+        CLI_MAIN_PEKO_TEMPLATE.to_owned()
+    };
+
+    let mut files: Vec<(PathBuf, Vec<u8>)> = vec![
+        (project_root.join("peko.toml"), manifest.into_bytes()),
+        (project_root.join("source/main.peko"), main_peko.into_bytes()),
+    ];
+    if project_is_ui {
+        files.push((project_root.join("source/root_styles.scss"), Vec::new()));
+        files.push((
+            project_root.join("source/pages/index/page.peko"),
+            INDEX_PAGE_TEMPLATE.as_bytes().to_vec(),
         ));
-        return ExitCode::FAILURE;
+        files.push((
+            project_root.join("source/pages/index/page_styles.scss"),
+            Vec::new(),
+        ));
+    }
+    for (path, bytes) in &files {
+        if let Err(e) = std::fs::write(path, bytes) {
+            reporter.error(format!("could not write {}: {e}", path.display()));
+            return ExitCode::FAILURE;
+        }
     }
 
     reporter.success(format!(
         "created new project {project_name} at {}",
-        project_root_folder.display()
+        project_root.display()
     ));
     ExitCode::SUCCESS
 }
 
-// ---------------------------------------------------------------------------
-// Subcommand: modify
-// ---------------------------------------------------------------------------
-
-fn execute_modify(cli_info: &CLIInfo, reporter: &Reporter, mut project: PekoProject) -> ExitCode {
-    let mut rl = match Editor::<(), FileHistory>::new() {
-        Ok(rl) => rl,
-        Err(e) => {
-            reporter.error(format!("could not initialize prompt editor: {e}"));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Existing UI status as the default for the prompt.
-    let is_currently_ui = project.ui_project_info.is_some();
-    let should_be_ui = confirmation_prompt(&mut rl, "* UI project (y/n) => ", is_currently_ui);
-
-    let new_name =
-        match rl.readline_with_initial("* Project name     => ", (project.name.as_str(), "")) {
-            Ok(v) => v,
-            Err(e) => {
-                reporter.error(format!("could not read project name: {e}"));
-                return ExitCode::FAILURE;
-            }
-        };
-    project.name = new_name;
-
-    if !should_be_ui {
-        // CLI project, drop any existing UI info.
-        project.ui_project_info = None;
-    } else {
-        // Capture existing UI info up front so we don't repeatedly
-        // clone the option in each branch below.
-        let existing = project
-            .ui_project_info
-            .take()
-            .unwrap_or_else(|| default_ui_info_for_modify(cli_info));
-
-        let bundle_id = match rl
-            .readline_with_initial("* Bundle ID        => ", (existing.bundle_id.as_str(), ""))
-        {
-            Ok(v) => v,
-            Err(e) => {
-                reporter.error(format!("could not read bundle id: {e}"));
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let version = match rl
-            .readline_with_initial("* Project version  => ", (existing.version.as_str(), ""))
-        {
-            Ok(v) => v,
-            Err(e) => {
-                reporter.error(format!("could not read project version: {e}"));
-                return ExitCode::FAILURE;
-            }
-        };
-
-        println!("* Target platforms");
-        let mut targets = Vec::new();
-        for (os, prompt) in [
-            (OperatingSystem::Android, "\t Android (y/n) => "),
-            (OperatingSystem::IOS, "\t iOS (y/n)     => "),
-            (OperatingSystem::Linux, "\t Linux (y/n)   => "),
-            (OperatingSystem::MacOS, "\t macOS (y/n)   => "),
-            (OperatingSystem::Windows, "\t Windows (y/n) => "),
-        ] {
-            let currently_enabled = existing
-                .platforms
-                .iter()
-                .any(|p| std::mem::discriminant(p) == std::mem::discriminant(&os));
-            if confirmation_prompt(&mut rl, prompt, currently_enabled) {
-                targets.push(os);
-            }
-        }
-
-        project.ui_project_info = Some(UIProjectInfo::new(
-            bundle_id,
-            version,
-            targets,
-            existing.icon,
-        ));
-    }
-
-    // Persist updated config.
-    let config_path = project.get_root().join(".peko/project/config.pkbin");
-    if let Err(e) = std::fs::write(&config_path, project.to_binary()) {
-        reporter.error(format!(
-            "could not write project config to {}: {e}",
-            config_path.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-
-    reporter.success(format!("updated project {}", project.name));
-    ExitCode::SUCCESS
+/// Normalize a typed version into bare semver, dropping a leading `v`.
+fn normalize_version(input: &str) -> String {
+    let trimmed = input.trim();
+    trimmed.strip_prefix('v').unwrap_or(trimmed).to_owned()
 }
 
-/// Fallback default UI info used when `modify` is given a CLI project
-/// being promoted to a UI project. Reads the default icon from the
-/// toolchain.
-fn default_ui_info_for_modify(cli_info: &CLIInfo) -> UIProjectInfo {
-    let default_icon_path = cli_info
-        .get_peko_root()
-        .join("Compiler/bundling/defaulticon.bin");
-    // Best-effort: if the default icon can't be read, fall back to an
-    // empty icon. The user can re-set it later via `project set-icon`.
-    let default_icon_bytes = std::fs::read(&default_icon_path).unwrap_or_default();
-    UIProjectInfo::new(
-        String::new(),
-        "v0.1.0".to_owned(),
-        vec![
-            OperatingSystem::Android,
-            OperatingSystem::IOS,
-            OperatingSystem::Linux,
-            OperatingSystem::MacOS,
-            OperatingSystem::Windows,
-        ],
-        ProjectIcon::new(default_icon_bytes, 1024),
+/// Ask a yes/no question, returning `true` for affirmative answers.
+fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_yes: bool) -> bool {
+    let default_initial = if default_yes { "y" } else { "n" };
+    loop {
+        let answer = match rl.readline_with_initial(prompt, (default_initial, "")) {
+            Ok(answer) => answer,
+            Err(_) => return default_yes,
+        };
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return true,
+            "n" | "no" => return false,
+            "" => return default_yes,
+            _ => println!(">> please type either yes or no"),
+        }
+    }
+}
+
+/// The `peko.toml` scaffolded for a UI project.
+const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
+                                    name = \"{name}\"\n\
+                                    bundle = \"{bundle}\"\n\
+                                    version = \"{version}\"\n\
+                                    target_platforms = [\"android\", \"ios\", \"linux\", \"macos\", \"windows\"]\n\
+                                    \n\
+                                    [ui]\n\
+                                    framework = \"native\"\n\
+                                    \n\
+                                    [dependencies]\n";
+
+/// The `peko.toml` scaffolded for a CLI project.
+const CLI_MANIFEST_TEMPLATE: &str = "[project]\n\
+                                     name = \"{name}\"\n\
+                                     version = \"{version}\"\n\
+                                     \n\
+                                     [dependencies]\n";
+
+/// The `source/main.peko` scaffolded for a CLI project.
+const CLI_MAIN_PEKO_TEMPLATE: &str = "fn OnStart() {\n\
+                                      \tconsole::println(\"Hello World!\");\n\
+                                      }\n";
+
+/// The starter page scaffolded for a UI project.
+const INDEX_PAGE_TEMPLATE: &str = "style page_styles;\n\
+                                   \n\
+                                   class Index from ui::Page {\n\
+                                   \tconstructor() => super() {\n\
+                                   \t\tthis.set_styling(ui::Styling(page_styles));\n\
+                                   \t}\n\
+                                   \n\
+                                   \tfn render() => ui::Element {\n\
+                                   \t\treturn <h1>Hello World</h1>;\n\
+                                   \t}\n\
+                                   }\n";
+
+/// The `source/main.peko` scaffolded for a UI project.
+fn ui_main_peko_template(project_name: &str) -> String {
+    format!(
+        "import {{ Index }} from pages::index;\n\
+         style root_styles;\n\
+         \n\
+         fn OnStart() {{\n\
+         \tapp := ui::App(\"{project_name}\", 800, 800);\n\
+         \tapp.set_root_layout(closure(content: ui::Element) => ui::Element {{\n\
+         \t\treturn content;\n\
+         \t}}, ui::Styling(root_styles));\n\
+         \tapp.add_page(\"/\", Index());\n\
+         \tapp.run();\n\
+         }}\n"
     )
 }
 
@@ -491,105 +385,6 @@ fn execute_remove_asset(cli_info: &CLIInfo, reporter: &Reporter, project: PekoPr
     }
 
     reporter.success(format!("removed asset '{asset_arg}'"));
-    ExitCode::SUCCESS
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: set-icon
-// ---------------------------------------------------------------------------
-
-fn execute_set_icon(cli_info: &CLIInfo, reporter: &Reporter, mut project: PekoProject) -> ExitCode {
-    if project.ui_project_info.is_none() {
-        reporter.error("cannot set an icon on a CLI project");
-        return ExitCode::FAILURE;
-    }
-
-    let Some(icon_arg) = cli_info.arguments.get(2) else {
-        reporter.error(
-            "`project set-icon` requires a path to an icon file (PNG, JPEG, WebP, ICO, or AVIF)",
-        );
-        reporter.help(format!(
-            "run '{} help project' to see how this command works",
-            cli_info.executable
-        ));
-        return ExitCode::FAILURE;
-    };
-
-    let icon_path = PathBuf::from(icon_arg);
-    if !icon_path.exists() {
-        reporter.error(format!(
-            "icon file '{}' does not exist",
-            icon_path.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-
-    // Validate extension before doing any image-loading work.
-    let extension = icon_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("png" | "jpg" | "jpeg" | "webp" | "ico" | "avif") => {}
-        _ => {
-            reporter.error("icon file must be one of: .png, .jpg, .jpeg, .webp, .ico, .avif");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Load and (if needed) resize the image.
-    let file = match std::fs::File::open(&icon_path) {
-        Ok(f) => f,
-        Err(e) => {
-            reporter.error(format!("could not open {}: {e}", icon_path.display()));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let format = match image::ImageFormat::from_extension(icon_path.extension().unwrap()) {
-        Some(f) => f,
-        None => {
-            reporter.error("could not determine image format from extension");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut image_data = match image::load(std::io::BufReader::new(file), format) {
-        Ok(img) => img,
-        Err(_) => {
-            reporter.error("icon file is not a valid image");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if image_data.width() != 1024 || image_data.height() != 1024 {
-        reporter.warning("provided icon is not 1024x1024, resizing");
-        reporter
-            .help("resizing may decrease quality. To control the result, pass a 1024x1024 source");
-        image_data = image_data.resize(1024, 1024, image::imageops::FilterType::Lanczos3);
-    }
-
-    // RGBA8 raw bytes for the project icon.
-    let rgba_bytes = image_data.to_rgba8().into_raw();
-    let icon_width = image_data.width();
-    let new_icon = ProjectIcon::new(rgba_bytes, icon_width);
-
-    // Update the project's UI info with the new icon. We already
-    // verified ui_project_info.is_some() above.
-    let mut ui_info = project.ui_project_info.take().unwrap();
-    ui_info.icon = new_icon;
-    project.ui_project_info = Some(ui_info);
-
-    let config_path = project.get_root().join(".peko/project/config.pkbin");
-    if let Err(e) = std::fs::write(&config_path, project.to_binary()) {
-        reporter.error(format!(
-            "could not write project config to {}: {e}",
-            config_path.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-
-    reporter.success(format!("updated icon for project {}", project.name));
     ExitCode::SUCCESS
 }
 
@@ -727,67 +522,4 @@ fn execute_show_assets(_cli_info: &CLIInfo, reporter: &Reporter, project: PekoPr
     reporter.info("the assets folder is the project's asset set; files added or removed here are picked up on the next build");
 
     ExitCode::SUCCESS
-}
-
-// ---------------------------------------------------------------------------
-// Shared helper: yes/no prompt
-// ---------------------------------------------------------------------------
-
-/// Ask a yes/no question, returning `true` for affirmative answers.
-/// `default_yes` controls what an empty answer means and what's
-/// pre-filled in the prompt.
-fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_yes: bool) -> bool {
-    let default_initial = if default_yes { "y" } else { "n" };
-
-    loop {
-        let answer = match rl.readline_with_initial(prompt, (default_initial, "")) {
-            Ok(a) => a,
-            Err(_) => return default_yes,
-        };
-
-        match answer.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            "" => return default_yes,
-            _ => {
-                println!(">> please type either yes or no");
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Starter-file templates
-// ---------------------------------------------------------------------------
-
-const INDEX_PAGE_TEMPLATE: &str = "style page_styles;\n\
-                                   \n\
-                                   class Index from ui::Page {\n\
-                                   \tconstructor() => super() {\n\
-                                   \t\tthis.set_styling(ui::Styling(page_styles));\n\
-                                   \t}\n\
-                                   \n\
-                                   \tfn render() => ui::Element {\n\
-                                   \t\treturn <h1>Hello World</h1>;\n\
-                                   \t}\n\
-                                   }\n";
-
-const CLI_MAIN_PEKO_TEMPLATE: &str = "fn OnStart() {\n\
-                                      \tconsole::println(\"Hello World!\");\n\
-                                      }\n";
-
-fn ui_main_peko_template(project_name: &str) -> String {
-    format!(
-        "import {{ Index }} from pages::index;\n\
-         style root_styles;\n\
-         \n\
-         fn OnStart() {{\n\
-         \tapp := ui::App(\"{project_name}\", 800, 800);\n\
-         \tapp.set_root_layout(closure(content: ui::Element) => ui::Element {{\n\
-         \t\treturn content;\n\
-         \t}}, ui::Styling(root_styles));\n\
-         \tapp.add_page(\"/\", Index());\n\
-         \tapp.run();\n\
-         }}\n"
-    )
 }

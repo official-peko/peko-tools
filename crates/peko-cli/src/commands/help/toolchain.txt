@@ -1,0 +1,14 @@
+peko toolchain <SUBCOMMAND>
+
+Inspects and installs build toolchains.
+
+Toolchains are recorded in versions.json at the Peko root and live under
+Compiler/toolchains/<os>/<arch>. Each carries a toolchain.toml describing its
+target triple, compile flags, includes, and the link step.
+
+SUBCOMMANDS
+    list                  load every installed toolchain's toolchain.toml and
+                          report which parse and which fail
+
+EXAMPLES
+    peko toolchain list

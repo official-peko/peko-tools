@@ -1,14 +1,20 @@
-//! `peko add`: install a package into the project (or globally).
+//! `peko add`: declare a dependency in `peko.toml` and install it.
+//!
+//! Writes the dependency into the `[dependencies]` table (a registry version
+//! requirement, or a local `{ path = ... }` with `--path`), then re-resolves
+//! and refreshes `peko.lock`.
 
 use std::process::ExitCode;
 
-use crate::cli::reporting::Reporter;
-use crate::cli::CLIInfo;
-use crate::packager::manager::{PackageManager, Scope};
+use peko_core::config::{DependencySpec, MANIFEST_FILE, Manifest};
 
-/// Execute the `add` subcommand against the user's working directory.
+use crate::cli::CLIInfo;
+use crate::cli::reporting::Reporter;
+use crate::registry::install;
+
+/// Execute the `add` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
-    let Some(package_name) = cli_info.arguments.get(1) else {
+    let Some(name) = cli_info.arguments.get(1) else {
         reporter.error("`add` requires a package name");
         reporter.help(format!(
             "run '{} help add' to see how this command works",
@@ -17,69 +23,94 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let scope = if cli_info.flags.has_flag("global") {
-        Scope::Global
-    } else {
-        Scope::Local
+    let spec = match dependency_spec(cli_info, reporter) {
+        Ok(spec) => spec,
+        Err(code) => return code,
     };
 
-    let current_dir = match std::env::current_dir() {
+    let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(e) => {
             reporter.error(format!("cannot read current directory: {e}"));
             return ExitCode::FAILURE;
         }
     };
-
-    let packager = match PackageManager::new(scope, current_dir) {
-        Ok(packager) => packager,
+    let loaded = match Manifest::discover(&cwd) {
+        Ok(loaded) => loaded,
         Err(e) => {
-            reporter.error(format!("cannot install package here: {e}"));
-            reporter.help(format!(
-                "run '{} help add' to see how this command works",
-                cli_info.executable
-            ));
+            reporter.error(format!("could not load a peko.toml here: {e}"));
             return ExitCode::FAILURE;
         }
     };
 
-    // If `--version` was passed, resolve its value up front so we can
-    // fail fast on a missing value.
-    let requested_version = if cli_info.flags.has_flag("version") {
-        match cli_info.flags.get_flag("version") {
-            Some(v) => Some(v),
+    let manifest_path = loaded.root.join(MANIFEST_FILE);
+    if let Err(e) = Manifest::add_dependency(&manifest_path, name, &spec) {
+        reporter.error(format!("could not update peko.toml: {e}"));
+        return ExitCode::FAILURE;
+    }
+    reporter.info(format!("added {name} to peko.toml"));
+
+    resolve_after_edit(cli_info, reporter, &cwd, name, "added").await
+}
+
+/// Build the dependency spec from the `--path` / `--version` flags.
+fn dependency_spec(cli_info: &CLIInfo, reporter: &Reporter) -> Result<DependencySpec, ExitCode> {
+    if cli_info.flags.has_flag("path") {
+        return match cli_info.flags.get_flag("path") {
+            Some(path) => Ok(DependencySpec::Path(path)),
+            None => {
+                reporter.error("flag 'path' requires a value");
+                Err(ExitCode::FAILURE)
+            }
+        };
+    }
+
+    if cli_info.flags.has_flag("version") {
+        return match cli_info.flags.get_flag("version") {
+            Some(version) => Ok(DependencySpec::Version(version)),
             None => {
                 reporter.error("flag 'version' requires a value");
-                reporter.help(format!(
-                    "run '{} help add' to see how this command works",
-                    cli_info.executable
-                ));
-                return ExitCode::FAILURE;
+                Err(ExitCode::FAILURE)
             }
+        };
+    }
+
+    Ok(DependencySpec::Version(String::from("*")))
+}
+
+/// Re-resolve the project after a manifest edit, reporting the outcome.
+async fn resolve_after_edit(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    cwd: &std::path::Path,
+    name: &str,
+    verb: &str,
+) -> ExitCode {
+    let loaded = match Manifest::discover(cwd) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            reporter.error(format!("could not reload peko.toml: {e}"));
+            return ExitCode::FAILURE;
         }
-    } else {
-        None
     };
 
     let progress = reporter.progress();
-    progress.start_phase(&format!("Installing package {package_name}"));
-
-    let installation_result = match &requested_version {
-        Some(version) => {
-            packager
-                .install_version(package_name, version, progress)
-                .await
-        }
-        None => packager.install_package(package_name, progress).await,
-    };
-
+    progress.start_phase("Resolving dependencies");
+    let result = install::update(cli_info.get_peko_root(), &loaded, progress).await;
     progress.finish_phase();
 
-    if let Err(e) = installation_result {
-        reporter.error(format!("install failed: {e}"));
-        return ExitCode::FAILURE;
+    match result {
+        Ok(_) => {
+            reporter.success(format!("{verb} {name}"));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            reporter.error(format!("{verb} {name} in peko.toml, but resolution failed: {e}"));
+            reporter.help(format!(
+                "run '{} install' once the registry is reachable",
+                cli_info.executable
+            ));
+            ExitCode::FAILURE
+        }
     }
-
-    reporter.success(format!("installed package '{package_name}'"));
-    ExitCode::SUCCESS
 }

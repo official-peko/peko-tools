@@ -1,0 +1,14 @@
+peko publish
+
+Packs the current package into a .pkpkg and uploads it to the registry.
+
+The package is packed into a .pkpkg container (zstd(tar(source)) with the
+verbatim peko.toml embedded) and its checksum is computed.
+
+Uploading the blob, appending the registry index line, and mirroring the
+search row are not available yet; the web platform is not live. Until then,
+publish packs and reports the checksum. Use `peko pkg build` to write the
+.pkpkg to disk for inspection.
+
+EXAMPLES
+    peko publish

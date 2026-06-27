@@ -87,6 +87,14 @@ pub enum BundleError {
     #[error(transparent)]
     Peko(#[from] peko_core::error::PekoError),
 
+    /// A toolchain description failed to load.
+    #[error("couldn't load toolchain at {path}: {source}")]
+    Toolchain {
+        path: PathBuf,
+        #[source]
+        source: Box<peko_core::config::ConfigError>,
+    },
+
     /// A signing step failed. The string carries the underlying context
     /// (key loading, keychain access, apple-codesign, or an external
     /// signing tool).
@@ -240,11 +248,6 @@ impl Drop for CleanupGuard {
 /// under `base_in_zip`. Subdirectories are followed; every regular file
 /// is added with `Stored` compression. Used by the android bundler to
 /// embed the `assets/`, `lib/`, and `res/` trees into the APK.
-///
-/// (`packager::ziputil::zip_add_folder` is similar but supports
-/// extension filtering and uses `Deflated` compression for files. The
-/// android bundler needs `Stored` and every-file behavior, hence this
-/// separate helper.)
 pub(crate) fn recursive_zip_add(
     zip: &mut ZipWriter<File>,
     dir_path: &Path,

@@ -1,16 +1,15 @@
 peko project <SUBCOMMAND> [OPTIONS]
 
-Creates, views, and modifies Peko projects.
+Creates, views, and manages a Peko project.
+
+Project metadata (name, bundle id, version, target platforms, framework,
+and app icon) is defined in the project's peko.toml. `new` scaffolds one;
+after that, edit peko.toml directly to change a project. The app icon is the
+square PNG that [ui].icon points to.
 
 SUBCOMMANDS
-    new                   prompts for project info and creates a new
-                          project folder in the current directory
-    modify                prompts for new values for the current
-                          project's metadata (name, bundle id, version,
-                          target platforms)
-    set-icon <PATH>       sets the project icon to the given image file
-                          (1024x1024 recommended; PNG, JPG, JPEG, WebP,
-                          ICO, or AVIF)
+    new                   scaffold a new project, prompting for whether it
+                          is a UI project, its name, bundle id, and version
     show-info             prints the current project's configuration
     show-icon             opens a window that displays the project icon
     show-assets           opens the project assets folder in the system
@@ -19,11 +18,10 @@ SUBCOMMANDS
     remove-asset <NAME>   removes an asset from the UI project
 
 OPTIONS
-    --force               for `project new`/`project add-asset`, overwrite
-                          an existing folder/asset with the same name
+    --force               for `project new` / `project add-asset`,
+                          overwrite an existing folder or asset
 
 EXAMPLES
     peko project new
-    peko project modify
-    peko project set-icon ./icon.png
     peko project show-info
+    peko project add-asset ./logo.png

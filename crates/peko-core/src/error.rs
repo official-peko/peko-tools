@@ -1,9 +1,9 @@
 //! Error type and supporting I/O helpers for `peko_core`.
 //!
 //! This module defines [`PekoError`], the crate's single error type for
-//! environmental failures (I/O, JSON parsing, non-UTF-8 paths), and a small
-//! set of helpers that wrap `std::fs` operations to attach path context to
-//! any underlying [`std::io::Error`].
+//! environmental failures (I/O, non-UTF-8 paths), and a small set of helpers
+//! that wrap `std::fs` operations to attach path context to any underlying
+//! [`std::io::Error`].
 //!
 //! Semantic problems in user source code (syntax errors, type mismatches,
 //! unresolved references) are *not* represented here. Those flow through
@@ -15,8 +15,8 @@ use thiserror::Error;
 
 /// Errors raised by `peko_core` tooling operations.
 ///
-/// `PekoError` covers *environmental* failures: filesystem I/O, malformed
-/// package metadata, and path encoding issues. It is deliberately distinct
+/// `PekoError` covers *environmental* failures: filesystem I/O and path
+/// encoding issues. It is deliberately distinct
 /// from [`crate::diagnostics::PekoDiagnostic`], which represents semantic
 /// findings about user source code and is collected (not propagated) during
 /// compilation.
@@ -36,17 +36,6 @@ pub enum PekoError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
-    },
-
-    /// A JSON artifact (typically `Package.json`) failed to parse.
-    ///
-    /// The `path` field records the file whose contents could not be parsed;
-    /// the `source` field carries the underlying [`serde_json::Error`].
-    #[error("failed to parse JSON at `{path}`: {source}")]
-    PackageParse {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
     },
 
     /// A path could not be converted to a UTF-8 string.

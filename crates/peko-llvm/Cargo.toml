@@ -16,3 +16,6 @@ derive-new = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 grass = { workspace = true }
+
+[build-dependencies]
+cc = "1"

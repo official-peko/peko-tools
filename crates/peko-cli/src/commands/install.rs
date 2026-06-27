@@ -1,7 +1,8 @@
-//! `peko update`: re-resolve dependencies and refresh `peko.lock`.
+//! `peko install`: resolve, download, and lock the project's dependencies.
 //!
-//! Resolution ignores the existing lockfile and selects the highest versions
-//! that satisfy the manifest, downloading and locking the result.
+//! Reads `[dependencies]` from the project's `peko.toml`, resolves exact
+//! versions against the registry index, downloads and verifies each `.pkpkg`,
+//! unpacks it into the shared source cache, and writes `peko.lock`.
 
 use std::process::ExitCode;
 
@@ -11,7 +12,7 @@ use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
 use crate::registry::install;
 
-/// Execute the `update` subcommand.
+/// Execute the `install` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
@@ -30,8 +31,8 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     };
 
     let progress = reporter.progress();
-    progress.start_phase("Updating dependencies");
-    let result = install::update(cli_info.get_peko_root(), &loaded, progress).await;
+    progress.start_phase("Installing dependencies");
+    let result = install::install(cli_info.get_peko_root(), &loaded, progress).await;
     progress.finish_phase();
 
     match result {
@@ -40,7 +41,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            reporter.error(format!("update failed: {e}"));
+            reporter.error(format!("install failed: {e}"));
             ExitCode::FAILURE
         }
     }

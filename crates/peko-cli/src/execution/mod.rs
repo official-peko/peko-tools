@@ -17,10 +17,12 @@
 //! caller's responsibility: each function here represents a single unit of
 //! work, so the caller installs a phase + ticks once per call.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use indexmap::IndexMap;
+use peko_core::ExternalModuleInfo;
 use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, UnpackItem};
 use peko_core::asts::statements::ImportStatementAST;
@@ -114,40 +116,41 @@ pub(super) fn parse_peko_source(file: PathBuf, source: String) -> (Vec<PekoAST>,
     (parsed_asts, parser.get_diagnostics().clone())
 }
 
-/// Build the package index for compile/test/codegen contexts and
-/// assign the resulting external-module map onto the destination
-/// context's `external_modules` field.
+/// Build the external-module map a compile/test/codegen context resolves
+/// imports against.
 ///
-/// `peko_root` is the *global* Peko toolchain install root. The
-/// toolchain's installed packages live at `<peko_root>/Packages`;
-/// `PekoPackageIndex::new` appends `Packages` to each of its inputs.
+/// `peko_root` is the global Peko install root that holds the registry source
+/// cache. `compilation_root` is the project root when called from a project
+/// build, or `None` for an ad-hoc single-file compile. The map is scoped to the
+/// project's `peko.lock`, so imports bind the locked versions; a project with
+/// no lockfile resolves against nothing.
+pub(crate) fn external_modules_for<P: AsRef<Path>>(
+    peko_root: &Path,
+    compilation_root: Option<P>,
+) -> HashMap<String, ExternalModuleInfo> {
+    let Some(project_root) = compilation_root else {
+        return HashMap::new();
+    };
+    let project_root = project_root.as_ref();
+
+    match peko_core::config::Lockfile::load_from_root(project_root) {
+        Ok(Some(lockfile)) => {
+            peko_core::packages::PekoPackageIndex::from_lockfile(peko_root, project_root, &lockfile)
+                .get_external_modules()
+        }
+        _ => HashMap::new(),
+    }
+}
+
+/// Assign the lock-scoped external-module map onto a context's
+/// `external_modules` field.
 ///
-/// `compilation_root` is the *project* root (the parent of `.peko/`)
-/// when called from a project build, or `None` for ad-hoc
-/// single-file compiles. When it is `Some(_)` and the project has a
-/// `.peko/Packages/` directory, `<project>/.peko` is passed as the
-/// second argument to `PekoPackageIndex::new`, which merges global
-/// and local entries internally (local entries override global ones
-/// on conflict).
-///
-/// We only pass the local arg when `.peko/Packages` actually exists;
-/// otherwise `PekoPackageIndex::new` would error trying to read a
-/// non-existent subdir. A project can have a `.peko/` for config
-/// without ever having run `peko add`.
-///
-/// This is implemented as a macro rather than a function because the
-/// concrete type of `external_modules` is a private detail of
-/// peko_core; the macro lets each call site assign to the field
-/// without us having to name the type.
+/// A macro rather than a function so each call site can target a different
+/// context type without naming the field's type.
 macro_rules! load_external_modules {
     ($context:expr, $peko_root:expr, $compilation_root:expr $(,)?) => {{
-        let local_dot_peko: ::std::option::Option<::std::path::PathBuf> = $compilation_root
-            .map(|root| ::std::convert::AsRef::<::std::path::Path>::as_ref(root).join(".peko"))
-            .filter(|dot_peko| dot_peko.join("Packages").is_dir());
-
-        let index =
-            ::peko_core::packages::PekoPackageIndex::new($peko_root, local_dot_peko.as_deref())?;
-        $context.external_modules = index.get_external_modules();
+        $context.external_modules =
+            $crate::execution::external_modules_for($peko_root, $compilation_root);
     }};
 }
 pub(super) use load_external_modules;

@@ -20,7 +20,9 @@ use std::{
 use document::PekoDocument;
 use helpers::create_position;
 use peko_core::{
+    ExternalModuleInfo,
     asts::data_structures::PositionData,
+    config::Lockfile,
     diagnostics::{DiagnosticType, PekoDiagnostic},
     packages::PekoPackageIndex,
     simulator::{
@@ -149,10 +151,7 @@ impl PekoAnalyzer {
             PathBuf::new(),
         );
 
-        let package_indexer = PekoPackageIndex::new(&self.peko_root, Option::<&Path>::None);
-        simulator_context.external_modules = package_indexer
-            .map(|idx| idx.get_external_modules())
-            .unwrap_or_default();
+        simulator_context.external_modules = self.external_modules();
 
         simulator_context.windowsgui = !target.console;
 
@@ -169,6 +168,24 @@ impl PekoAnalyzer {
             .extend(simulator_context.module_context.top_level_modules);
     }
 
+    /// Build the lock-scoped external-module map for the active project.
+    ///
+    /// Imports resolve against the versions pinned in the project's
+    /// `peko.lock`. A project without a discovered root or lockfile resolves
+    /// against nothing.
+    fn external_modules(&self) -> HashMap<String, ExternalModuleInfo> {
+        let Some(project_root) = self.project_root.as_ref() else {
+            return HashMap::new();
+        };
+        match Lockfile::load_from_root(project_root) {
+            Ok(Some(lockfile)) => {
+                PekoPackageIndex::from_lockfile(&self.peko_root, project_root, &lockfile)
+                    .get_external_modules()
+            }
+            _ => HashMap::new(),
+        }
+    }
+
     /// Build a fresh simulator context for `file`. Copies the preloaded
     /// modules in and re-indexes any project-local packages.
     fn create_simulator_context(
@@ -183,21 +200,7 @@ impl PekoAnalyzer {
             self.project_root.clone().unwrap_or(file),
         );
 
-        // The package index appends `Packages` to each input it is given,
-        // so the project-local directory passed here is `<project>/.peko`
-        // and the index reads `<project>/.peko/Packages`. The argument is
-        // passed only when that directory exists, since the index errors on
-        // a missing path.
-        let local_packages = self
-            .project_root
-            .as_ref()
-            .map(|root| root.join(".peko"))
-            .filter(|dot_peko| dot_peko.join("Packages").is_dir());
-
-        let package_indexer = PekoPackageIndex::new(&self.peko_root, local_packages.as_deref());
-        simulator_context.external_modules = package_indexer
-            .map(|idx| idx.get_external_modules())
-            .unwrap_or_default();
+        simulator_context.external_modules = self.external_modules();
 
         // Copy the preloaded modules in, but keep the extern module
         // request-local. The resolver reads top_level_modules["extern"]

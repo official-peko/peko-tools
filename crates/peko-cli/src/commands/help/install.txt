@@ -1,0 +1,14 @@
+peko install
+
+Resolves the project's dependencies, downloads them, and writes peko.lock.
+
+Reads the [dependencies] table from the project's peko.toml, selects exact
+versions against the registry index, downloads and verifies each .pkpkg,
+unpacks it into the shared source cache, and writes peko.lock pinning the
+resolved versions and checksums.
+
+Dependencies are also resolved automatically at the start of `peko build`
+and `peko run`.
+
+EXAMPLES
+    peko install

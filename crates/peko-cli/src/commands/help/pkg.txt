@@ -1,22 +1,20 @@
 peko pkg <SUBCOMMAND> [OPTIONS]
 
-Authors and bundles host packages for distribution.
+Authors and packs library packages for distribution.
 
 SUBCOMMANDS
-    new <NAME>            scaffold a new package directory at ./<NAME>
-                          containing Package.json, README.md, and an
-                          initial v0.1.0 version folder
-    build                 bundle the current package into a .pkpkg
-                          file. The current directory must be inside
-                          a package folder (one with a Package.json).
+    new <NAME>            scaffold a new library at ./<NAME> containing a
+                          peko.toml ([package] + [lib]), README.md, and a
+                          source/lib.peko entry
+    build                 pack the enclosing project into a .pkpkg
+                          container next to the current directory. The
+                          current directory must be inside a project
+                          (one with a peko.toml).
 
 OPTIONS
     --force               for `pkg new`, overwrite an existing folder
                           with the same name
-    --version=<VERSION>   for `pkg build`, bundle only the specified
-                          version instead of every version
 
 EXAMPLES
     peko pkg new my_lib
     peko pkg build
-    peko pkg build --version=v1.2.0

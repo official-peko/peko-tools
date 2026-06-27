@@ -50,6 +50,21 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return handle_clean(project, reporter);
     }
 
+    // Resolve, download, and lock declared dependencies before compiling.
+    let progress = reporter.progress();
+    progress.start_phase("Resolving dependencies");
+    let ensured = crate::registry::install::ensure_dependencies(
+        cli_info.get_peko_root(),
+        project.get_root(),
+        progress,
+    )
+    .await;
+    progress.finish_phase();
+    if let Err(e) = ensured {
+        reporter.error(format!("could not resolve dependencies: {e}"));
+        return ExitCode::FAILURE;
+    }
+
     if project.ui_project_info.is_none() {
         build_cli_project(cli_info, project, build_directory, reporter)
     } else {

@@ -1,16 +1,16 @@
 peko add [OPTIONS] <PACKAGE>
 
-Installs a package from the registry into the current project. When the
---global flag is set, the package is installed to the user-wide package
-store instead of the project.
+Adds a dependency to peko.toml and installs it.
+
+Writes <PACKAGE> into the [dependencies] table, preserving the file's
+formatting, then re-resolves and refreshes peko.lock. With no version flag
+the requirement defaults to "*".
 
 OPTIONS
-    --global              install the package globally rather than into
-                          the current project
-    --version=<VERSION>   install a specific version of the package
-                          (defaults to the latest published version)
+    --version=<REQ>   pin a registry version requirement, e.g. ^1.2
+    --path=<DIR>      add a local path dependency instead of a registry one
 
 EXAMPLES
-    peko add some_pkg
-    peko add some_pkg --version=1.2.0
-    peko add some_pkg --global
+    peko add sockets
+    peko add sockets --version=^1.2
+    peko add local_dep --path=../local_dep

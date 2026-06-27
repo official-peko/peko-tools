@@ -790,8 +790,11 @@ impl PekoValueSimulator for ImportStatementAST {
 
             let mut asts = Vec::new();
 
-            // Pull the module's docinfo first if present.
-            let module_docinfo = if parser.tokens.current_token().equals("//!") {
+            // Pull the module's docinfo first if present. An empty module has
+            // no tokens, so the docinfo peek is guarded against an empty list.
+            let module_docinfo = if parser.tokens.length() != 0
+                && parser.tokens.current_token().equals("//!")
+            {
                 Some(parser.parse_module_doc_info())
             } else {
                 None

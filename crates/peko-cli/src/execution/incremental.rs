@@ -44,7 +44,8 @@ use peko_llvm::codegen::context::PekoCodegenContext;
 use peko_llvm::codegen::data_structures::CodegenModule;
 
 use crate::cli::reporting::ProgressSink;
-use crate::project::{self, PekoProject};
+use crate::project::PekoProject;
+use crate::toolchain::resolve_for_target;
 
 use super::parse_peko_source;
 
@@ -433,7 +434,7 @@ impl ProjectIncrementalMap {
             path: binary_path.to_path_buf(),
             source,
         })?;
-        let mut reader = project::PekoBinaryReader::new(raw);
+        let mut reader = PekoBinaryReader::new(raw);
 
         let corrupt = |detail: &str| PekoError::CorruptBinary {
             path: binary_path.to_path_buf(),
@@ -494,7 +495,7 @@ impl ProjectIncrementalMap {
             path: binary_path.to_path_buf(),
             source,
         })?;
-        let mut reader = project::PekoBinaryReader::new(raw);
+        let mut reader = PekoBinaryReader::new(raw);
 
         let corrupt = |detail: &str| PekoError::CorruptBinary {
             path: binary_path.to_path_buf(),
@@ -1325,8 +1326,12 @@ pub fn compile_project(
         linked_files.push(objects_directory.join(format!("{}.o", file.file_id)));
     }
 
-    let Some(sysroot) = resolve_sysroot(peko_root, &target) else {
-        return Ok((imported_styles, None));
+    let resolved = match resolve_for_target(peko_root, &target) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            eprintln!("could not resolve toolchain for {}: {e}", target.to_triple());
+            return Ok((imported_styles, None));
+        }
     };
 
     progress.tick("Linking");
@@ -1334,7 +1339,8 @@ pub fn compile_project(
         target,
         objects_directory.join("__globals_set.o"),
         linked_files,
-        sysroot,
+        &resolved.toolchain,
+        &resolved.dir,
         binary_output,
         link_shared,
         entitlements,
@@ -1345,35 +1351,6 @@ pub fn compile_project(
     Ok((imported_styles, None))
 }
 
-/// Resolve the sysroot directory under `peko_root/Compiler/toolchains/` for
-/// `target`. Returns `None` when the target's OS/architecture combination
-/// isn't supported (e.g. the i686 architecture, no current toolchain).
-fn resolve_sysroot(peko_root: &Path, target: &PekoTarget) -> Option<PathBuf> {
-    use peko_core::target::{Architecture, OperatingSystem};
-
-    let toolchains = peko_root.join("Compiler/toolchains");
-    Some(match target.operating_system {
-        OperatingSystem::Android => toolchains.join("android"),
-        OperatingSystem::Windows => toolchains.join("windows"),
-        OperatingSystem::IOS => match target.architecture {
-            Architecture::Arm => toolchains.join("ios/arm64"),
-            Architecture::X86_64 => toolchains.join("ios/x86_64"),
-            _ => return None,
-        },
-        OperatingSystem::Linux => match target.architecture {
-            Architecture::Arm => toolchains.join("linux/arm"),
-            Architecture::X86_64 => toolchains.join("linux/x86_64"),
-            _ => return None,
-        },
-        OperatingSystem::MacOS => match target.architecture {
-            Architecture::Arm => toolchains.join("macos/arm64"),
-            Architecture::X86_64 => toolchains.join("macos/x86_64"),
-            _ => return None,
-        },
-        _ => return None,
-    })
-}
-
 /// `DiagnosticList::has_warnings()` substitute. (The current peko_core
 /// surface exposes `has_errors()`; this scans for warnings directly.)
 fn has_warnings(diagnostics: &DiagnosticList) -> bool {
@@ -1381,4 +1358,135 @@ fn has_warnings(diagnostics: &DiagnosticList) -> bool {
         .get_diagnostics()
         .iter()
         .any(|diag| matches!(diag.diagnostic_type, DiagnosticType::Warning))
+}
+
+// ---------------------------------------------------------------------------
+// PekoBinaryReader: streaming reader for the incremental .pkbin formats
+// ---------------------------------------------------------------------------
+
+/// Streaming reader over a `.pkbin` byte buffer.
+///
+/// Each `parse_*` method reads at the cursor and advances it. Tag and
+/// nullspace parses return a `bool` for matched or not matched. Typed reads
+/// return an `Option` and yield `None` when the cursor would run past the end
+/// of the buffer.
+struct PekoBinaryReader {
+    index: usize,
+    bytes: Vec<u8>,
+}
+
+impl PekoBinaryReader {
+    /// Creates a reader over the given bytes, starting at index 0.
+    fn new(bytes: Vec<u8>) -> PekoBinaryReader {
+        PekoBinaryReader { index: 0, bytes }
+    }
+
+    /// `true` if the cursor still points at a readable byte.
+    fn inbounds(&self) -> bool {
+        self.index < self.bytes.len()
+    }
+
+    /// `true` if the cursor has not moved past one-past-the-end. The inclusive
+    /// form confirms a completed advance stayed within the buffer.
+    fn inbounds_inclusive(&self) -> bool {
+        self.index <= self.bytes.len()
+    }
+
+    /// Skip past a magic tag. Returns `false` if the tag bytes do not match at
+    /// the cursor.
+    fn parse_magic(&mut self, magic: impl AsRef<str>) -> bool {
+        if !self.inbounds() {
+            return false;
+        }
+
+        for byte in magic.as_ref().bytes() {
+            if self.index >= self.bytes.len() || self.bytes[self.index] != byte {
+                return false;
+            }
+            self.index += 1;
+        }
+
+        self.inbounds_inclusive()
+    }
+
+    /// Skip past 8 null bytes, the block terminator.
+    fn parse_nullspace(&mut self) -> bool {
+        if !self.inbounds() {
+            return false;
+        }
+
+        for _ in 0..8 {
+            if self.index >= self.bytes.len() || self.bytes[self.index] != 0 {
+                return false;
+            }
+            self.index += 1;
+        }
+
+        self.inbounds_inclusive()
+    }
+
+    /// Parse one byte.
+    fn parse_u8(&mut self) -> Option<u8> {
+        if !self.inbounds() {
+            return None;
+        }
+        let byte_index = self.index;
+        self.index += 1;
+        if !self.inbounds_inclusive() {
+            return None;
+        }
+        Some(self.bytes[byte_index])
+    }
+
+    /// Parse a big-endian `u32`.
+    fn parse_u32(&mut self) -> Option<u32> {
+        let mut bytes_u32 = [0u8; 4];
+        for slot in &mut bytes_u32 {
+            if !self.inbounds() {
+                return None;
+            }
+            *slot = self.bytes[self.index];
+            self.index += 1;
+        }
+
+        if !self.inbounds_inclusive() {
+            return None;
+        }
+        Some(u32::from_be_bytes(bytes_u32))
+    }
+
+    /// Parse a byte-per-char string of the provided length.
+    ///
+    /// Each byte becomes one `char` in Latin-1 style, preserving the binary's
+    /// original encoding. Binary payloads are read with [`parse_bytes`].
+    ///
+    /// [`parse_bytes`]: PekoBinaryReader::parse_bytes
+    fn parse_string(&mut self, string_length: u32) -> Option<String> {
+        let mut string = String::new();
+        for _ in 0..string_length {
+            if !self.inbounds() {
+                return None;
+            }
+            string.push(self.bytes[self.index] as char);
+            self.index += 1;
+        }
+
+        if !self.inbounds_inclusive() {
+            return None;
+        }
+        Some(string)
+    }
+
+    /// Read `length` bytes out of the buffer and advance the cursor past them.
+    /// Returns `None` if fewer than `length` bytes remain.
+    fn parse_bytes(&mut self, length: u32) -> Option<Vec<u8>> {
+        let length = length as usize;
+        let end = self.index.checked_add(length)?;
+        if end > self.bytes.len() {
+            return None;
+        }
+        let slice = self.bytes[self.index..end].to_vec();
+        self.index = end;
+        Some(slice)
+    }
 }

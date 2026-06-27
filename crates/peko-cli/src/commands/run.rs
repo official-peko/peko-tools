@@ -28,9 +28,9 @@ use peko_core::target::PekoTarget;
 
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
-use crate::commands::toolchain_sysroot;
 use crate::execution::{self, incremental::ProjectIncrementalMap};
 use crate::project::PekoProject;
+use crate::toolchain::resolve_for_target;
 
 /// Execute the `run` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
@@ -48,6 +48,21 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     } else {
         "build/debug"
     });
+
+    // Resolve, download, and lock declared dependencies before compiling.
+    let progress = reporter.progress();
+    progress.start_phase("Resolving dependencies");
+    let ensured = crate::registry::install::ensure_dependencies(
+        cli_info.get_peko_root(),
+        project.get_root(),
+        progress,
+    )
+    .await;
+    progress.finish_phase();
+    if let Err(e) = ensured {
+        reporter.error(format!("could not resolve dependencies: {e}"));
+        return ExitCode::FAILURE;
+    }
 
     if project.ui_project_info.is_none() {
         // CLI projects exec a child and wait; Ctrl-C is delivered by
@@ -298,13 +313,12 @@ fn run_ui_project(
         return ExitCode::FAILURE;
     }
 
-    let Some(sysroot) = toolchain_sysroot(
-        cli_info.get_peko_root(),
-        &default_target.operating_system,
-        &default_target.architecture,
-    ) else {
-        reporter.error("unsupported host platform for `peko run`");
-        return ExitCode::FAILURE;
+    let resolved = match resolve_for_target(cli_info.get_peko_root(), &default_target) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            reporter.error(format!("could not resolve toolchain: {e}"));
+            return ExitCode::FAILURE;
+        }
     };
 
     let progress = reporter.progress();
@@ -336,7 +350,8 @@ fn run_ui_project(
         default_target,
         apprender_object,
         apprender_outcome.codegen_context.files_to_link.clone(),
-        sysroot.clone(),
+        &resolved.toolchain,
+        &resolved.dir,
         Some(apprender_executable.clone()),
         false,
         None,

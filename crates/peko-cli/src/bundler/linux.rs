@@ -21,6 +21,18 @@ use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 
+/// Load a toolchain's bundled-dylib sonames from its `toolchain.toml`.
+fn load_bundle_dylibs(toolchain_dir: &Path) -> BundleResult<Vec<String>> {
+    let path = toolchain_dir.join("toolchain.toml");
+    let toolchain = peko_core::config::Toolchain::load(&path).map_err(|source| {
+        BundleError::Toolchain {
+            path,
+            source: Box::new(source),
+        }
+    })?;
+    Ok(toolchain.link.bundle_dylibs)
+}
+
 /// Build a squashfs filesystem at `output_file` containing the project's
 /// compiled binary plus the AppImage-format metadata (`.desktop` file,
 /// `AppRun` script, icon, lib directory).
@@ -29,6 +41,7 @@ fn create_linux_squashfs(
     output_file: &Path,
     main_binary: &Path,
     toolchain_lib_dir: &Path,
+    bundle_dylibs: &[String],
     multiarch_triple: &str,
 ) -> BundleResult<()> {
     let mut filesystem_writer = backhand::FilesystemWriter::default();
@@ -281,102 +294,7 @@ fn create_linux_squashfs(
         .push_dir("usr/lib/gio/modules", filesystem_header)
         .unwrap();
 
-    let bundled_lib_sonames = [
-        // webkit core
-        "libwebkit2gtk-4.0.so.37",
-        "libjavascriptcoregtk-4.0.so.18",
-        // gtk stack
-        "libgtk-3.so.0",
-        "libgdk-3.so.0",
-        "libgdk_pixbuf-2.0.so.0",
-        "libatk-1.0.so.0",
-        // Accessibility. These must be bundled even though the host
-        // usually provides them: the host's versions are built against
-        // a newer glib and reference symbols (g_once_init_leave_pointer)
-        // that our bundled glib lacks. Letting the host atspi mix with
-        // our glib causes an undefined-symbol crash at startup, so we
-        // ship matching versions.
-        "libatk-bridge-2.0.so.0",
-        "libatspi.so.0",
-        // glib stack
-        "libglib-2.0.so.0",
-        "libgobject-2.0.so.0",
-        "libgio-2.0.so.0",
-        "libgmodule-2.0.so.0",
-        "libpcre.so.3",
-        // pango and text
-        "libpango-1.0.so.0",
-        "libpangocairo-1.0.so.0",
-        "libpangoft2-1.0.so.0",
-        "libharfbuzz.so.0",
-        "libharfbuzz-icu.so.0",
-        "libfribidi.so.0",
-        "libthai.so.0",
-        "libdatrie.so.1",
-        "libgraphite2.so.3",
-        "libfreetype.so.6",
-        "libfontconfig.so.1",
-        // cairo and rendering
-        "libcairo.so.2",
-        "libcairo-gobject.so.2",
-        "libpixman-1.so.0",
-        "libepoxy.so.0",
-        // networking
-        "libsoup-2.4.so.1",
-        // icu
-        "libicui18n.so.70",
-        "libicuuc.so.70",
-        "libicudata.so.70",
-        // xml/xslt
-        "libxml2.so.2",
-        "libxslt.so.1",
-        // fonts/web formats
-        "libwoff2dec.so.1.0.2",
-        "libwoff2common.so.1.0.2",
-        "libhyphen.so.0",
-        // image codecs
-        "libjpeg.so.8",
-        "libpng16.so.16",
-        "libwebp.so.7",
-        "libwebpdemux.so.2",
-        "libwebpmux.so.3",
-        // compression
-        "libbrotlidec.so.1",
-        "libbrotlicommon.so.1",
-        // sqlite
-        "libsqlite3.so.0",
-        // crypto used by webkit (not the host auth stack)
-        "libgcrypt.so.20",
-        "libgpg-error.so.0",
-        "libtasn1.so.6",
-        "libsecret-1.so.0",
-        // spellcheck
-        "libenchant-2.so.2",
-        // input devices
-        "libmanette-0.2.so.0",
-        "libgudev-1.0.so.0",
-        // gstreamer media stack
-        "libgstreamer-1.0.so.0",
-        "libgstbase-1.0.so.0",
-        "libgstapp-1.0.so.0",
-        "libgstallocators-1.0.so.0",
-        "libgstpbutils-1.0.so.0",
-        "libgstaudio-1.0.so.0",
-        "libgsttag-1.0.so.0",
-        "libgstvideo-1.0.so.0",
-        "libgstgl-1.0.so.0",
-        "libgstfft-1.0.so.0",
-        "liborc-0.4.so.0",
-        "liblcms2.so.2",
-        // libsecret required
-        "libblkid.so.1",
-        "libffi.so.8",
-        "libmount.so.1",
-        "libpcre2-8.so.0",
-        "libz.so.1",
-    ];
-
-    for soname in bundled_lib_sonames {
+    for soname in bundle_dylibs {
         let lib_source = toolchain_lib_dir.join(soname);
         // Skip libs that aren't in the toolchain rather than failing the
         // whole bundle. A missing lib shows up at runtime and is easier
@@ -649,12 +567,17 @@ pub fn bundle(
     let arm_lib_dir = toolchain_root.join("arm/lib");
     let x86_64_lib_dir = toolchain_root.join("x86_64/lib");
 
+    // The libraries to bundle come from each toolchain's `toolchain.toml`.
+    let arm_dylibs = load_bundle_dylibs(&toolchain_root.join("arm"))?;
+    let x86_64_dylibs = load_bundle_dylibs(&toolchain_root.join("x86_64"))?;
+
     let arm_squashfs = arm_build_dir.join("appdir.squashfs");
     create_linux_squashfs(
         project,
         &arm_squashfs,
         &arm_app_binary,
         &arm_lib_dir,
+        &arm_dylibs,
         "aarch64-linux-gnu",
     )?;
 
@@ -664,6 +587,7 @@ pub fn bundle(
         &x86_64_squashfs,
         &x86_64_app_binary,
         &x86_64_lib_dir,
+        &x86_64_dylibs,
         "x86_64-linux-gnu",
     )?;
 

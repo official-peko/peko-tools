@@ -1,39 +1,31 @@
-//! `peko pkg`: author and bundle host packages for distribution.
+//! `peko pkg`: author and pack library packages for distribution.
 //!
-//! Two subcommands:
-//!
-//! - `pkg new <name>` scaffolds a fresh package directory with a
-//!   `Package.json`, `README.md`, and an initial `v0.1.0` version
-//!   folder containing the standard `main.peko` / `deps.json` /
-//!   `libs/` / `source/` layout.
-//! - `pkg build` walks up to find the nearest enclosing package
-//!   directory, runs the binary builder, and writes the resulting
-//!   `.pkpkg` next to the current directory.
+//! - `pkg new <name>` scaffolds a fresh library: a `peko.toml` with
+//!   `[package]` and `[lib]`, plus a `source/lib.peko` entry.
+//! - `pkg build` packs the enclosing project into a `.pkpkg` container
+//!   (`zstd(tar(source))` with the verbatim `peko.toml` embedded) next to the
+//!   current directory.
 
-use std::io::{self, Seek};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use peko_core::packages::HostPackage;
+use peko_core::config::Manifest;
 
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
-use crate::packager::builder::PackageComponentBinaryBuilder;
+use crate::registry::pack;
 
-/// `Package.json` template used by `pkg new`. `{name}` is substituted
-/// at generation time.
-const PACKAGE_JSON_TEMPLATE: &str = r#"{
-    "name": "{name}",
-    "label": "<how your package will show up in searches>",
-    "latest": "v0.1.0",
-    "description": "",
-    "versions": ["v0.1.0"]
-}
-"#;
-
-/// Maximum depth of the parent walk that `pkg build` does to find an
-/// enclosing `Package.json`.
-const PACKAGE_SEARCH_LIMIT: usize = 5;
+/// The `peko.toml` scaffolded by `pkg new`. `{name}` is filled in at
+/// generation time.
+const PEKO_TOML_TEMPLATE: &str = "[package]\n\
+                                  name = \"{name}\"\n\
+                                  version = \"0.1.0\"\n\
+                                  description = \"\"\n\
+                                  \n\
+                                  [lib]\n\
+                                  root = \"source/lib.peko\"\n\
+                                  \n\
+                                  [dependencies]\n";
 
 /// Execute the `pkg` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
@@ -60,7 +52,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 }
 
-/// `pkg new <name>`: scaffold a fresh package directory.
+/// `pkg new <name>`: scaffold a fresh library package directory.
 fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let Some(package_name) = cli_info.arguments.get(2) else {
         reporter.error("`pkg new` requires a package name");
@@ -72,9 +64,6 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     };
 
     let package_folder = PathBuf::from(package_name);
-
-    // Clobber an existing folder/file at the same path only when
-    // --force is set.
     if package_folder.exists() {
         if !cli_info.flags.has_flag("force") {
             reporter.error(format!(
@@ -100,180 +89,80 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         }
     }
 
-    // Scaffold the package layout. Any IO failure aborts cleanly.
-    let dirs_to_create: &[&str] = &[".peko/packages", "v0.1.0/libs", "v0.1.0/source"];
-
-    for dir in dirs_to_create {
-        let path = package_folder.join(dir);
-        if let Err(e) = std::fs::create_dir_all(&path) {
-            reporter.error(format!("could not create {}: {e}", path.display()));
-            return ExitCode::FAILURE;
-        }
+    if let Err(e) = std::fs::create_dir_all(package_folder.join("source")) {
+        reporter.error(format!("could not create {}: {e}", package_folder.display()));
+        return ExitCode::FAILURE;
     }
 
-    // Files to write at scaffold time. Each is `(relative_path,
-    // contents)`. The Package.json gets its `{name}` placeholder filled
-    // in here.
-    let package_json = PACKAGE_JSON_TEMPLATE.replace("{name}", package_name);
-    let files_to_write: &[(&str, &[u8])] = &[
+    let manifest = PEKO_TOML_TEMPLATE.replace("{name}", package_name);
+    let files: &[(&str, &[u8])] = &[
+        ("peko.toml", manifest.as_bytes()),
         ("README.md", b""),
-        ("Package.json", package_json.as_bytes()),
-        ("v0.1.0/README.md", b""),
-        ("v0.1.0/main.peko", b""),
-        ("v0.1.0/deps.json", b"{}"),
+        ("source/lib.peko", b""),
     ];
-
-    for (rel_path, bytes) in files_to_write {
-        let path = package_folder.join(rel_path);
+    for (relative, bytes) in files {
+        let path = package_folder.join(relative);
         if let Err(e) = std::fs::write(&path, bytes) {
             reporter.error(format!("could not write {}: {e}", path.display()));
             return ExitCode::FAILURE;
         }
     }
 
-    let canonical = package_folder
-        .canonicalize()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| package_folder.display().to_string());
     reporter.success(format!(
-        "created new package '{package_name}' at {canonical}"
+        "created new package '{package_name}' at {}",
+        display_path(&package_folder)
     ));
     ExitCode::SUCCESS
 }
 
-/// `pkg build`: assemble a `.pkpkg` for the nearest enclosing package.
-fn execute_build(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
-    // Verify --version has a value if the flag was passed at all.
-    if cli_info.flags.has_flag("version") && cli_info.flags.get_flag("version").is_none() {
-        reporter.error("flag 'version' requires a value");
-        reporter.help(format!(
-            "run '{} help pkg' to see how this command works",
-            cli_info.executable
-        ));
-        return ExitCode::FAILURE;
-    }
-
-    // Walk up from the current directory looking for Package.json,
-    // bounded by PACKAGE_SEARCH_LIMIT levels.
-    let mut package_folder = match std::env::current_dir() {
-        Ok(d) => d,
+/// `pkg build`: pack the enclosing project into a `.pkpkg`.
+fn execute_build(_cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir,
         Err(e) => {
             reporter.error(format!("cannot read current directory: {e}"));
             return ExitCode::FAILURE;
         }
     };
-    let cwd = package_folder.clone();
-    let mut search_remaining = PACKAGE_SEARCH_LIMIT;
 
-    while search_remaining > 0
-        && package_folder.parent().is_some()
-        && !package_folder.join("Package.json").exists()
-    {
-        package_folder = package_folder
-            .parent()
-            .unwrap_or(&package_folder)
-            .to_path_buf();
-        search_remaining -= 1;
-    }
-
-    if !package_folder.join("Package.json").exists() {
-        reporter.error("couldn't find a Package.json in the current directory or its parents");
-        return ExitCode::FAILURE;
-    }
-
-    let package = match HostPackage::from_package_directory(&package_folder) {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            reporter.error(format!(
-                "could not load package from {}",
-                package_folder.display()
-            ));
-            return ExitCode::FAILURE;
-        }
+    let loaded = match Manifest::discover(&cwd) {
+        Ok(loaded) => loaded,
         Err(e) => {
-            reporter.error(format!(
-                "could not load package from {}: {e}",
-                package_folder.display()
-            ));
+            reporter.error(format!("could not load a peko.toml here: {e}"));
             return ExitCode::FAILURE;
         }
     };
 
     let progress = reporter.progress();
-    progress.start_phase(&format!("Building package {}", package.info.name));
-
-    let mut package_binary = match package.build_binary(cli_info.flags.get_flag("version")) {
-        Ok(tmp) => tmp,
+    progress.start_phase(&format!("Packing {}", loaded.manifest.name()));
+    let bytes = match pack::pack(&loaded) {
+        Ok(bytes) => bytes,
         Err(e) => {
             progress.finish_phase();
-            reporter.error(format!("could not build package binary: {e}"));
+            reporter.error(format!("could not pack package: {e}"));
             return ExitCode::FAILURE;
         }
     };
-
-    // Caller convention: seek to the start before reading the temp file.
-    if let Err(e) = package_binary.seek(io::SeekFrom::Start(0)) {
-        progress.finish_phase();
-        reporter.error(format!("could not rewind package binary: {e}"));
-        return ExitCode::FAILURE;
-    }
-
-    // Output: <pkgname>[_<version>].pkpkg, next to the current dir.
-    let version_suffix = cli_info
-        .flags
-        .get_flag("version")
-        .map(|v| format!("_{v}"))
-        .unwrap_or_default();
-    let package_binary_output = cwd.join(format!("{}{version_suffix}.pkpkg", package.info.name));
-
-    if package_binary_output.exists()
-        && let Err(e) = std::fs::remove_file(&package_binary_output)
-    {
-        progress.finish_phase();
-        reporter.error(format!(
-            "could not remove existing {}: {e}",
-            package_binary_output.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-
-    let mut output = match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&package_binary_output)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            progress.finish_phase();
-            reporter.error(format!(
-                "could not create {}: {e}",
-                package_binary_output.display()
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if let Err(e) = io::copy(&mut package_binary, &mut output) {
-        progress.finish_phase();
-        reporter.error(format!(
-            "could not write {}: {e}",
-            package_binary_output.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-
     progress.finish_phase();
 
-    let canonical = package_binary_output
-        .canonicalize()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| package_binary_output.display().to_string());
-    reporter.success(format!(
-        "built package {} to {}",
-        package.info.name, canonical
+    let output = cwd.join(format!(
+        "{}-{}.pkpkg",
+        loaded.manifest.name(),
+        loaded.manifest.version()
     ));
+    if let Err(e) = std::fs::write(&output, &bytes) {
+        reporter.error(format!("could not write {}: {e}", output.display()));
+        return ExitCode::FAILURE;
+    }
+
+    reporter.success(format!("packed package to {}", display_path(&output)));
     ExitCode::SUCCESS
+}
+
+/// The canonical display form of a path, falling back to its lexical form.
+fn display_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }

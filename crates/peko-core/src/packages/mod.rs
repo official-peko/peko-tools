@@ -1,331 +1,190 @@
 //! # Peko Core Packages
 //!
-//! Discovery and tracking of Pekoscript packages installed on the host.
+//! Discovery of installed Pekoscript packages in the registry source cache.
 //!
-//! Packages live in a `Packages/` directory inside a Peko root (either the
-//! global install location or a project-local one). Each package directory
-//! contains a `Package.json` manifest, optional `README.md` and `LICENSE`
-//! files, and one subdirectory per published version. Each version
-//! subdirectory must contain `main.peko` (entry point) and `deps.json`
-//! (dependency manifest).
-//!
-//! This module discovers those packages on disk and exposes them as
-//! [`ExternalModuleInfo`](crate::ExternalModuleInfo) values that the
-//! simulator can resolve imports against.
+//! Unpacked package source lives at
+//! `<peko_root>/registry/src/<name>/<name>-<version>/`. Each version directory
+//! holds a `peko.toml`. This module scans those directories and exposes them as
+//! [`ExternalModuleInfo`](crate::ExternalModuleInfo) values the simulator
+//! resolves imports against. A package's submodules and entry resolve within
+//! the source directory named by `[lib].root` in its manifest.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use crate::config::{LockSource, Lockfile, MANIFEST_FILE, Manifest};
+use crate::error::PekoResult;
+use crate::{ExternalModuleInfo, ExternalModuleVersion};
 
-use crate::ExternalModuleInfo;
-use crate::error::{PekoError, PekoResult, read_to_string};
-
-/// Entry-point file name expected inside every package version directory.
-const ENTRY_FILE_NAME: &str = "main.peko";
-
-/// Contents of a package's top-level `Package.json` manifest.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PackageJSON {
-    /// Module identifier used in `import` statements.
-    pub name: String,
-
-    /// Human-readable display name.
-    pub label: String,
-
-    /// Version string identifying the most recently published release. Should
-    /// also appear in [`versions`](Self::versions).
-    pub latest: String,
-
-    /// Free-form description shown in package listings.
-    pub description: String,
-
-    /// All published versions. Each must have a matching subdirectory under
-    /// the package's folder.
-    pub versions: Vec<String>,
-}
-
-/// Metadata for a single version of a host-installed package.
-#[derive(Clone, Debug)]
-pub struct HostPackageVersion {
-    /// Absolute path to this version's directory.
-    pub path: PathBuf,
-
-    /// Map from dependency name to required version string, sourced from
-    /// `deps.json`.
-    pub dependencies: HashMap<String, String>,
-
-    /// Per-version README contents, if a `README.md` exists in this version's
-    /// directory.
-    pub readme: Option<String>,
-}
-
-/// A discovered package on the host: its manifest, all its installed
-/// versions, and any top-level documentation.
-#[derive(Clone, Debug)]
-pub struct HostPackage {
-    /// Parsed `Package.json` manifest.
-    pub info: PackageJSON,
-
-    /// Absolute path to the package's root directory (the parent of each
-    /// version directory).
-    pub folder: PathBuf,
-
-    /// Per-version metadata keyed by version string. Each entry corresponds
-    /// to a version listed in [`info.versions`](PackageJSON::versions).
-    pub version_folders: HashMap<String, HostPackageVersion>,
-
-    /// Top-level `README.md` for the package, if present.
-    pub readme: Option<String>,
-
-    /// `LICENSE` file contents, if present.
-    pub license: Option<String>,
-}
-
-impl HostPackage {
-    /// Converts this package into an [`ExternalModuleInfo`] view suitable
-    /// for module-resolution at the simulator level.
-    #[must_use]
-    pub fn to_external_module(&self) -> ExternalModuleInfo {
-        ExternalModuleInfo {
-            module_name: self.info.name.clone(),
-            versions: self.info.versions.clone(),
-            description: self.info.description.clone(),
-            directory: self.folder.clone(),
-            entry_file_name: ENTRY_FILE_NAME.to_owned(),
-        }
-    }
-
-    /// Loads a [`HostPackage`] from a directory on disk.
-    ///
-    /// Distinguishes three outcomes:
-    ///
-    /// * `Ok(Some(pkg))`: `Package.json` was present, parsed, and every
-    ///   version directory it referenced existed with the expected
-    ///   `main.peko` and `deps.json` files.
-    /// * `Ok(None)`: no `Package.json` at the path. The directory is
-    ///   simply not a Peko package; callers iterating a packages folder
-    ///   can treat this as "skip silently."
-    /// * `Err(_)`: `Package.json` was present but unreadable or malformed,
-    ///   or a referenced version directory was incomplete. Returned as
-    ///   either [`PekoError::Io`] for filesystem failures or
-    ///   [`PekoError::PackageParse`] for JSON parse failures.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the package manifest or any associated
-    /// metadata file fails to read or parse.
-    pub fn from_package_directory(path: impl AsRef<Path>) -> PekoResult<Option<Self>> {
-        let path = path.as_ref();
-        let package_json_path = path.join("Package.json");
-
-        // No manifest -> not a package. Distinct from manifest-parse errors,
-        // which propagate as Err.
-        if !package_json_path.exists() {
-            return Ok(None);
-        }
-
-        let manifest_text = read_to_string(&package_json_path)?;
-        let package_json: PackageJSON =
-            serde_json::from_str(&manifest_text).map_err(|source| PekoError::PackageParse {
-                path: package_json_path.clone(),
-                source,
-            })?;
-
-        // Top-level README / LICENSE are optional (load if present).
-        let readme = if path.join("README.md").exists() {
-            Some(read_to_string(path.join("README.md"))?)
-        } else {
-            None
-        };
-        let license = if path.join("LICENSE").exists() {
-            Some(read_to_string(path.join("LICENSE"))?)
-        } else {
-            None
-        };
-
-        let mut local_package = HostPackage {
-            info: package_json.clone(),
-            folder: path.to_path_buf(),
-            version_folders: HashMap::new(),
-            readme,
-            license,
-        };
-
-        for version in &package_json.versions {
-            let version_folder = path.join(version);
-
-            // An incomplete version directory invalidates the whole
-            // package, bail with Ok(None) so it's not treated as a real
-            // error, just an unusable package.
-            if !version_folder.exists()
-                || !version_folder.join("main.peko").exists()
-                || !version_folder.join("deps.json").exists()
-            {
-                return Ok(None);
-            }
-
-            let deps_path = version_folder.join("deps.json");
-            let deps_text = read_to_string(&deps_path)?;
-            let dependencies: HashMap<String, String> =
-                serde_json::from_str(&deps_text).map_err(|source| PekoError::PackageParse {
-                    path: deps_path,
-                    source,
-                })?;
-
-            let version_readme_path = version_folder.join("README.md");
-            let readme = if version_readme_path.exists() {
-                Some(read_to_string(&version_readme_path)?)
-            } else {
-                None
-            };
-
-            local_package.version_folders.insert(
-                version.clone(),
-                HostPackageVersion {
-                    path: version_folder,
-                    dependencies,
-                    readme,
-                },
-            );
-        }
-
-        Ok(Some(local_package))
-    }
-}
-
-/// A directory of installed packages (either the global one or a
-/// project-local one).
-#[derive(Clone, Debug)]
-pub struct PackageRoot {
-    /// Path to the `Packages/` directory.
-    pub path: PathBuf,
-
-    /// All successfully discovered packages, keyed by their directory name.
-    pub installed_packages: HashMap<String, HostPackage>,
-}
-
-impl PackageRoot {
-    /// Scans `root_directory` for installed packages and returns the result.
-    ///
-    /// Each immediate subdirectory is treated as a candidate package and
-    /// loaded via [`HostPackage::from_package_directory`]. Subdirectories
-    /// without a `Package.json` are silently ignored. So are:
-    ///
-    /// * Per-entry I/O errors (a single broken `DirEntry` won't tank the
-    ///   whole scan).
-    /// * Non-UTF-8 directory names.
-    /// * Packages with malformed manifests or incomplete version
-    ///   directories (these come back as `Err` from
-    ///   `from_package_directory` and are dropped).
-    ///
-    /// Only a failure to open `root_directory` itself is propagated.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PekoError::Io`] when `root_directory` cannot be read.
-    pub fn from_directory(root_directory: impl AsRef<Path>) -> PekoResult<Self> {
-        let path = root_directory.as_ref().to_path_buf();
-
-        let mut root = PackageRoot {
-            path: path.clone(),
-            installed_packages: HashMap::new(),
-        };
-
-        let entries = std::fs::read_dir(&path).map_err(|source| PekoError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-        for entry in entries {
-            // Per-entry I/O errors and non-UTF-8 names are silently skipped
-            // so a single broken entry doesn't tank discovery.
-            let Ok(entry) = entry else { continue };
-            let package_dir = entry.path();
-
-            let Some(file_name) = package_dir.file_name() else {
-                continue;
-            };
-            let Some(package_name) = file_name.to_str() else {
-                continue;
-            };
-            let package_name = package_name.to_owned();
-
-            // A malformed individual package is dropped from this scan.
-            // The user can re-run with appropriate logging to surface it.
-            if let Ok(Some(host_package)) = HostPackage::from_package_directory(&package_dir) {
-                root.installed_packages.insert(package_name, host_package);
-            }
-        }
-
-        Ok(root)
-    }
-}
-
-/// Aggregated view of the global and project-local package directories.
+/// The registry source-cache root under a Peko root.
 ///
-/// Constructed at startup by the compiler driver and queried by the
-/// simulator when resolving `import` statements.
-#[derive(Clone, Debug)]
+/// Unpacked package source lives at `<peko_root>/registry/src`. The package
+/// installer and discovery resolve this path the same way.
+pub fn registry_source_root(peko_root: &Path) -> PathBuf {
+    peko_root.join("registry").join("src")
+}
+
+/// The unpacked source directory of a package version.
+///
+/// A version is stored at `registry/src/<name>/<name>-<version>`, so versions
+/// of one package coexist.
+pub fn registry_source_dir(peko_root: &Path, name: &str, version: &str) -> PathBuf {
+    registry_source_root(peko_root)
+        .join(name)
+        .join(format!("{name}-{version}"))
+}
+
+/// Aggregated view of installed packages discoverable for import resolution.
+///
+/// Constructed at startup by the compiler driver and the language server, then
+/// queried by the simulator when resolving `import` statements.
+#[derive(Clone, Debug, Default)]
 pub struct PekoPackageIndex {
-    global_packages: PackageRoot,
-    local_packages: Option<PackageRoot>,
+    modules: HashMap<String, ExternalModuleInfo>,
 }
 
 impl PekoPackageIndex {
-    /// Builds a fresh package index from a global Peko root and an optional
-    /// project-local one.
+    /// Build an index from a global Peko root and an optional project-local
+    /// one.
     ///
-    /// `global_peko_root.join("Packages")` is scanned for globally
-    /// installed packages; if `local_peko_root` is provided,
-    /// `local_peko_root.join("Packages")` is also scanned.
-    ///
-    /// Local packages override global ones with the same name in
-    /// [`Self::get_external_modules`].
+    /// Both roots are scanned under `registry/src`. A local install of a
+    /// package shadows its global counterpart.
     ///
     /// # Errors
     ///
-    /// Returns [`PekoError::Io`] when either of the resolved `Packages/`
-    /// directories cannot be read.
+    /// Returns `Ok` even when a root has no source cache yet; only a future
+    /// hard failure mode would surface an error.
     pub fn new(
         global_peko_root: impl AsRef<Path>,
         local_peko_root: Option<impl AsRef<Path>>,
     ) -> PekoResult<Self> {
-        let global_packages =
-            PackageRoot::from_directory(global_peko_root.as_ref().join("Packages"))?;
-
-        let local_packages = match local_peko_root {
-            Some(local_root) => Some(PackageRoot::from_directory(
-                local_root.as_ref().join("Packages"),
-            )?),
-            None => None,
-        };
-
-        Ok(Self {
-            global_packages,
-            local_packages,
-        })
+        let mut modules = HashMap::new();
+        scan_source_root(&registry_source_root(global_peko_root.as_ref()), &mut modules);
+        if let Some(local) = local_peko_root {
+            scan_source_root(&registry_source_root(local.as_ref()), &mut modules);
+        }
+        Ok(PekoPackageIndex { modules })
     }
 
-    /// Returns a flat name→info map of every discoverable external module.
+    /// Build an index scoped to a project's lockfile.
     ///
-    /// Global packages are added first; local packages then overwrite any
-    /// matching entries, so a project-local install of a package shadows
-    /// its global counterpart.
-    #[must_use]
-    pub fn get_external_modules(&self) -> HashMap<String, ExternalModuleInfo> {
-        let mut externals = HashMap::new();
-
-        for (package_name, package) in &self.global_packages.installed_packages {
-            externals.insert(package_name.clone(), package.to_external_module());
-        }
-
-        if let Some(local_packages) = &self.local_packages {
-            for (package_name, package) in &local_packages.installed_packages {
-                externals.insert(package_name.clone(), package.to_external_module());
+    /// Each locked package contributes exactly its pinned version: registry
+    /// packages from the source cache, path packages from their local
+    /// directory. Imports then resolve against the locked set rather than
+    /// whatever versions happen to be installed.
+    pub fn from_lockfile(
+        peko_root: &Path,
+        project_root: &Path,
+        lockfile: &Lockfile,
+    ) -> PekoPackageIndex {
+        let mut modules = HashMap::new();
+        for package in &lockfile.packages {
+            let version_dir = match package.source {
+                LockSource::Registry => {
+                    registry_source_dir(peko_root, &package.name, &package.version)
+                }
+                LockSource::Path => match &package.path {
+                    Some(path) => project_root.join(path),
+                    None => continue,
+                },
+            };
+            if let Some(info) = discover_single_version(&package.name, &version_dir) {
+                modules.insert(package.name.clone(), info);
             }
         }
-
-        externals
+        PekoPackageIndex { modules }
     }
+
+    /// A flat name to info map of every discoverable external module.
+    pub fn get_external_modules(&self) -> HashMap<String, ExternalModuleInfo> {
+        self.modules.clone()
+    }
+}
+
+/// Scan one `registry/src` root, inserting each discovered package.
+///
+/// Entries scanned from a later root overwrite earlier ones, so a local install
+/// shadows a global one. Unreadable directories and packages that carry no
+/// parseable version are skipped.
+fn scan_source_root(src_root: &Path, modules: &mut HashMap<String, ExternalModuleInfo>) {
+    let Ok(entries) = std::fs::read_dir(src_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let package_dir = entry.path();
+        if !package_dir.is_dir() {
+            continue;
+        }
+        let Some(name) = package_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if let Some(info) = discover_package(&name, &package_dir) {
+            modules.insert(name, info);
+        }
+    }
+}
+
+/// Build an [`ExternalModuleInfo`] for one package by reading every installed
+/// version's manifest.
+fn discover_package(name: &str, package_dir: &Path) -> Option<ExternalModuleInfo> {
+    let mut versions = Vec::new();
+    let mut description = String::new();
+
+    let entries = std::fs::read_dir(package_dir).ok()?;
+    for entry in entries.flatten() {
+        let version_dir = entry.path();
+        if !version_dir.is_dir() {
+            continue;
+        }
+        if let Some((found_description, version)) = read_version_dir(&version_dir) {
+            if description.is_empty() {
+                description = found_description;
+            }
+            versions.push(version);
+        }
+    }
+
+    if versions.is_empty() {
+        return None;
+    }
+    Some(ExternalModuleInfo::new(name.to_owned(), description, versions))
+}
+
+/// Build an [`ExternalModuleInfo`] for a single version directory.
+fn discover_single_version(name: &str, version_dir: &Path) -> Option<ExternalModuleInfo> {
+    let (description, version) = read_version_dir(version_dir)?;
+    Some(ExternalModuleInfo::new(
+        name.to_owned(),
+        description,
+        vec![version],
+    ))
+}
+
+/// Read one version directory's manifest into its description and an
+/// [`ExternalModuleVersion`].
+fn read_version_dir(version_dir: &Path) -> Option<(String, ExternalModuleVersion)> {
+    let loaded = Manifest::load(version_dir.join(MANIFEST_FILE)).ok()?;
+
+    let entry_path = loaded.entry();
+    let source_root = entry_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| version_dir.to_path_buf());
+    let entry_file = entry_path
+        .file_name()
+        .and_then(|file| file.to_str())
+        .unwrap_or("lib.peko")
+        .to_owned();
+
+    let description = loaded.manifest.description().to_owned();
+    let version = ExternalModuleVersion::new(
+        loaded.manifest.version().to_string(),
+        source_root,
+        entry_file,
+    );
+    Some((description, version))
 }

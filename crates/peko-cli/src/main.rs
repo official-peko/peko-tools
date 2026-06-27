@@ -8,10 +8,15 @@
 pub mod bundler;
 pub mod cli;
 pub mod execution;
-pub mod packager;
 pub mod project;
+pub mod registry;
+pub mod toolchain;
 
 pub mod commands;
+
+// TEMPORARY: local harness for testing the new package resolution. Remove once
+// resolution is validated. Activated by the global `--testtmp` flag.
+pub mod testtmp;
 
 use std::process::ExitCode;
 
@@ -45,6 +50,15 @@ async fn main() -> ExitCode {
         reporter.set_verbosity(Verbosity::Quiet);
     } else if cli_info.flags.has_flag("verbose") {
         reporter.set_verbosity(Verbosity::Verbose);
+    }
+
+    // ---- TEMPORARY: resolution test harness ------------------------------
+    //
+    // `--testtmp` short-circuits normal dispatch and runs the local
+    // resolution harness. Remove with the `testtmp` module once resolution
+    // is validated.
+    if cli_info.flags.has_flag("testtmp") {
+        return testtmp::run(&cli_info, &reporter).await;
     }
 
     // ---- No subcommand: print master help ------------------------------

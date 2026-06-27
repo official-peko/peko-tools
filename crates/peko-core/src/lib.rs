@@ -19,7 +19,7 @@
 //! Two error channels run in parallel:
 //!
 //! * [`PekoError`]: environmental failures from the tooling itself (I/O,
-//!   malformed `Package.json`, non-UTF-8 paths). Propagated via `Result`.
+//!   non-UTF-8 paths). Propagated via `Result`.
 //! * [`diagnostics::PekoDiagnostic`]: semantic findings about user source
 //!   code (syntax errors, type mismatches, unresolved references). Collected
 //!   into a [`diagnostics::DiagnosticList`] without halting the compiler.
@@ -39,6 +39,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod asts;
+pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod execution;
@@ -56,19 +57,26 @@ use std::path::PathBuf;
 
 /// Metadata describing an external (package-managed) Pekoscript module.
 ///
-/// Constructed by the package index when scanning the host's package directory,
+/// Constructed by the package index when scanning the registry source cache,
 /// or directly by the simulator when resolving a module relative to the current
 /// source file.
-#[derive(Clone, new)]
+#[derive(Clone, Debug, new)]
 pub struct ExternalModuleInfo {
     /// Module identifier as it appears in `import` statements.
     pub module_name: String,
-    /// All published versions of the module, newest first by convention.
-    pub versions: Vec<String>,
-    /// Free-form human-readable description from the module's `Package.json`.
+    /// Free-form human-readable description from the module's manifest.
     pub description: String,
-    /// Directory containing the module's source on disk.
-    pub directory: PathBuf,
-    /// File name (within `directory`) of the module's entry point.
-    pub entry_file_name: String,
+    /// One entry per installed version of the module.
+    pub versions: Vec<ExternalModuleVersion>,
+}
+
+/// One installed version of an external module.
+#[derive(Clone, Debug, new)]
+pub struct ExternalModuleVersion {
+    /// The version string from the module's manifest.
+    pub version: String,
+    /// The directory that the module's submodules and entry resolve within.
+    pub source_root: PathBuf,
+    /// The entry file name within `source_root`.
+    pub entry_file: String,
 }
