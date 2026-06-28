@@ -2421,6 +2421,26 @@ impl PekoValueSimulator for ObjectAccessAST {
 
         simulator_context.return_references = return_references;
 
+        // Reassigning an attribute on a `const` object is not allowed (21.2).
+        // An attribute set parses as `object.(attr = value)`, so the access
+        // node is a reassignment.
+        if matches!(self.access.as_ref(), PekoAST::VariableReassignment(_)) {
+            let object_type = object.get_type();
+            if object_type.is_const() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.object.get_start().clone(),
+                        self.access.get_end().clone(),
+                        format!(
+                            "cannot reassign an attribute on a `const` value of type `{object_type}`. A `const` value is immutable; cast it to a mutable type with `as` first",
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
         match self.access.as_ref() {
             // --- Method invocation --- //
             PekoAST::FunctionCall(function_call) => {
