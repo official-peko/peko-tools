@@ -109,18 +109,11 @@ pub enum TokenType {
     Arch,               // arch
     Style,              // style
 
-    // Built-in types
-    StringType,
-    BoolType,
-    CharType,
-    IntType,
-    Int16Type,
-    Int64Type,
-    Int128Type,
-    FloatType,
-    DoubleType,
+    // The only V2 FFI type spelled with its own keyword. The integer and
+    // float FFI types (`i1`, `i8`, `i16`, `i32`, `i64`, `i128`, `f16`, `f32`,
+    // `f64`) and `pointer<T>` lex as identifiers, as do the boxed value types
+    // (`number`, `string`, `bool`, `char`) defined in std::core.
     OpaqueType,
-    CStrType,
 
     // Details
     Comment,     // //
@@ -225,17 +218,7 @@ impl TokenType {
             Self::Style => "'style'",
 
             // Built-in types.
-            Self::StringType => "'string'",
-            Self::IntType => "'int'",
-            Self::Int16Type => "'int16'",
-            Self::Int64Type => "'int64'",
-            Self::Int128Type => "'int128'",
-            Self::FloatType => "'float'",
-            Self::DoubleType => "'double'",
-            Self::CharType => "'char'",
             Self::OpaqueType => "'opaque'",
-            Self::BoolType => "'bool'",
-            Self::CStrType => "'cstr'",
 
             // Comments.
             Self::Comment => "'//'",
@@ -645,17 +628,7 @@ impl TokenList {
                         "platform" => TokenType::Platform,
                         "arch" => TokenType::Arch,
                         "style" => TokenType::Style,
-                        "string" => TokenType::StringType,
-                        "int16" => TokenType::Int16Type,
-                        "int" => TokenType::IntType,
-                        "int64" => TokenType::Int64Type,
-                        "int128" => TokenType::Int128Type,
-                        "float" => TokenType::FloatType,
-                        "double" => TokenType::DoubleType,
-                        "char" => TokenType::CharType,
                         "opaque" => TokenType::OpaqueType,
-                        "bool" => TokenType::BoolType,
-                        "cstr" => TokenType::CStrType,
                         "gcsafe" => TokenType::GCSafe,
                         _ => TokenType::Identifier,
                     };

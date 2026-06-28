@@ -1088,7 +1088,7 @@ pub trait ExecutionContextAlgorithms<
         match peko_type.name() {
             // Built-in types obviously exist.
             "string" | "opaque" | "int" | "int16" | "int128" | "int64" | "float" | "double"
-            | "f16" | "char" | "bool" | "void" | "cstr" => true,
+            | "f16" | "char" | "bool" | "void" | "cstr" | "i1" | "i8" => true,
             _ => {
                 // Check generic types again -- perhaps the expanded type name
                 // exists as a generic type.
