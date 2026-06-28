@@ -170,7 +170,8 @@ impl PekoType {
         peko_type
     }
 
-    /// Wraps a type in `std::core::Option<T>`, preserving its source span.
+    /// Wraps a type in `Option<T>`, preserving its source span. `Option` is
+    /// resolved bare because std::core is unpacked into every module.
     #[must_use]
     pub fn option_of(inner: PekoType) -> PekoType {
         let start = inner.start_position.clone();
@@ -180,7 +181,7 @@ impl PekoType {
             kind: PekoTypeKind::Basic {
                 is_const: false,
                 info: PekoTypeInfo {
-                    module_names: vec!["std".to_string(), "core".to_string()],
+                    module_names: Vec::new(),
                     name: "Option".to_string(),
                     generics: vec![inner],
                 },

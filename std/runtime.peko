@@ -1,4 +1,47 @@
 //! std::runtime: the garbage collector and runtime entry points.
 //!
-//! The V2 home of the V1 Runtime interface. Auto-imported and used through the
-//! runtime prefix.
+//! Holds the compiler-emitted GC ABI, the GC lifecycle calls made from the
+//! program entry, and the typed allocation helper. The C implementations are
+//! compiled from the package's native sources. Auto-imported and used through
+//! the runtime prefix.
+//!
+//! The GC ABI declarations live here and nowhere else. Redeclaring them in
+//! another module produces duplicate symbols and undefined behavior.
+
+// ---------------------------------------------------------------------------
+// Compiler-emitted GC ABI
+// ---------------------------------------------------------------------------
+
+/// The source line of the current call point. Set automatically.
+[external] let current_line: int = 0;
+
+/// The source file of the current call point. Set automatically.
+[external] let current_file: cstr = cstring("");
+
+// Allocators return pointer<void> so freshly-allocated objects are born in
+// managed address space 1, giving the statepoint pass a clean base pointer.
+// descriptor and slot stay opaque (raw i8* at the C boundary).
+[external] fn peko_gc_alloc_object(descriptor: opaque, size: int) => pointer<void>;
+[external] fn peko_gc_alloc(size: int) => pointer<void>;
+[external] fn peko_gc_add_global_root(slot: opaque);
+[external] fn peko_gc_write_barrier(slot: opaque, value: opaque);
+
+// ---------------------------------------------------------------------------
+// GC lifecycle, driven from the program entry
+// ---------------------------------------------------------------------------
+
+[external notrack] fn pgc_init(heap_bytes: int) => int;
+[external notrack] fn pgc_shutdown();
+[external notrack] fn pgc_thread_attach();
+[external notrack] fn pgc_thread_detach();
+
+// ---------------------------------------------------------------------------
+// Allocation
+// ---------------------------------------------------------------------------
+
+/// Allocates a GC-managed array of `T` with the given element count. The
+/// __rt_peko_alloc built-in branches on `T`: a primitive `T` gets an atomic
+/// buffer, a managed `T` gets a traced buffer with a descriptor.
+[public] fn allocate<T>(amount: int) => pointer<T> {
+    return __rt_peko_alloc<T>(amount)
+}
