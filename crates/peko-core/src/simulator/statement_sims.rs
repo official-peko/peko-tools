@@ -70,6 +70,22 @@ impl PekoValueSimulator for VariableReassignmentAST {
 
         let current_file = simulator_context.get_current_file();
 
+        // A `const` binding cannot be reassigned through. Casting away const
+        // with `as` produces a fresh mutable value, which is not const.
+        if variable_type.is_const() {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.variable_reference.get_start().clone(),
+                    self.variable_value.get_end().clone(),
+                    format!(
+                        "cannot reassign through a `const` binding of type `{variable_type}`. A `const` value is immutable; cast it to a mutable type with `as` to get a reassignable copy",
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    current_file.clone(),
+                ));
+        }
+
         // Direct assignment: types must be similar.
         if !simulator_context.types_similar(&variable_value.get_type(), &variable_type)
             && self.assignment_operator.is_none()
