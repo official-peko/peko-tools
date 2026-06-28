@@ -30,7 +30,10 @@ pub struct NewVariableAST {
     pub constant: bool,
     pub name: PositionedValue<String>,
     pub variable_type: Option<types::PekoType>,
-    pub variable_value: Box<PekoAST>,
+    /// The initializer expression, or `None` for a typed declaration without
+    /// one (`let x: T`). An uninitialized binding must be definitely assigned
+    /// before it is read.
+    pub variable_value: Option<Box<PekoAST>>,
 }
 
 impl Spanned for NewVariableAST {

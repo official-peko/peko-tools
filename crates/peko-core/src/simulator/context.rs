@@ -170,6 +170,11 @@ pub struct PekoSimulatorContext {
     /// forward references that a single pass cannot see (24.2 rule 2).
     pub mutates_call_edges: Vec<(String, String, String, String)>,
 
+    /// Names of local bindings declared without an initializer that have not
+    /// yet been definitely assigned. Reading one is a use-before-init error
+    /// (the binding must be assigned on every path that reaches the read).
+    pub uninitialized_variables: std::collections::HashSet<String>,
+
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
 
@@ -311,6 +316,7 @@ impl PekoSimulatorContext {
             last_called_method_mutates: false,
             current_method_name: None,
             mutates_call_edges: Vec::new(),
+            uninitialized_variables: std::collections::HashSet::new(),
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),

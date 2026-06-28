@@ -12,6 +12,7 @@ use peko_core::asts::declarations::{
     ClassAST, ClosureAST, EnumDeclarationAST, FunctionDeclarationAST, ModuleCreationAST,
     NewVariableAST,
 };
+use peko_core::asts::{PekoAST, PlaceholderAST};
 use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::execution::data_structures::ExecutionModule;
@@ -41,8 +42,37 @@ impl PekoValueBuilder for NewVariableAST {
 
         // Local-scope path: stack-alloc, store, and add to the scope.
         if codegen_context.local_scope {
+            // An uninitialized declaration (`let x: T`) allocates a slot with
+            // no initial store; a later assignment fills it.
+            let Some(initializer) = &self.variable_value else {
+                let variable_type = self
+                    .variable_type
+                    .as_ref()
+                    .filter(|declared| codegen_context.type_exists(declared))
+                    .map(|declared| codegen_context.expand_type(declared).unwrap())
+                    .unwrap_or_else(PekoType::error_type);
+
+                let allocate_variable = codegen_context.build_stack_allocation(&variable_type);
+                let qualified_allocation =
+                    codegen_context.qualify_value_to_current(allocate_variable);
+                codegen_context.scoped_variables.insert(
+                    self.name.value.clone(),
+                    CodegenVariable::new(
+                        self.visibility.clone(),
+                        variable_type,
+                        qualified_allocation,
+                        None,
+                        codegen_context.module_context.current_module().clone(),
+                        None,
+                    ),
+                );
+
+                codegen_context.current_expected_type_options = previous_expected_type;
+                return codegen_context.create_null_pointer();
+            };
+
             codegen_context.expecting_value = true;
-            let mut variable_value = self.variable_value.build_value(codegen_context);
+            let mut variable_value = initializer.build_value(codegen_context);
             codegen_context.expecting_value = false;
 
             // `void` is not a value-bearing type.
@@ -50,8 +80,8 @@ impl PekoValueBuilder for NewVariableAST {
                 codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        self.variable_value.get_start().clone(),
-                        self.variable_value.get_end().clone(),
+                        initializer.get_start().clone(),
+                        initializer.get_end().clone(),
                         "variable value cannot be of type void".to_string(),
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
@@ -74,13 +104,13 @@ impl PekoValueBuilder for NewVariableAST {
                     ));
             } else if let Some(variable_type) = &self.variable_type {
                 let (previous_line, previous_file) = codegen_context.track_call_position(
-                    self.variable_value
+                    initializer
                         .as_ref()
                         .get_start()
                         .file
                         .to_string_lossy()
                         .into_owned(),
-                    self.variable_value.as_ref().get_start().line,
+                    initializer.as_ref().get_start().line,
                 );
 
                 let value_boxed = codegen_context.box_value_to_type(variable_type, &variable_value);
@@ -92,8 +122,8 @@ impl PekoValueBuilder for NewVariableAST {
                     None => {
                         codegen_context.diagnostics.report_diagnostic(
                             diagnostics::PekoDiagnostic::new(
-                                self.variable_value.get_start().clone(),
-                                self.variable_value.get_end().clone(),
+                                initializer.get_start().clone(),
+                                initializer.get_end().clone(),
                                 format!(
                                     "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
                                     variable_value.value_type,
@@ -264,7 +294,10 @@ impl PekoValueBuilder for NewVariableAST {
                 .globals_to_set
                 .push((
                     GlobalVariable::new(global_declaration, global_type, global_name, current_file),
-                    self.variable_value.as_ref().clone(),
+                    self.variable_value
+                        .as_ref()
+                        .map(|value| value.as_ref().clone())
+                        .unwrap_or_else(|| PekoAST::Placeholder(PlaceholderAST { value: String::new() })),
                 ));
         }
 

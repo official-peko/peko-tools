@@ -47,6 +47,44 @@ use super::value::SimulatorValue;
 /// * **Global scope**: the declared type is required (no inference
 ///   for globals). External variables go on the `extern` module's
 ///   variable list; everything else lives on the current module.
+impl NewVariableAST {
+    /// Registers a local binding into the current scope's symbol map (for
+    /// tooling) and the scoped-variable map (for resolution).
+    fn register_local(
+        &self,
+        simulator_context: &mut PekoSimulatorContext,
+        variable_type: types::PekoType,
+    ) {
+        if let Some(scope) = simulator_context.current_scope.as_mut() {
+            scope.write().unwrap().symbols.insert(
+                self.name.value.clone(),
+                ScopeSymbol::Variable(
+                    ScopeVariable::new(
+                        self.docinfo.clone(),
+                        self.name.value.clone(),
+                        variable_type.clone(),
+                        self.name.start.clone(),
+                        self.name.end.clone(),
+                        false,
+                    ),
+                    self.visibility.clone(),
+                ),
+            );
+        }
+
+        simulator_context.scoped_variables.insert(
+            self.name.value.clone(),
+            SimulatorVariable::new(
+                self.start.clone(),
+                self.visibility.clone(),
+                variable_type.clone(),
+                SimulatorValue::Value(variable_type),
+                simulator_context.module_context.current_module().clone(),
+            ),
+        );
+    }
+}
+
 impl PekoValueSimulator for NewVariableAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         // Set the expected type so the initializer's simulation knows
@@ -61,8 +99,75 @@ impl PekoValueSimulator for NewVariableAST {
 
         // Local-scope declarations: simulate value, type-check, register.
         if simulator_context.local_scope {
+            // A typed declaration may omit its initializer (`let x: T`). The
+            // binding is then uninitialized and must be definitely assigned
+            // before it is read.
+            let Some(initializer) = &self.variable_value else {
+                simulator_context.current_expected_type_options = previous_expected_type;
+
+                let Some(variable_type) = &self.variable_type else {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "a declaration without an initializer must have an explicit type, as in `let x: int`".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    return SimulatorValue::Value(types::PekoType::simple_type("default"));
+                };
+
+                let variable_type_exists = simulator_context.type_exists(variable_type);
+                if !variable_type_exists {
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            variable_type.start_position.clone(),
+                            variable_type.end_position.clone(),
+                            format!(
+                                "type `{}` is not defined. Check the type name and that the type is in scope",
+                                variable_type,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                }
+
+                // A `const` binding cannot be assigned after declaration, so it
+                // must be initialized where it is declared.
+                if variable_type.is_const() {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            format!(
+                                "`const` binding `{}` must have an initializer. A const value is immutable, so it cannot be assigned after declaration",
+                                self.name.value,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                }
+
+                let registered_type = if variable_type_exists {
+                    simulator_context
+                        .expand_type(variable_type)
+                        .unwrap_or_else(types::PekoType::error_type)
+                } else {
+                    types::PekoType::error_type()
+                };
+
+                self.register_local(simulator_context, registered_type);
+                simulator_context
+                    .uninitialized_variables
+                    .insert(self.name.value.clone());
+                return SimulatorValue::Value(types::PekoType::simple_type("default"));
+            };
+
             simulator_context.expecting_value = true;
-            let mut variable_value = self.variable_value.simulate(simulator_context);
+            let mut variable_value = initializer.simulate(simulator_context);
             simulator_context.expecting_value = false;
 
             // void is not a real value type.
@@ -70,8 +175,8 @@ impl PekoValueSimulator for NewVariableAST {
                 simulator_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        self.variable_value.get_start().clone(),
-                        self.variable_value.get_end().clone(),
+                        initializer.get_start().clone(),
+                        initializer.get_end().clone(),
                         "variable initializer cannot have type `void`. `void` is the type of expressions that produce no value, so a variable cannot be initialized to one".to_string(),
                         diagnostics::DiagnosticType::Error,
                         simulator_context.get_current_file(),
@@ -102,8 +207,8 @@ impl PekoValueSimulator for NewVariableAST {
                     {
                         simulator_context.diagnostics.report_diagnostic(
                             diagnostics::PekoDiagnostic::new(
-                                self.variable_value.get_start().clone(),
-                                self.variable_value.get_end().clone(),
+                                initializer.get_start().clone(),
+                                initializer.get_end().clone(),
                                 format!(
                                     "cannot assign a `const` value of type `{}` to a non-const binding of type `{}`. Casting away const requires an explicit `as`",
                                     variable_value.get_type(),
@@ -122,8 +227,8 @@ impl PekoValueSimulator for NewVariableAST {
                 } else {
                     simulator_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
-                            self.variable_value.get_start().clone(),
-                            self.variable_value.get_end().clone(),
+                            initializer.get_start().clone(),
+                            initializer.get_end().clone(),
                             format!(
                                 "cannot assign value of type `{}` to variable of type `{}`. The right-hand side type is not compatible with the variable's declared type",
                                 variable_value.get_type(),
@@ -137,36 +242,11 @@ impl PekoValueSimulator for NewVariableAST {
                 }
             }
 
-            // Register the binding into the current scope's symbol map.
-            if let Some(scope) = simulator_context.current_scope.as_mut() {
-                scope.write().unwrap().symbols.insert(
-                    self.name.value.clone(),
-                    ScopeSymbol::Variable(
-                        ScopeVariable::new(
-                            self.docinfo.clone(),
-                            self.name.value.clone(),
-                            variable_value.get_type(),
-                            self.name.start.clone(),
-                            self.name.end.clone(),
-                            false,
-                        ),
-                        self.visibility.clone(),
-                    ),
-                );
-            }
-
-            // Register the binding into the current block's
-            // scoped-variable map so later expressions can find it.
-            simulator_context.scoped_variables.insert(
-                self.name.value.clone(),
-                SimulatorVariable::new(
-                    self.start.clone(),
-                    self.visibility.clone(),
-                    variable_value.get_type(),
-                    SimulatorValue::Value(variable_value.get_type()),
-                    simulator_context.module_context.current_module().clone(),
-                ),
-            );
+            // An initialized binding is definitely assigned.
+            self.register_local(simulator_context, variable_value.get_type());
+            simulator_context
+                .uninitialized_variables
+                .remove(&self.name.value);
 
             simulator_context.current_expected_type_options = previous_expected_type;
             return SimulatorValue::Value(types::PekoType::simple_type("default"));
