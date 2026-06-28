@@ -224,6 +224,8 @@ impl LlvmTypeBuilder for PekoCodegenContext {
                     "f16" => core::LLVMHalfType(),
                     "char" => core::LLVMInt8Type(),
                     "bool" => core::LLVMInt1Type(),
+                    "i1" => core::LLVMInt1Type(),
+                    "i8" => core::LLVMInt8Type(),
                     "void" => core::LLVMVoidType(),
                     _ => panic!("error should not be reached"),
                 }

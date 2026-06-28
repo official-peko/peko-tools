@@ -1,8 +1,33 @@
 //! std::core: the root object model and the fundamental value types.
 //!
-//! Holds the root Object type and Option (value, None, Error). The boxed
-//! number, string, bool, and char types and the core traits are added as the
-//! object model and trait mechanism land. Auto-imported and used bare.
+//! Holds the root Object type, Option (value, None, Error), and the boxed
+//! value types number, string, bool, and char. The core traits arrive with
+//! the trait mechanism. Auto-imported and used bare.
+//!
+//! The boxed value types hold a raw FFI scalar. They are minimal wrappers for
+//! now: the compiler routes number, string, bool, and char literals into them
+//! once the boxing is wired.
+
+/// The boxed numeric value type. Wraps a raw machine scalar.
+[public] class number {
+    raw: i64
+}
+
+/// The boxed boolean value type.
+[public] class bool {
+    raw: i1
+}
+
+/// The boxed character value type. One scalar code point.
+[public] class char {
+    raw: i8
+}
+
+/// The boxed string value type. A GC-managed byte buffer with a length.
+[public] class string {
+    data: pointer<i8>
+    length: i64
+}
 
 /// The root type every class inherits from.
 [public] class Object {

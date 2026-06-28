@@ -183,20 +183,23 @@ fn test_identifiers() {
 
 #[test]
 fn test_builtin_types() {
-    let test_types = "string int int64 float double char opaque bool";
+    // `opaque` is the only type spelled with its own keyword. The FFI scalars
+    // and the boxed value types lex as plain identifiers.
+    let test_types = "i32 i64 f32 f64 string bool char number opaque";
     let type_tokens = [
-        TokenType::StringType,
-        TokenType::IntType,
-        TokenType::Int64Type,
-        TokenType::FloatType,
-        TokenType::DoubleType,
-        TokenType::CharType,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
+        TokenType::Identifier,
         TokenType::OpaqueType,
-        TokenType::BoolType,
     ];
     let type_list = TokenList::from_source(test_types, "");
 
-    assert_eq!(type_list.length(), 8);
+    assert_eq!(type_list.length(), 9);
 
     for ((tok, expected_value), expected_type) in type_list
         .tokens

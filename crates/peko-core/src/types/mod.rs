@@ -813,7 +813,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "int" | "int16" | "int128" | "int64" | "float" | "double" | "f16" | "bool"
+            "int" | "int16" | "int128" | "int64" | "float" | "double" | "f16" | "bool" | "i1"
         )
     }
 
@@ -827,7 +827,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "int" | "int16" | "int128" | "int64" | "char" | "bool"
+            "int" | "int16" | "int128" | "int64" | "char" | "bool" | "i1" | "i8"
         )
     }
 
@@ -848,6 +848,8 @@ impl PekoType {
                 | "cstr"
                 | "opaque"
                 | "void"
+                | "i1"
+                | "i8"
         ) || self.is_function()
     }
 
@@ -933,6 +935,8 @@ impl PekoType {
                 | "bool"
                 | "opaque"
                 | "void"
+                | "i1"
+                | "i8"
         )
     }
 
@@ -1164,8 +1168,8 @@ impl fmt::Display for PekoType {
 /// through unchanged.
 fn canonical_builtin_name(name: String) -> String {
     match name.as_str() {
-        "i1" => String::from("bool"),
-        "i8" => String::from("char"),
+        // `i1` and `i8` are distinct FFI scalars: `bool` and `char` are their
+        // boxed object wrappers, defined in std::core.
         "i16" => String::from("int16"),
         "i32" => String::from("int"),
         "i64" => String::from("int64"),
@@ -1180,23 +1184,10 @@ fn canonical_builtin_name(name: String) -> String {
 /// Returns `true` if a token type can introduce or continue a type name.
 ///
 /// Type names can be plain identifiers or any of the keyword tokens that
-/// double as built-in type names (`string`, `int`, `bool`, etc.).
+/// double as the one built-in type keyword (`opaque`). The FFI scalars and the
+/// boxed value types lex as identifiers.
 fn is_type_name_token(ty: &lexer::TokenType) -> bool {
-    matches!(
-        ty,
-        TokenType::Identifier
-            | TokenType::StringType
-            | TokenType::Int64Type
-            | TokenType::IntType
-            | TokenType::Int16Type
-            | TokenType::Int128Type
-            | TokenType::BoolType
-            | TokenType::CharType
-            | TokenType::FloatType
-            | TokenType::DoubleType
-            | TokenType::OpaqueType
-            | TokenType::CStrType
-    )
+    matches!(ty, TokenType::Identifier | TokenType::OpaqueType)
 }
 
 /// Lookahead variant of the depth-suffix loop used by
