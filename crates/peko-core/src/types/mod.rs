@@ -1021,6 +1021,7 @@ impl PekoType {
         const FUNCTION_TYPE: &str = "$$$__";
         const REFERENCE: &str = "$_$_$";
         const POINTER: &str = "_$_$_";
+        const CONST: &str = "$_const_$";
 
         let mut final_type = String::new();
 
@@ -1073,6 +1074,10 @@ impl PekoType {
         }
         for _ in 0..self.array_depth {
             final_type.push_str(POINTER);
+        }
+
+        if self.is_const() {
+            final_type.insert_str(0, CONST);
         }
 
         final_type
@@ -1135,6 +1140,10 @@ impl fmt::Display for PekoType {
         }
         for _ in 0..self.array_depth {
             final_type.push_str("[]");
+        }
+
+        if self.is_const() {
+            final_type.insert_str(0, "const ");
         }
 
         f.write_str(&final_type)
