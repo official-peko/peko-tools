@@ -150,6 +150,11 @@ pub struct PekoSimulatorContext {
     /// decide which it is.
     pub expecting_value: bool,
 
+    /// Set true while simulating a method body when the body reassigns an
+    /// attribute of `this`. Read after the body to auto-mark the method
+    /// `[mutates]`.
+    pub current_method_mutates: bool,
+
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
 
@@ -287,6 +292,7 @@ impl PekoSimulatorContext {
             current_return_type: None,
             current_expected_type_options: None,
             expecting_value: false,
+            current_method_mutates: false,
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),
@@ -1716,6 +1722,13 @@ impl
         if method.visibility.private && self.current_this.is_none() {
             return Err(format!(
                 "cannot call private method `{method_name_str}` on type `{object_value_type}` from outside the class. Private methods are only accessible from other methods of the same class",
+            ));
+        }
+
+        // A `[mutates]` method cannot be called on a `const` value (21.2).
+        if object_value_type.is_const() && method.visibility.mutates {
+            return Err(format!(
+                "cannot call `[mutates]` method `{method_name_str}` on a `const` value of type `{object_value_type}`. A const value is immutable; cast it to a mutable type with `as` first",
             ));
         }
 

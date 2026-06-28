@@ -2059,6 +2059,12 @@ impl PekoValueSimulator for ClassAST {
                 }
             }
 
+            // Track whether this method's body reassigns an attribute of
+            // `this`, seeding from any hand-written `[mutates]` modifier.
+            let previous_method_mutates = simulator_context.current_method_mutates;
+            simulator_context.current_method_mutates =
+                class_method.get_info().visibility.mutates;
+
             // Simulate the method body and check for unreachable code.
             let mut branch_exits = false;
             let mut branch_returns = false;
@@ -2113,6 +2119,60 @@ impl PekoValueSimulator for ClassAST {
             simulator_context.current_return_type = previous_return_type;
 
             simulator_context.current_this = current_this;
+
+            // Persist the inferred `[mutates]` onto the matching vtable
+            // overload so call sites and codegen can read it. The overload is
+            // matched by signature, the same way phase 2 builds the table.
+            if simulator_context.current_method_mutates {
+                let class_ref = simulator_context
+                    .module_context
+                    .current_module()
+                    .read()
+                    .unwrap()
+                    .classes[&self.class_name.value]
+                    .clone();
+
+                let overloads = class_ref.read().unwrap().main_virtual_table.methods
+                    [&class_method.get_info().name.value]
+                    .clone();
+
+                let ast_argument_types: Vec<PekoType> = class_method
+                    .get_info()
+                    .arguments
+                    .iter()
+                    .map(|(_, argument)| argument.argument_type.clone())
+                    .collect();
+
+                for overload in &overloads {
+                    let overload_argument_types: Vec<PekoType> = overload
+                        .read()
+                        .unwrap()
+                        .arguments
+                        .iter()
+                        .map(|(_, argument)| argument.argument_type.clone())
+                        .collect();
+
+                    if overload_argument_types.len() != ast_argument_types.len() {
+                        continue;
+                    }
+
+                    let mut signatures_equal = true;
+                    for (vtable_type, ast_type) in
+                        overload_argument_types.iter().zip(ast_argument_types.iter())
+                    {
+                        if !simulator_context.types_equal(vtable_type, ast_type) {
+                            signatures_equal = false;
+                            break;
+                        }
+                    }
+
+                    if signatures_equal {
+                        overload.write().unwrap().visibility.mutates = true;
+                    }
+                }
+            }
+
+            simulator_context.current_method_mutates = previous_method_mutates;
         }
 
         // Collect the first-constructor arguments (or attribute list
