@@ -44,7 +44,7 @@ fn test_constants() {
 #[test]
 fn test_visibility_keywords() {
     let keywords =
-        "const state external private constant public notrack blockexit hide variadic mutator";
+        "const state external private constant public notrack blockexit hide variadic mutates";
     let keyword_types = [
         TokenType::Const,
         TokenType::State,
@@ -56,7 +56,7 @@ fn test_visibility_keywords() {
         TokenType::Blockexit,
         TokenType::Hide,
         TokenType::Variadic,
-        TokenType::Mutator,
+        TokenType::Mutates,
     ];
     let keyword_list = TokenList::from_source(keywords, "");
 

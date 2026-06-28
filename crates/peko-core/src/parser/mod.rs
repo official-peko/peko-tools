@@ -647,7 +647,7 @@ impl PekoParser {
                 lexer::TokenType::Blockexit => blockexit = true,
                 lexer::TokenType::Hide => hidden = true,
                 lexer::TokenType::State => state = true,
-                lexer::TokenType::Mutator => mutates = true,
+                lexer::TokenType::Mutates => mutates = true,
                 lexer::TokenType::GCSafe => gcsafe = true,
                 _ => {}
             }
