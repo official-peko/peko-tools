@@ -170,6 +170,8 @@ fn from_string_roundtrips_through_display() {
         "int",
         "int[]",
         "&int",
+        "const int",
+        "const Foo<int>",
         "module::Foo<int, string>",
         "closure(int, string) => bool",
         "(int)(string, bool)",
