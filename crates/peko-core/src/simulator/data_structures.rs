@@ -29,7 +29,7 @@ use crate::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use crate::execution::data_structures::{
     ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
     ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionVariable,
+    ExecutionVariable, TraitDefinition,
 };
 use crate::types::{self, PekoType};
 
@@ -489,6 +489,10 @@ pub struct SimulatorModule {
     /// Enums, keyed by name, holding their variant names in declaration
     /// order. Enums are immutable once declared, so they are stored by value.
     pub enums: IndexMap<String, Vec<String>>,
+
+    /// Traits, keyed by name. Traits are immutable once declared, so they are
+    /// stored by value.
+    pub traits: IndexMap<String, TraitDefinition>,
 }
 
 impl SimulatorModule {
@@ -623,6 +627,14 @@ impl
 
     fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
         &mut self.enums
+    }
+
+    fn get_traits(&self) -> &IndexMap<String, TraitDefinition> {
+        &self.traits
+    }
+
+    fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition> {
+        &mut self.traits
     }
 
     fn get_class_generics_mut(

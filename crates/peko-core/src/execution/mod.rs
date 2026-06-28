@@ -31,7 +31,7 @@ use std::sync::{Arc, RwLock};
 use data_structures::{
     ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
     ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionValue, ExecutionVariable,
+    ExecutionValue, ExecutionVariable, TraitDefinition,
 };
 use indexmap::IndexMap;
 
@@ -280,6 +280,33 @@ pub trait ExecutionContextAlgorithms<
             .unwrap()
             .get_enums_mut()
             .insert(enum_name, variants);
+    }
+
+    /// The trait definition registered under `trait_name`, or `None` when no
+    /// trait by that name is reachable from the current module. Walks up the
+    /// module tree, mirroring how class and enum names resolve.
+    fn get_trait(&self, trait_name: &str) -> Option<TraitDefinition> {
+        let mut current = self.get_module_context().current_module();
+
+        loop {
+            if let Some(definition) = current.read().unwrap().get_traits().get(trait_name) {
+                return Some(definition.clone());
+            }
+
+            let parent = current.read().unwrap().get_parent()?.clone();
+            current = parent;
+        }
+    }
+
+    /// Registers a trait definition in the current module so its name resolves
+    /// as a type and classes can declare conformance to it.
+    fn register_trait(&mut self, definition: TraitDefinition) {
+        self.get_module_context()
+            .current_module()
+            .write()
+            .unwrap()
+            .get_traits_mut()
+            .insert(definition.name.clone(), definition);
     }
 
     /// The `this` binding active in the current scope (set when inside a
@@ -859,6 +886,14 @@ pub trait ExecutionContextAlgorithms<
             return Some(type1);
         }
 
+        // Traits are terminal named types. A value of trait type is a fat
+        // pointer (self plus witness). A trait has no class body or modules to
+        // expand, so it expands to itself.
+        if self.get_trait(type1.name()).is_some() {
+            type1.fully_expanded = true;
+            return Some(type1);
+        }
+
         // For any generic type within this type, expand that.
         // e.g. standard::Map<String, File> -> standard::Map<standard::String, fs::File>.
         //
@@ -1096,6 +1131,10 @@ pub trait ExecutionContextAlgorithms<
                     self.type_exists(&self.get_generic_types()[peko_type.name()].clone())
                 } else if self.get_enum_variants(peko_type.name()).is_some() {
                     // Enums are user-defined named types backed by an integer.
+                    true
+                } else if self.get_trait(peko_type.name()).is_some() {
+                    // Traits are usable as types: a value of trait type is a
+                    // fat pointer (self plus witness).
                     true
                 } else {
                     // Otherwise, the type must be user-defined. `get_class_by_type`

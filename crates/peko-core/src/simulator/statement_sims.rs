@@ -1357,6 +1357,7 @@ impl PekoValueSimulator for ImportStatementAST {
                 Arc::clone(&scope_reference),
                 Vec::new(),
                 IndexMap::new(),
+                IndexMap::new(),
             )));
 
             let previous_scope = simulator_context.current_scope.as_ref().map(Arc::clone);

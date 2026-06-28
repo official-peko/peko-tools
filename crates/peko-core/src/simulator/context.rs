@@ -268,6 +268,7 @@ impl PekoSimulatorContext {
             Arc::clone(&main_scope),
             Vec::new(),
             IndexMap::new(),
+            IndexMap::new(),
         )));
 
         let extern_scope_pos = PositionData {
@@ -299,6 +300,7 @@ impl PekoSimulatorContext {
             IndexMap::new(),
             Arc::clone(&extern_scope),
             Vec::new(),
+            IndexMap::new(),
             IndexMap::new(),
         )));
 
@@ -675,6 +677,7 @@ impl PekoSimulatorContext {
                     submodule.read().unwrap().function_generics.clone(),
                     submodule.read().unwrap().scope.clone(),
                     Vec::new(),
+                    IndexMap::new(),
                     IndexMap::new(),
                 )))
             } else {
