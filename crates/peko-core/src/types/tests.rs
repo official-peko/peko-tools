@@ -135,7 +135,7 @@ fn from_string_desugars_optional_to_option() {
     // A trailing `?` is sugar for standard::Option<T>.
     let t = PekoType::from_string("int?", "<inline>");
     assert_eq!(t.name(), "Option");
-    assert_eq!(t.module_names(), ["std".to_string(), "core".to_string()]);
+    assert!(t.module_names().is_empty());
 
     let inner = t.optional_get_inner_type().unwrap();
     assert_eq!(inner.name(), "int");

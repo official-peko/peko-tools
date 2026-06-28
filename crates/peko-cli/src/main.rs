@@ -75,6 +75,16 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // `--astir-std "<source>"` is the same harness but loads the std package
+    // from `std/peko.toml` and prepends the implicit import prelude, so a
+    // snippet can resolve std::core, optionals, and the bare Object/Option.
+    if cli_info.flags.has_flag("astir-std") {
+        let source = cli_info.arguments.first().cloned().unwrap_or_default();
+        let diagnostics = execution::simulate_snippet_with_std(&source);
+        reporter.report_diagnostics(&diagnostics);
+        return ExitCode::SUCCESS;
+    }
+
     // ---- No subcommand: print master help ------------------------------
     if cli_info.arguments.is_empty() {
         print_master_help(&cli_info.executable);

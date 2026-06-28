@@ -1528,6 +1528,9 @@ impl PekoValueSimulator for ClassAST {
 
                         found_constructor = true;
                     }
+                } else {
+                    // No parent to walk to, so the inheritance search ends.
+                    parent = None;
                 }
             }
 

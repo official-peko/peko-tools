@@ -321,6 +321,67 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
     (ir, diagnostics)
 }
 
+/// Simulate a snippet with the std package loaded and the implicit import
+/// prelude prepended, returning the merged parse and analysis diagnostics.
+///
+/// Loads `std/peko.toml` relative to the working directory, registers it as
+/// the `std` external module, and prepends [`default_imports`]. Used to verify
+/// that std::core, optionals, and the bare `Object`/`Option` resolve end to
+/// end at the analysis level, without the codegen and link steps.
+pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
+    let mut diagnostics = DiagnosticList::new();
+    let file = PathBuf::from("<astir-std>.peko");
+    let work_dir = std::env::temp_dir();
+
+    // Load the std package and register it as an external module.
+    let mut external_modules = HashMap::new();
+    match peko_core::config::Manifest::load("std/peko.toml") {
+        Ok(loaded) => {
+            let info = loaded.manifest.to_external_module(&loaded.root);
+            external_modules.insert(info.module_name.clone(), info);
+        }
+        Err(error) => {
+            eprintln!("could not load std/peko.toml: {error}");
+        }
+    }
+
+    // Parse with the V2 import prelude prepended.
+    let mut asts = default_imports();
+    let mut parser = PekoParser::new(TokenList::from_source(source, &file), &file);
+    while !parser.tokens.finished() {
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+        if parser.tokens.finished() {
+            break;
+        }
+        asts.push(parser.parse());
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+    }
+    for diagnostic in parser.get_diagnostics().get_diagnostics() {
+        diagnostics.report_diagnostic(diagnostic.clone());
+    }
+
+    // Simulate with the std modules available for import resolution.
+    let end = asts
+        .last()
+        .map(|ast| ast.get_end().clone())
+        .unwrap_or_else(|| PositionData::new(1, 0, 1, file.clone()));
+    let mut simulator =
+        PekoSimulatorContext::new(PekoTarget::default(), file.clone(), end, work_dir);
+    simulator.external_modules = external_modules;
+    for ast in &asts {
+        ast.simulate(&mut simulator);
+    }
+    for diagnostic in simulator.diagnostics.get_diagnostics() {
+        diagnostics.report_diagnostic(diagnostic.clone());
+    }
+
+    diagnostics
+}
+
 /// Codegen the default-import modules without compiling any user source.
 ///
 /// Used by commands that need the runtime / standard library available as
