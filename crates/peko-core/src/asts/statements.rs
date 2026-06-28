@@ -99,6 +99,41 @@ impl Spanned for IfStatementAST {
     }
 }
 
+/// One arm of a `switch`: a pattern and the body run when it matches.
+///
+/// `pattern` is the `Enum::Variant` expression to match, or `None` for the
+/// `_ =>` default arm that catches every remaining variant.
+#[derive(Clone, new)]
+pub struct SwitchArm {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub pattern: Option<Box<PekoAST>>,
+    pub body: PositionedValue<Vec<PekoAST>>,
+}
+
+/// A `switch` over an enum: matches the subject against variant arms.
+///
+/// `arms` carries every `Enum::Variant => { ... }` arm and the optional
+/// `_ => { ... }` default in source order. A switch must cover every variant
+/// or include the default arm.
+#[derive(Clone, new)]
+pub struct SwitchStatementAST {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub subject: Box<PekoAST>,
+    pub arms: Vec<SwitchArm>,
+}
+
+impl Spanned for SwitchStatementAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
 /// A `while` loop with a single conditional body.
 #[derive(Clone, new)]
 pub struct WhileLoopAST {

@@ -485,6 +485,10 @@ pub struct SimulatorModule {
     /// Other modules that imported this one. Used for cycle detection
     /// during the import resolution pass.
     pub imported_by: Vec<Arc<RwLock<SimulatorModule>>>,
+
+    /// Enums, keyed by name, holding their variant names in declaration
+    /// order. Enums are immutable once declared, so they are stored by value.
+    pub enums: IndexMap<String, Vec<String>>,
 }
 
 impl SimulatorModule {
@@ -611,6 +615,14 @@ impl
 
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<SimulatorClass>>> {
         &mut self.classes
+    }
+
+    fn get_enums(&self) -> &IndexMap<String, Vec<String>> {
+        &self.enums
+    }
+
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
+        &mut self.enums
     }
 
     fn get_class_generics_mut(

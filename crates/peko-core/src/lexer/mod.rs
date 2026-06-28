@@ -89,6 +89,8 @@ pub enum TokenType {
     DangerCast,         // danger_cast
     Return,             // return
     Class,              // class
+    Enum,               // enum
+    Switch,             // switch
     From,               // from
     Constructor,        // constructor
     Super,              // super
@@ -202,6 +204,8 @@ impl TokenType {
             Self::DangerCast => "'danger_cast'",
             Self::Return => "'return'",
             Self::Class => "'class'",
+            Self::Enum => "'enum'",
+            Self::Switch => "'switch'",
             Self::From => "'from'",
             Self::Constructor => "'constructor'",
             Self::Super => "'super'",
@@ -615,6 +619,8 @@ impl TokenList {
                         "danger_cast" => TokenType::DangerCast,
                         "return" => TokenType::Return,
                         "class" => TokenType::Class,
+                        "enum" => TokenType::Enum,
+                        "switch" => TokenType::Switch,
                         "from" => TokenType::From,
                         "operator" => TokenType::Operator,
                         "external" => TokenType::External,

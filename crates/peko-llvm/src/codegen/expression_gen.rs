@@ -1339,6 +1339,24 @@ impl PekoValueBuilder for CastAST {
 
 impl PekoValueBuilder for ModuleAccessAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        // Enum variant access: `Enum::Variant` lowers to the variant's
+        // zero-based index as a 32-bit integer, typed as the enum.
+        if self.module_names.len() == 1
+            && let Some(variants) = codegen_context.get_enum_variants(&self.module_names[0].value)
+            && let PekoAST::VariableReference(variant_reference) = self.accessor.as_ref()
+        {
+            let index = variants
+                .iter()
+                .position(|variant| variant == &variant_reference.variable_name.value)
+                .unwrap_or(0);
+
+            let constant = codegen_context.create_constant_int(index as i32);
+            return CodegenValue::new(
+                constant.llvm_value,
+                PekoType::simple_type(&self.module_names[0].value),
+            );
+        }
+
         // Resolve the first segment of the path: either a submodule of
         // the current module or a top-level imported module.
         let mut next_module = if codegen_context

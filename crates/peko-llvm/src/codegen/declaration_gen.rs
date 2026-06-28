@@ -9,7 +9,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use peko_core::asts::data_structures::{ClassMethod, PositionData, VisibilityData};
 use peko_core::asts::declarations::{
-    ClassAST, ClosureAST, FunctionDeclarationAST, ModuleCreationAST, NewVariableAST,
+    ClassAST, ClosureAST, EnumDeclarationAST, FunctionDeclarationAST, ModuleCreationAST,
+    NewVariableAST,
 };
 use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
@@ -40,7 +41,9 @@ impl PekoValueBuilder for NewVariableAST {
 
         // Local-scope path: stack-alloc, store, and add to the scope.
         if codegen_context.local_scope {
+            codegen_context.expecting_value = true;
             let mut variable_value = self.variable_value.build_value(codegen_context);
+            codegen_context.expecting_value = false;
 
             // `void` is not a value-bearing type.
             if variable_value.value_type.to_string() == "void" {
@@ -1134,6 +1137,22 @@ impl PekoValueBuilder for ClosureAST {
         codegen_context.build_store(&context_function, &closure_function);
 
         CodegenValue::new(allocated_closure.llvm_value, closure_type)
+    }
+}
+
+impl PekoValueBuilder for EnumDeclarationAST {
+    fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        // Enums emit no code. Registering the variants lets the enum type
+        // lower to an integer and `Enum::Variant` resolve to a variant index.
+        let variant_names: Vec<String> = self
+            .variants
+            .iter()
+            .map(|variant| variant.value.clone())
+            .collect();
+
+        codegen_context.register_enum(self.enum_name.value.clone(), variant_names);
+
+        codegen_context.create_error_value()
     }
 }
 

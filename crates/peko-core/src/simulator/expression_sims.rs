@@ -1934,6 +1934,35 @@ impl PekoValueSimulator for FunctionCallAST {
 /// under that module's context.
 impl PekoValueSimulator for ModuleAccessAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Enum variant access: `Enum::Variant`. The head names an enum (not a
+        // module) and the accessor is a bare variant name. Resolves to a value
+        // of the enum type.
+        if self.module_names.len() == 1
+            && let Some(variants) =
+                simulator_context.get_enum_variants(&self.module_names[0].value)
+            && let PekoAST::VariableReference(variant_reference) = self.accessor.as_ref()
+        {
+            let enum_name = &self.module_names[0].value;
+            let variant_name = &variant_reference.variable_name.value;
+
+            if !variants.contains(variant_name) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        variant_reference.variable_name.start.clone(),
+                        variant_reference.variable_name.end.clone(),
+                        format!(
+                            "enum `{enum_name}` has no variant `{variant_name}`. Check the variant name and that it is declared in the enum",
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+
+            return SimulatorValue::Value(types::PekoType::simple_type(enum_name));
+        }
+
         // Resolve the first module in the chain — try the current
         // module's children first, then top-level imports.
         let next_module = if simulator_context

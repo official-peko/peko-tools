@@ -62,6 +62,11 @@ pub struct PekoCodegenContext {
     pub current_return_type: Option<PekoType>,
     pub current_expected_type_options: Option<Vec<PekoType>>,
 
+    /// `true` when the value at the current position is consumed (a variable
+    /// initializer, a call argument, a return value, ...). `if` reads this to
+    /// decide whether it is a value-producing expression or a statement.
+    pub expecting_value: bool,
+
     pub current_this: Option<CodegenVariable>,
     pub previous_was_this: bool,
     pub attributes_to_set: Vec<String>,
@@ -146,6 +151,7 @@ impl PekoCodegenContext {
             previous_scoped_variables: Vec::new(),
             scoped_variables: HashMap::new(),
             local_scope: false,
+            expecting_value: false,
             generic_types: HashMap::new(),
 
             return_references: false,

@@ -133,6 +133,30 @@ impl Spanned for ClassAST {
     }
 }
 
+/// An enum declaration: `enum Name { Variant1, Variant2, ... }`.
+///
+/// Enums are identifier-only and integer-backed. Each variant lowers to its
+/// zero-based position in the declaration.
+#[derive(Clone, new)]
+pub struct EnumDeclarationAST {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub visibility: VisibilityData,
+    pub docinfo: Option<DocInfo>,
+    pub enum_name: PositionedValue<String>,
+    pub variants: Vec<PositionedValue<String>>,
+}
+
+impl Spanned for EnumDeclarationAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
 /// A module declaration: `module name { ... }`.
 #[derive(Clone, new)]
 pub struct ModuleCreationAST {

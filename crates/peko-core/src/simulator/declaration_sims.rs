@@ -61,7 +61,9 @@ impl PekoValueSimulator for NewVariableAST {
 
         // Local-scope declarations: simulate value, type-check, register.
         if simulator_context.local_scope {
+            simulator_context.expecting_value = true;
             let mut variable_value = self.variable_value.simulate(simulator_context);
+            simulator_context.expecting_value = false;
 
             // void is not a real value type.
             if variable_value.get_type().to_string() == "void" {
@@ -1132,6 +1134,7 @@ impl PekoValueSimulator for ModuleCreationAST {
             IndexMap::new(),
             Arc::clone(&scope_reference),
             Vec::new(),
+            IndexMap::new(),
         );
 
         let new_module_ref = Arc::new(RwLock::new(new_module));
@@ -1194,6 +1197,41 @@ impl PekoValueSimulator for ModuleCreationAST {
 /// 3. **Method body simulation**: simulate each method's body under
 ///    a fresh scope with `this` and parameter bindings.
 ///
+/// Simulates an enum declaration.
+///
+/// Checks variant names are unique, then registers the enum and its variants
+/// in the current module so the name resolves as a type and `Enum::Variant`
+/// resolves to a value of that type.
+impl PekoValueSimulator for EnumDeclarationAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let mut variant_names: Vec<String> = Vec::new();
+
+        for variant in &self.variants {
+            if variant_names.contains(&variant.value) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        variant.start.clone(),
+                        variant.end.clone(),
+                        format!(
+                            "duplicate enum variant `{}`. Each variant in an enum must have a unique name",
+                            variant.value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                continue;
+            }
+
+            variant_names.push(variant.value.clone());
+        }
+
+        simulator_context.register_enum(self.enum_name.value.clone(), variant_names);
+
+        SimulatorValue::Value(types::PekoType::simple_type("default"))
+    }
+}
+
 /// Generic class declarations are tracked but not simulated until
 /// instantiated with concrete type parameters.
 impl PekoValueSimulator for ClassAST {

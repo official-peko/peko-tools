@@ -144,6 +144,12 @@ pub struct PekoSimulatorContext {
     /// set by variable declarations to inform inference of the RHS.
     pub current_expected_type_options: Option<Vec<types::PekoType>>,
 
+    /// `true` when the value at the current position is consumed (a variable
+    /// initializer, a call argument, a return value, ...). A construct that
+    /// can be either a statement or an expression, like `if`, reads this to
+    /// decide which it is.
+    pub expecting_value: bool,
+
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
 
@@ -231,6 +237,7 @@ impl PekoSimulatorContext {
             IndexMap::new(),
             Arc::clone(&main_scope),
             Vec::new(),
+            IndexMap::new(),
         )));
 
         let extern_scope_pos = PositionData {
@@ -262,6 +269,7 @@ impl PekoSimulatorContext {
             IndexMap::new(),
             Arc::clone(&extern_scope),
             Vec::new(),
+            IndexMap::new(),
         )));
 
         PekoSimulatorContext {
@@ -278,6 +286,7 @@ impl PekoSimulatorContext {
             return_references: false,
             current_return_type: None,
             current_expected_type_options: None,
+            expecting_value: false,
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),
@@ -630,6 +639,7 @@ impl PekoSimulatorContext {
                     submodule.read().unwrap().function_generics.clone(),
                     submodule.read().unwrap().scope.clone(),
                     Vec::new(),
+                    IndexMap::new(),
                 )))
             } else {
                 current_module_unpacks
