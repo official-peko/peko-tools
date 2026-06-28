@@ -143,11 +143,21 @@ impl PekoValueSimulator for IfStatementAST {
             return simulator_context.create_error_value();
         }
 
+        // Whether this `if`'s value is consumed. Captured now because building
+        // the condition and branch bodies resets `expecting_value`.
+        let is_expression = simulator_context.expecting_value;
+        simulator_context.expecting_value = false;
+
         // At the end of simulation, these hold whether the statement
         // can be guaranteed to return / exit. Both require the else
         // branch to exist (otherwise control may fall through).
         let mut every_block_returns = self.else_body.is_some();
         let mut every_block_exits = self.else_body.is_some();
+
+        // The type of each branch's tail expression, used when `if` is an
+        // expression. `None` for a branch that returns or exits (it does not
+        // reach the merge), so a mixed branch makes the `if` a statement.
+        let mut branch_tails: Vec<Option<types::PekoType>> = Vec::new();
 
         // Simulate every (condition, body) pair.
         for condition_body in &self.conditional_bodies {
@@ -191,9 +201,17 @@ impl PekoValueSimulator for IfStatementAST {
 
             let mut branch_exited = false;
             let mut branch_returned = false;
+            let mut branch_tail: Option<types::PekoType> = None;
 
-            for peko_ast in &condition_body.body.value {
-                let value_type = peko_ast.simulate(simulator_context).get_type().to_string();
+            let body_length = condition_body.body.value.len();
+            for (index, peko_ast) in condition_body.body.value.iter().enumerate() {
+                // Only the tail statement's value is consumed, and only when
+                // the `if` itself is an expression.
+                simulator_context.expecting_value = is_expression && index + 1 == body_length;
+
+                let value = peko_ast.simulate(simulator_context);
+                let value_type = value.get_type().to_string();
+                branch_tail = Some(value.get_type());
 
                 if !branch_exited
                     && !branch_returned
@@ -235,6 +253,12 @@ impl PekoValueSimulator for IfStatementAST {
                 every_block_exits = false;
             }
 
+            branch_tails.push(if branch_returned || branch_exited {
+                None
+            } else {
+                branch_tail
+            });
+
             simulator_context.scoped_variables.clear();
             simulator_context
                 .scoped_variables
@@ -262,9 +286,15 @@ impl PekoValueSimulator for IfStatementAST {
 
             let mut branch_exited = false;
             let mut branch_returned = false;
+            let mut branch_tail: Option<types::PekoType> = None;
 
-            for peko_ast in &else_body.value {
-                let value_type = peko_ast.simulate(simulator_context).get_type().to_string();
+            let body_length = else_body.value.len();
+            for (index, peko_ast) in else_body.value.iter().enumerate() {
+                simulator_context.expecting_value = is_expression && index + 1 == body_length;
+
+                let value = peko_ast.simulate(simulator_context);
+                let value_type = value.get_type().to_string();
+                branch_tail = Some(value.get_type());
 
                 if !branch_exited
                     && !branch_returned
@@ -308,14 +338,48 @@ impl PekoValueSimulator for IfStatementAST {
                 every_block_exits = false;
             }
 
+            branch_tails.push(if branch_returned || branch_exited {
+                None
+            } else {
+                branch_tail
+            });
+
             simulator_context.scoped_variables.clear();
             simulator_context
                 .scoped_variables
                 .extend(simulator_context.previous_scoped_variables.pop().unwrap());
         }
 
-        // Surface control-flow guarantees as the result type.
-        if every_block_returns {
+        // An `if` used as an expression yields a value when there is an else
+        // and every branch reaches the merge with a tail value of one common,
+        // non-void type. The branch tails feed the codegen PHI.
+        let if_value_type = if is_expression {
+            simulator_context.if_expression_value_type(self.else_body.is_some(), &branch_tails)
+        } else {
+            None
+        };
+
+        // An `if` whose value is consumed must produce one. Report directly
+        // when its branches do not agree on a value.
+        if is_expression && if_value_type.is_none() {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "this `if` is used as an expression, so it must have an `else` and every branch must end in a value of the same type"
+                        .to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        }
+
+        // Surface control-flow guarantees or the expression value as the
+        // result type.
+        if let Some(value_type) = if_value_type {
+            SimulatorValue::Value(value_type)
+        } else if every_block_returns {
             SimulatorValue::Return
         } else if every_block_exits {
             SimulatorValue::BranchExit
@@ -325,6 +389,192 @@ impl PekoValueSimulator for IfStatementAST {
                 simulator_context.get_current_file(),
             ))
         }
+    }
+}
+
+/// Extracts the variant name from a switch arm pattern of the shape
+/// `Enum::Variant`. Returns `None` for any other pattern shape.
+fn switch_arm_variant(pattern: &PekoAST) -> Option<String> {
+    if let PekoAST::ModuleAccess(module_access) = pattern
+        && let PekoAST::VariableReference(variant_reference) = module_access.accessor.as_ref()
+    {
+        return Some(variant_reference.variable_name.value.clone());
+    }
+
+    None
+}
+
+/// Simulates a `switch` over an enum.
+///
+/// The subject must be an enum value. Each arm matches an `Enum::Variant`
+/// pattern, or `_` for the default arm. A switch must cover every variant or
+/// include the default arm.
+impl PekoValueSimulator for SwitchStatementAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // `switch` is a statement, so it must be inside a function body.
+        if !simulator_context.local_scope {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "`switch` statement cannot appear outside a function body. `switch` is a statement, so it must be inside a function"
+                        .to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
+        }
+
+        // The subject is a value position.
+        simulator_context.expecting_value = true;
+        let subject = self.subject.simulate(simulator_context);
+        simulator_context.expecting_value = false;
+        let subject_type = subject.get_type();
+
+        // The subject must be an enum value. An error-typed subject already
+        // reported a diagnostic, so it suppresses the further error.
+        let all_variants = simulator_context.get_enum_variants(&subject_type.type_name);
+        if all_variants.is_none() && !subject_type.is_error_type {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.subject.get_start().clone(),
+                    self.subject.get_end().clone(),
+                    format!(
+                        "`switch` subject has type `{}` but must be an enum value. `switch` matches over enum variants",
+                        subject_type,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        }
+
+        let all_variants = all_variants.unwrap_or_default();
+        let mut covered: Vec<String> = Vec::new();
+        let mut has_default = false;
+
+        for arm in &self.arms {
+            match &arm.pattern {
+                None => {
+                    if has_default {
+                        simulator_context
+                            .diagnostics
+                            .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                                arm.start.clone(),
+                                arm.end.clone(),
+                                "duplicate `_` arm. A `switch` can have at most one default arm"
+                                    .to_string(),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ));
+                    }
+                    has_default = true;
+                }
+                Some(pattern) => {
+                    // Simulating the pattern validates the `Enum::Variant`
+                    // shape and that the variant exists.
+                    let pattern_type = pattern.simulate(simulator_context).get_type();
+
+                    if !pattern_type.is_error_type
+                        && !subject_type.is_error_type
+                        && pattern_type.type_name != subject_type.type_name
+                    {
+                        simulator_context
+                            .diagnostics
+                            .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                                pattern.get_start().clone(),
+                                pattern.get_end().clone(),
+                                format!(
+                                    "this arm matches an `{}` variant but the `switch` subject is `{}`. Every arm must match the subject's enum",
+                                    pattern_type, subject_type,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ));
+                    }
+
+                    if let Some(variant) = switch_arm_variant(pattern) {
+                        if covered.contains(&variant) {
+                            simulator_context
+                                .diagnostics
+                                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                                    pattern.get_start().clone(),
+                                    pattern.get_end().clone(),
+                                    format!(
+                                        "duplicate arm for variant `{variant}`. Each variant can be matched by at most one arm",
+                                    ),
+                                    diagnostics::DiagnosticType::Error,
+                                    simulator_context.get_current_file(),
+                                ));
+                        } else {
+                            covered.push(variant);
+                        }
+                    }
+                }
+            }
+
+            // Simulate the arm body under a fresh scope, mirroring the
+            // scope-stacking dance used by `if` branches.
+            simulator_context
+                .previous_scoped_variables
+                .push(simulator_context.scoped_variables.clone());
+
+            let previous_scope = simulator_context.current_scope.as_ref().map(Arc::clone);
+
+            let scope_reference = Arc::new(RwLock::new(Scope::new(
+                false,
+                false,
+                VisibilityData::open_visibility(),
+                arm.body.start.clone(),
+                arm.body.end.clone(),
+                String::new(),
+            )));
+            simulator_context.current_scope = Some(Arc::clone(&scope_reference));
+
+            for peko_ast in &arm.body.value {
+                simulator_context.expecting_value = false;
+                peko_ast.simulate(simulator_context);
+            }
+
+            simulator_context.current_scope = previous_scope;
+
+            if let Some(outer) = simulator_context.current_scope.as_mut() {
+                outer.write().unwrap().scopes.push(scope_reference);
+            }
+
+            simulator_context.scoped_variables.clear();
+            simulator_context
+                .scoped_variables
+                .extend(simulator_context.previous_scoped_variables.pop().unwrap());
+        }
+
+        // A switch must cover every variant or include the default arm.
+        if !has_default && !subject_type.is_error_type {
+            let missing: Vec<String> = all_variants
+                .iter()
+                .filter(|variant| !covered.contains(variant))
+                .cloned()
+                .collect();
+
+            if !missing.is_empty() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        format!(
+                            "`switch` over `{}` is not exhaustive. Add arms for the missing variants ({}) or a `_` default arm",
+                            subject_type.type_name,
+                            missing.join(", "),
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+        }
+
+        SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
 }
 
@@ -931,6 +1181,7 @@ impl PekoValueSimulator for ImportStatementAST {
                 IndexMap::new(),
                 Arc::clone(&scope_reference),
                 Vec::new(),
+                IndexMap::new(),
             )));
 
             let previous_scope = simulator_context.current_scope.as_ref().map(Arc::clone);
@@ -1270,12 +1521,14 @@ impl PekoValueSimulator for ReturnAST {
         }
 
         // Simulate and type-check the return value.
+        simulator_context.expecting_value = true;
         let return_value = self
             .return_value
             .clone()
             .unwrap()
             .as_ref()
             .simulate(simulator_context);
+        simulator_context.expecting_value = false;
 
         if !simulator_context.types_similar(
             &return_value.get_type(),

@@ -340,6 +340,14 @@ pub trait ExecutionModule<
     /// Mutable view of the class map.
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ClassType>>>;
 
+    /// Enum map (name -> variant names in declaration order), preserving
+    /// declaration order. Enums are immutable once declared, so the variant
+    /// list is stored by value rather than behind a lock.
+    fn get_enums(&self) -> &IndexMap<String, Vec<String>>;
+
+    /// Mutable view of the enum map.
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>>;
+
     /// Generic-class map (name -> generic-class data), preserving
     /// declaration order. Keyed on the bare name without type parameters.
     /// Each entry is held behind a lock shared by all modules that

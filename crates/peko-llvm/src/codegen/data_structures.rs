@@ -1114,6 +1114,7 @@ pub struct CodegenModule {
     pub functions: IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>>,
     pub variables: IndexMap<String, Arc<RwLock<CodegenVariable>>>,
     pub classes: IndexMap<String, Arc<RwLock<CodegenClass>>>,
+    pub enums: IndexMap<String, Vec<String>>,
     pub class_generics: IndexMap<String, Arc<RwLock<CodegenClassGeneric>>>,
     pub function_generics: IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>>,
 }
@@ -1271,6 +1272,7 @@ impl CodegenModule {
             functions: IndexMap::new(),
             variables: IndexMap::new(),
             classes: IndexMap::new(),
+            enums: IndexMap::new(),
             class_generics: IndexMap::new(),
             function_generics: IndexMap::new(),
         }
@@ -1288,6 +1290,7 @@ impl CodegenModule {
             functions: IndexMap::new(),
             variables: IndexMap::new(),
             classes: IndexMap::new(),
+            enums: IndexMap::new(),
             class_generics: IndexMap::new(),
             function_generics: IndexMap::new(),
         }
@@ -1376,6 +1379,14 @@ impl
 
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<CodegenClass>>> {
         &mut self.classes
+    }
+
+    fn get_enums(&self) -> &IndexMap<String, Vec<String>> {
+        &self.enums
+    }
+
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
+        &mut self.enums
     }
 
     fn get_class_generics_mut(

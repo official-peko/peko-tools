@@ -6,10 +6,13 @@
 use std::sync::{Arc, RwLock};
 
 use indexmap::IndexMap;
+use llvm_sys_180::core;
+use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
 use peko_core::asts::data_structures::{PositionData, PositionedValue, UnpackItem, VisibilityData};
 use peko_core::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
-    PlatformStatementAST, ReturnAST, StyleStatementAST, VariableReassignmentAST, WhileLoopAST,
+    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST, VariableReassignmentAST,
+    WhileLoopAST,
 };
 use peko_core::asts::{self, PekoAST};
 use peko_core::diagnostics;
@@ -223,12 +226,14 @@ impl PekoValueBuilder for ReturnAST {
             return codegen_context.create_return_exit();
         }
 
+        codegen_context.expecting_value = true;
         let return_value = self
             .return_value
             .clone()
             .unwrap()
             .as_ref()
             .build_value(codegen_context);
+        codegen_context.expecting_value = false;
 
         let return_value_boxed = codegen_context.box_value_to_type(
             &codegen_context.current_return_type.clone().unwrap(),
@@ -273,6 +278,11 @@ impl PekoValueBuilder for IfStatementAST {
             return codegen_context.create_error_value();
         }
 
+        // Whether this `if`'s value is consumed. Captured before building the
+        // condition and branches resets `expecting_value`.
+        let is_expression = codegen_context.expecting_value;
+        codegen_context.expecting_value = false;
+
         let after_block = codegen_context.create_new_block(None);
 
         // Tracks whether every branch (including the else) exits via
@@ -292,6 +302,12 @@ impl PekoValueBuilder for IfStatementAST {
         } else {
             None
         };
+
+        // The tail type of each branch (used to decide whether this `if` is an
+        // expression) and the PHI incomings (value, originating block) for the
+        // branches that reach the merge.
+        let mut branch_tails: Vec<Option<PekoType>> = Vec::new();
+        let mut phi_incomings: Vec<(LLVMValueRef, LLVMBasicBlockRef)> = Vec::new();
 
         // Generate each conditional body (the `if` and any `else if`s).
         for (idx, condition_body) in self.conditional_bodies.iter().enumerate() {
@@ -351,9 +367,15 @@ impl PekoValueBuilder for IfStatementAST {
 
             let mut block_exits = false;
             let mut block_returns = false;
+            let mut last_value: Option<CodegenValue> = None;
 
-            for peko_ast in &condition_body.body.value {
-                let value_type = peko_ast.build_value(codegen_context).get_type().to_string();
+            let body_length = condition_body.body.value.len();
+            for (index, peko_ast) in condition_body.body.value.iter().enumerate() {
+                codegen_context.expecting_value = is_expression && index + 1 == body_length;
+
+                let value = peko_ast.build_value(codegen_context);
+                let value_type = value.get_type().to_string();
+                last_value = Some(value);
 
                 if !block_returns
                     && !block_exits
@@ -379,7 +401,14 @@ impl PekoValueBuilder for IfStatementAST {
             }
 
             if !block_exits && !block_returns {
+                let incoming_block = codegen_context.current_basic_block.unwrap();
+                branch_tails.push(last_value.as_ref().map(|value| value.value_type.clone()));
+                if let Some(value) = &last_value {
+                    phi_incomings.push((value.llvm_value, incoming_block));
+                }
                 codegen_context.build_branch(after_block);
+            } else {
+                branch_tails.push(None);
             }
 
             if idx < self.conditional_bodies.len() - 1 {
@@ -409,9 +438,16 @@ impl PekoValueBuilder for IfStatementAST {
 
             let mut block_exits = false;
             let mut block_returns = false;
+            let mut last_value: Option<CodegenValue> = None;
 
-            for peko_ast in &self.else_body.clone().unwrap().value {
-                let value_type = peko_ast.build_value(codegen_context).value_type.to_string();
+            let else_value = self.else_body.clone().unwrap().value;
+            let body_length = else_value.len();
+            for (index, peko_ast) in else_value.iter().enumerate() {
+                codegen_context.expecting_value = is_expression && index + 1 == body_length;
+
+                let value = peko_ast.build_value(codegen_context);
+                let value_type = value.value_type.to_string();
+                last_value = Some(value);
 
                 if !block_exits
                     && !block_returns
@@ -443,7 +479,14 @@ impl PekoValueBuilder for IfStatementAST {
                 every_block_exits = false;
             }
             if !block_returns && !block_exits {
+                let incoming_block = codegen_context.current_basic_block.unwrap();
+                branch_tails.push(last_value.as_ref().map(|value| value.value_type.clone()));
+                if let Some(value) = &last_value {
+                    phi_incomings.push((value.llvm_value, incoming_block));
+                }
                 codegen_context.build_branch(after_block);
+            } else {
+                branch_tails.push(None);
             }
 
             codegen_context.scoped_variables.clear();
@@ -453,6 +496,30 @@ impl PekoValueBuilder for IfStatementAST {
         }
 
         codegen_context.goto_block_end(after_block);
+
+        // An `if` used as an expression merges its branch tails into a PHI at
+        // the merge block and yields that value.
+        if is_expression
+            && let Some(value_type) =
+                codegen_context.if_expression_value_type(self.else_body.is_some(), &branch_tails)
+            && let Some(llvm_type) = codegen_context.get_llvm_type(&value_type)
+        {
+            let phi =
+                unsafe { core::LLVMBuildPhi(codegen_context.llvm_builder, llvm_type, c"".as_ptr()) };
+            let mut values: Vec<LLVMValueRef> =
+                phi_incomings.iter().map(|(value, _)| *value).collect();
+            let mut blocks: Vec<LLVMBasicBlockRef> =
+                phi_incomings.iter().map(|(_, block)| *block).collect();
+            unsafe {
+                core::LLVMAddIncoming(
+                    phi,
+                    values.as_mut_ptr(),
+                    blocks.as_mut_ptr(),
+                    values.len() as u32,
+                );
+            }
+            return CodegenValue::new(phi, value_type);
+        }
 
         if every_block_exits || every_block_returns {
             codegen_context.remove_block(after_block);
@@ -465,6 +532,118 @@ impl PekoValueBuilder for IfStatementAST {
         } else {
             codegen_context.create_null_pointer()
         }
+    }
+}
+
+/// Extracts the variant name from a switch arm pattern `Enum::Variant`.
+/// Returns `None` for any other pattern shape.
+fn switch_arm_variant(pattern: &PekoAST) -> Option<String> {
+    if let PekoAST::ModuleAccess(module_access) = pattern
+        && let PekoAST::VariableReference(variant_reference) = module_access.accessor.as_ref()
+    {
+        return Some(variant_reference.variable_name.value.clone());
+    }
+
+    None
+}
+
+/// Lowers a `switch` over an enum to an LLVM `switch` instruction. The
+/// subject is the integer variant index; each arm body lives in its own
+/// block and branches to a shared merge block.
+impl PekoValueBuilder for SwitchStatementAST {
+    fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        codegen_context.expecting_value = true;
+        let subject = self.subject.build_value(codegen_context);
+        codegen_context.expecting_value = false;
+
+        let enum_name = subject.value_type.type_name.clone();
+        let variants = codegen_context
+            .get_enum_variants(&enum_name)
+            .unwrap_or_default();
+
+        let after_block = codegen_context.create_new_block(None);
+
+        // One body block per arm. The `_` arm's block is the switch default;
+        // with no default arm, control falls through to the merge block.
+        let mut arm_blocks: Vec<LLVMBasicBlockRef> = Vec::new();
+        let mut default_block = after_block;
+        for arm in &self.arms {
+            let block = codegen_context.create_new_block(None);
+            arm_blocks.push(block);
+            if arm.pattern.is_none() {
+                default_block = block;
+            }
+        }
+
+        let case_count = self.arms.iter().filter(|arm| arm.pattern.is_some()).count();
+
+        // Emit the switch in the current block.
+        let switch = unsafe {
+            core::LLVMBuildSwitch(
+                codegen_context.llvm_builder,
+                subject.llvm_value,
+                default_block,
+                case_count as u32,
+            )
+        };
+
+        // Add a case mapping each variant index to its arm block.
+        for (arm, block) in self.arms.iter().zip(arm_blocks.iter()) {
+            if let Some(pattern) = &arm.pattern
+                && let Some(variant) = switch_arm_variant(pattern)
+            {
+                let index = variants
+                    .iter()
+                    .position(|candidate| candidate == &variant)
+                    .unwrap_or(0);
+                let case_value = codegen_context.create_constant_int(index as i32);
+                unsafe {
+                    core::LLVMAddCase(switch, case_value.llvm_value, *block);
+                }
+            }
+        }
+
+        // Generate each arm body, branching to the merge block unless the
+        // body already exits via `break` or `return`.
+        for (arm, block) in self.arms.iter().zip(arm_blocks.iter()) {
+            codegen_context.goto_block_end(*block);
+
+            codegen_context
+                .previous_scoped_variables
+                .push(codegen_context.scoped_variables.clone());
+
+            let mut block_exits = false;
+            let mut block_returns = false;
+
+            for peko_ast in &arm.body.value {
+                codegen_context.expecting_value = false;
+                let value_type = peko_ast.build_value(codegen_context).value_type.to_string();
+
+                if !block_exits
+                    && !block_returns
+                    && (value_type == "<<branchexit>>" || value_type == "<<returnexit>>")
+                {
+                    if value_type == "<<branchexit>>" {
+                        block_exits = true;
+                    } else {
+                        block_returns = true;
+                    }
+                }
+            }
+
+            if !block_exits && !block_returns {
+                codegen_context.build_branch(after_block);
+            }
+
+            codegen_context.scoped_variables.clear();
+            codegen_context
+                .scoped_variables
+                .extend(codegen_context.previous_scoped_variables.pop().unwrap());
+        }
+
+        codegen_context.goto_block_end(after_block);
+
+        codegen_context.create_null_pointer()
     }
 }
 

@@ -252,6 +252,36 @@ pub trait ExecutionContextAlgorithms<
     /// Mutable view of the generic-type substitutions.
     fn get_generic_types_mut(&mut self) -> &mut HashMap<String, PekoType>;
 
+    /// The variant names of a registered enum, in declaration order, or
+    /// `None` when no enum by that name is reachable from the current module.
+    ///
+    /// Walks up the module tree from the current module, mirroring how class
+    /// names resolve.
+    fn get_enum_variants(&self, enum_name: &str) -> Option<Vec<String>> {
+        let mut current = self.get_module_context().current_module();
+
+        loop {
+            if let Some(variants) = current.read().unwrap().get_enums().get(enum_name) {
+                return Some(variants.clone());
+            }
+
+            let parent = current.read().unwrap().get_parent()?.clone();
+            current = parent;
+        }
+    }
+
+    /// Registers an enum and its variant names in the current module so the
+    /// name resolves as a type and its variants resolve through
+    /// `Enum::Variant`.
+    fn register_enum(&mut self, enum_name: String, variants: Vec<String>) {
+        self.get_module_context()
+            .current_module()
+            .write()
+            .unwrap()
+            .get_enums_mut()
+            .insert(enum_name, variants);
+    }
+
     /// The `this` binding active in the current scope (set when inside a
     /// method body), or `None` outside method scope.
     fn get_current_this(&self) -> &Option<VariableType>;
@@ -853,6 +883,13 @@ pub trait ExecutionContextAlgorithms<
             return Some(type1);
         }
 
+        // Enums are terminal named types backed by an integer. They have no
+        // class body or modules to expand, so they expand to themselves.
+        if self.get_enum_variants(&type1.type_name).is_some() {
+            type1.fully_expanded = true;
+            return Some(type1);
+        }
+
         // For any generic type within this type, expand that.
         // e.g. standard::Map<String, File> -> standard::Map<standard::String, fs::File>.
         //
@@ -1088,6 +1125,9 @@ pub trait ExecutionContextAlgorithms<
                 // exists as a generic type.
                 if self.get_generic_types().contains_key(&peko_type.type_name) {
                     self.type_exists(&self.get_generic_types()[&peko_type.type_name].clone())
+                } else if self.get_enum_variants(&peko_type.type_name).is_some() {
+                    // Enums are user-defined named types backed by an integer.
+                    true
                 } else {
                     // Otherwise, the type must be user-defined. `get_class_by_type`
                     // returns None if there's no user-defined (class) type
@@ -1373,6 +1413,38 @@ pub trait ExecutionContextAlgorithms<
 
     /// Returns `true` only if two types are exactly equal after full
     /// expansion.
+    /// The common value type of an `if` used as an expression, or `None` when
+    /// the `if` is a plain statement.
+    ///
+    /// An expression `if` requires an else and every branch reaching the merge
+    /// with a tail value (`Some`) of one common, non-void type. The simulator
+    /// and codegen call this with the same branch tails so they agree on
+    /// whether the `if` produces a value.
+    fn if_expression_value_type(
+        &mut self,
+        else_present: bool,
+        branch_tails: &[Option<PekoType>],
+    ) -> Option<PekoType> {
+        if !else_present || branch_tails.is_empty() || branch_tails.iter().any(Option::is_none) {
+            return None;
+        }
+
+        let first = branch_tails[0].clone().unwrap();
+        let first_string = first.to_string();
+        if first_string == "default" || first_string == "void" {
+            return None;
+        }
+
+        for tail in branch_tails {
+            let tail = tail.as_ref().unwrap();
+            if !self.types_equal(tail, &first) {
+                return None;
+            }
+        }
+
+        Some(first)
+    }
+
     fn types_equal(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
         // Error types "work" with any type.
         if type1.is_error_type || type2.is_error_type {

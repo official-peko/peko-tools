@@ -1899,6 +1899,137 @@ impl PekoParser {
         )
     }
 
+    /// Parses an enum declaration: `enum Name { Variant1, Variant2, ... }`.
+    pub fn parse_enum_declaration(&mut self) -> EnumDeclarationAST {
+        let starting_position = self.get_current_position();
+        self.tokens.increase_index(); // eat 'enum'
+
+        let enum_name = PositionedValue::from_token(self.tokens.current_token());
+        self.expect_token_type(&lexer::TokenType::Identifier, "enum name");
+        self.tokens.increase_index();
+
+        if self.expect_token_value("{", "enum body") {
+            self.tokens.increase_index();
+        }
+
+        let mut variants: Vec<PositionedValue<String>> = Vec::new();
+
+        while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
+            // Eat comments and stray separators before each variant.
+            while !self.tokens.finished()
+                && (self.tokens.current_token().is_comment()
+                    || self.tokens.current_token().equals(","))
+            {
+                if self.tokens.current_token().is_comment() {
+                    self.skip_comment();
+                } else {
+                    self.tokens.increase_index();
+                }
+            }
+
+            if self.tokens.finished() || self.tokens.current_token().equals("}") {
+                break;
+            }
+
+            let index_before = self.tokens.get_index();
+            variants.push(PositionedValue::from_token(self.tokens.current_token()));
+            self.expect_token_type(&lexer::TokenType::Identifier, "enum variant name");
+            self.tokens.increase_index();
+
+            // Force progress so a stray token can never spin the loop.
+            if !self.tokens.finished() && self.tokens.get_index() == index_before {
+                self.tokens.increase_index();
+            }
+        }
+
+        if self.expect_token_value("}", "enum body") {
+            self.tokens.increase_index();
+        }
+
+        EnumDeclarationAST::new(
+            starting_position,
+            self.get_current_position(),
+            VisibilityData::open_visibility(),
+            None,
+            enum_name,
+            variants,
+        )
+    }
+
+    /// Parses a `switch` over an enum: `switch subject { Enum::Variant => { ...
+    /// }, _ => { ... } }`.
+    pub fn parse_switch_statement(&mut self) -> SwitchStatementAST {
+        let starting_position = self.get_current_position();
+        self.tokens.increase_index(); // eat 'switch'
+
+        let subject = self.parse_expression();
+
+        if self.expect_token_value("{", "switch body") {
+            self.tokens.increase_index();
+        }
+
+        let mut arms: Vec<SwitchArm> = Vec::new();
+
+        while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
+            // Eat comments and stray separators between arms.
+            while !self.tokens.finished()
+                && (self.tokens.current_token().is_comment()
+                    || self.tokens.current_token().equals(","))
+            {
+                if self.tokens.current_token().is_comment() {
+                    self.skip_comment();
+                } else {
+                    self.tokens.increase_index();
+                }
+            }
+
+            if self.tokens.finished() || self.tokens.current_token().equals("}") {
+                break;
+            }
+
+            let arm_start = self.get_current_position();
+            let index_before = self.tokens.get_index();
+
+            // `_` is the default arm; anything else is an `Enum::Variant`
+            // pattern parsed as an expression.
+            let pattern = if self.tokens.current_token().equals("_") {
+                self.tokens.increase_index();
+                None
+            } else {
+                Some(Box::new(self.parse_expression()))
+            };
+
+            if self.expect_token_value("=>", "switch arm") {
+                self.tokens.increase_index();
+            }
+
+            let body = self.parse_block("switch arm body");
+
+            arms.push(SwitchArm::new(
+                arm_start,
+                self.get_current_position(),
+                pattern,
+                body,
+            ));
+
+            // Force progress so a malformed arm can never spin the loop.
+            if !self.tokens.finished() && self.tokens.get_index() == index_before {
+                self.tokens.increase_index();
+            }
+        }
+
+        if self.expect_token_value("}", "switch body") {
+            self.tokens.increase_index();
+        }
+
+        SwitchStatementAST::new(
+            starting_position,
+            self.get_current_position(),
+            Box::new(subject),
+            arms,
+        )
+    }
+
     /// Parses an identifier-led expression: variable reference, object
     /// access, array access, function call, variable assignment (plain or
     /// compound), or optional unwrap. Returns the resulting AST.
@@ -3277,6 +3408,15 @@ impl PekoParser {
                 PekoAST::Class(class_declaration)
             }
 
+            lexer::TokenType::Enum => {
+                let mut enum_declaration = self.parse_enum_declaration();
+                enum_declaration.docinfo = docinfo;
+                if let Some(v) = visibility {
+                    enum_declaration.visibility = v;
+                }
+                PekoAST::Enum(enum_declaration)
+            }
+
             lexer::TokenType::FunctionDeclarator => {
                 let mut function_declaration = self.parse_function_declaration();
                 function_declaration.docinfo = docinfo;
@@ -3313,6 +3453,7 @@ impl PekoParser {
             }
 
             lexer::TokenType::If => PekoAST::IfStatement(self.parse_if_statement()),
+            lexer::TokenType::Switch => PekoAST::Switch(self.parse_switch_statement()),
             lexer::TokenType::While => PekoAST::WhileLoop(self.parse_while_loop()),
             lexer::TokenType::For => PekoAST::ForLoop(self.parse_for_loop()),
             lexer::TokenType::Break => PekoAST::Break(self.parse_break()),
@@ -3363,6 +3504,7 @@ impl PekoParser {
             lexer::TokenType::New => self.parse_new_expression(),
             lexer::TokenType::DangerCast => self.parse_danger_cast(),
             lexer::TokenType::Constant => self.parse_constant_builtin(),
+            lexer::TokenType::If => PekoAST::IfStatement(self.parse_if_statement()),
 
             lexer::TokenType::Identifier => {
                 // Generic-call lookahead: if a `<...>` parses as types and

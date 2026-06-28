@@ -188,6 +188,20 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             return Some(unsafe { core::LLVMPointerType(inner_llvm_type, 1) });
         }
 
+        // Enums are integer-backed: an enum-typed value lowers to a 32-bit
+        // integer holding the variant index. Extra pointer or reference depth
+        // wraps it in raw (address space 0) pointers.
+        if self
+            .get_enum_variants(&fully_qualified_type.type_name)
+            .is_some()
+        {
+            let mut base_llvm_type = unsafe { core::LLVMInt32Type() };
+            for _ in 0..(fully_qualified_type.pointer_depth + fully_qualified_type.reference_depth) {
+                base_llvm_type = unsafe { core::LLVMPointerType(base_llvm_type, 0) };
+            }
+            return Some(base_llvm_type);
+        }
+
         let base_type_class = self.get_class_by_type(type1);
 
         // Resolve the type without pointer or reference depth, then wrap

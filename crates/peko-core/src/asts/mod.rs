@@ -77,6 +77,7 @@ pub enum PekoAST {
     VariableReassignment(statements::VariableReassignmentAST),
     Return(statements::ReturnAST),
     IfStatement(statements::IfStatementAST),
+    Switch(statements::SwitchStatementAST),
     WhileLoop(statements::WhileLoopAST),
     ForLoop(statements::ForLoopAST),
     Break(statements::BreakAST),
@@ -91,6 +92,7 @@ pub enum PekoAST {
     FunctionDeclaration(declarations::FunctionDeclarationAST),
     Closure(declarations::ClosureAST),
     Class(declarations::ClassAST),
+    Enum(declarations::EnumDeclarationAST),
     ModuleCreation(declarations::ModuleCreationAST),
 
     // Placeholder
@@ -130,6 +132,7 @@ impl Spanned for PekoAST {
             Self::VariableReassignment(ast) => ast.get_start(),
             Self::Return(ast) => ast.get_start(),
             Self::IfStatement(ast) => ast.get_start(),
+            Self::Switch(ast) => ast.get_start(),
             Self::WhileLoop(ast) => ast.get_start(),
             Self::ForLoop(ast) => ast.get_start(),
             Self::Break(ast) => ast.get_start(),
@@ -144,6 +147,7 @@ impl Spanned for PekoAST {
             Self::FunctionDeclaration(ast) => ast.get_start(),
             Self::Closure(ast) => ast.get_start(),
             Self::Class(ast) => ast.get_start(),
+            Self::Enum(ast) => ast.get_start(),
             Self::ModuleCreation(ast) => ast.get_start(),
 
             // Placeholder (synthetic, no real span).
@@ -183,6 +187,7 @@ impl Spanned for PekoAST {
             Self::VariableReassignment(ast) => ast.get_end(),
             Self::Return(ast) => ast.get_end(),
             Self::IfStatement(ast) => ast.get_end(),
+            Self::Switch(ast) => ast.get_end(),
             Self::WhileLoop(ast) => ast.get_end(),
             Self::ForLoop(ast) => ast.get_end(),
             Self::Break(ast) => ast.get_end(),
@@ -197,6 +202,7 @@ impl Spanned for PekoAST {
             Self::FunctionDeclaration(ast) => ast.get_end(),
             Self::Closure(ast) => ast.get_end(),
             Self::Class(ast) => ast.get_end(),
+            Self::Enum(ast) => ast.get_end(),
             Self::ModuleCreation(ast) => ast.get_end(),
 
             // Placeholder (synthetic, no real span).

@@ -123,6 +123,7 @@ impl PekoValueSimulator for PekoAST {
             VariableReassignment,
             Return,
             IfStatement,
+            Switch,
             WhileLoop,
             ForLoop,
             Break,
@@ -136,6 +137,7 @@ impl PekoValueSimulator for PekoAST {
             FunctionDeclaration,
             Closure,
             Class,
+            Enum,
             ModuleCreation,
         )
     }
