@@ -10,7 +10,7 @@ use itertools::Itertools;
 use peko_core::asts::data_structures::{ClassMethod, PositionData, VisibilityData};
 use peko_core::asts::declarations::{
     ClassAST, ClosureAST, EnumDeclarationAST, FunctionDeclarationAST, ModuleCreationAST,
-    NewVariableAST,
+    NewVariableAST, TraitDeclarationAST,
 };
 use peko_core::asts::{PekoAST, PlaceholderAST};
 use peko_core::diagnostics;
@@ -1185,6 +1185,14 @@ impl PekoValueBuilder for EnumDeclarationAST {
 
         codegen_context.register_enum(self.enum_name.value.clone(), variant_names);
 
+        codegen_context.create_error_value()
+    }
+}
+
+impl PekoValueBuilder for TraitDeclarationAST {
+    fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        // Trait declarations emit no code on their own. Witness tables and
+        // TypeInfo are emitted per implementing class.
         codegen_context.create_error_value()
     }
 }

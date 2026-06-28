@@ -92,6 +92,7 @@ pub enum PekoAST {
     FunctionDeclaration(declarations::FunctionDeclarationAST),
     Closure(declarations::ClosureAST),
     Class(declarations::ClassAST),
+    Trait(declarations::TraitDeclarationAST),
     Enum(declarations::EnumDeclarationAST),
     ModuleCreation(declarations::ModuleCreationAST),
 
@@ -147,6 +148,7 @@ impl Spanned for PekoAST {
             Self::FunctionDeclaration(ast) => ast.get_start(),
             Self::Closure(ast) => ast.get_start(),
             Self::Class(ast) => ast.get_start(),
+            Self::Trait(ast) => ast.get_start(),
             Self::Enum(ast) => ast.get_start(),
             Self::ModuleCreation(ast) => ast.get_start(),
 
@@ -202,6 +204,7 @@ impl Spanned for PekoAST {
             Self::FunctionDeclaration(ast) => ast.get_end(),
             Self::Closure(ast) => ast.get_end(),
             Self::Class(ast) => ast.get_end(),
+            Self::Trait(ast) => ast.get_end(),
             Self::Enum(ast) => ast.get_end(),
             Self::ModuleCreation(ast) => ast.get_end(),
 

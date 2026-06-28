@@ -137,6 +137,7 @@ impl PekoValueSimulator for PekoAST {
             FunctionDeclaration,
             Closure,
             Class,
+            Trait,
             Enum,
             ModuleCreation,
         )

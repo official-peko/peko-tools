@@ -1330,6 +1330,14 @@ impl PekoValueSimulator for EnumDeclarationAST {
     }
 }
 
+impl PekoValueSimulator for TraitDeclarationAST {
+    fn simulate(&self, _simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Trait registration, conformance, and slot assignment are wired in a
+        // following step. The declaration parses and threads through analysis.
+        SimulatorValue::Value(types::PekoType::simple_type("default"))
+    }
+}
+
 /// Generic class declarations are tracked but not simulated until
 /// instantiated with concrete type parameters.
 impl PekoValueSimulator for ClassAST {

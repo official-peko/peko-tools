@@ -95,6 +95,7 @@ impl PekoValueBuilder for PekoAST {
                 Return,
                 FunctionCall,
                 Class,
+                Trait,
                 Enum,
                 ObjectConstruction,
                 ObjectAccess,

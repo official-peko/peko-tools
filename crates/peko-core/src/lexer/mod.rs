@@ -89,6 +89,8 @@ pub enum TokenType {
     DangerCast,         // danger_cast
     Return,             // return
     Class,              // class
+    Trait,              // trait
+    Impl,               // impl
     Enum,               // enum
     Switch,             // switch
     From,               // from
@@ -197,6 +199,8 @@ impl TokenType {
             Self::DangerCast => "'danger_cast'",
             Self::Return => "'return'",
             Self::Class => "'class'",
+            Self::Trait => "'trait'",
+            Self::Impl => "'impl'",
             Self::Enum => "'enum'",
             Self::Switch => "'switch'",
             Self::From => "'from'",
@@ -602,6 +606,8 @@ impl TokenList {
                         "danger_cast" => TokenType::DangerCast,
                         "return" => TokenType::Return,
                         "class" => TokenType::Class,
+                        "trait" => TokenType::Trait,
+                        "impl" => TokenType::Impl,
                         "enum" => TokenType::Enum,
                         "switch" => TokenType::Switch,
                         "from" => TokenType::From,
