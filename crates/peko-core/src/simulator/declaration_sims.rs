@@ -98,9 +98,27 @@ impl PekoValueSimulator for NewVariableAST {
                     variable_value = simulator_context.create_error_value();
                 } else if simulator_context.types_similar(&variable_value.get_type(), variable_type)
                 {
-                    variable_value = simulator_context
-                        .box_value_to_type(variable_type, &variable_value)
-                        .unwrap();
+                    if !simulator_context.const_compatible(&variable_value.get_type(), variable_type)
+                    {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.variable_value.get_start().clone(),
+                                self.variable_value.get_end().clone(),
+                                format!(
+                                    "cannot assign a `const` value of type `{}` to a non-const binding of type `{}`. Casting away const requires an explicit `as`",
+                                    variable_value.get_type(),
+                                    variable_type,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        variable_value = simulator_context.create_error_value();
+                    } else {
+                        variable_value = simulator_context
+                            .box_value_to_type(variable_type, &variable_value)
+                            .unwrap();
+                    }
                 } else {
                     simulator_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(

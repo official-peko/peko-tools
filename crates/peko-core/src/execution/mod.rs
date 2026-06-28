@@ -1235,6 +1235,13 @@ pub trait ExecutionContextAlgorithms<
         class1_parent.get_class_type().to_string() == class2.get_class_type().to_string()
     }
 
+    /// Whether a value of `source` type can flow into a `target` slot with
+    /// respect to const-ness. Const is added automatically (`T` to `const T`)
+    /// but is never dropped (`const T` to `T`) without an explicit `as`.
+    fn const_compatible(&self, source: &PekoType, target: &PekoType) -> bool {
+        target.is_const() || !source.is_const()
+    }
+
     /// Returns `true` if two types are similar enough to be cast between.
     ///
     /// Looser than [`Self::types_equal`]: pointer-to-pointer casts, casts
@@ -1494,10 +1501,13 @@ pub trait ExecutionContextAlgorithms<
                     {
                         // Only an exactly-equal argument type matches. Implicit
                         // casts are gone, so a similar-but-unequal type is not a
-                        // candidate.
+                        // candidate, and const cannot be dropped.
                         if self.types_equal(
                             function.get_arguments()[argument_name].get_argument_type(),
                             argument_type,
+                        ) && self.const_compatible(
+                            argument_type,
+                            function.get_arguments()[argument_name].get_argument_type(),
                         ) {
                             current_type_match_score += 2;
                         } else {
@@ -1538,8 +1548,11 @@ pub trait ExecutionContextAlgorithms<
                         break;
                     }
 
-                    // Only an exactly-equal argument type matches.
-                    if !self.types_equal(arg.get_argument_type(), &argument_types[index]) {
+                    // Only an exactly-equal argument type matches, and const
+                    // cannot be dropped to satisfy the parameter.
+                    if !self.types_equal(arg.get_argument_type(), &argument_types[index])
+                        || !self.const_compatible(&argument_types[index], arg.get_argument_type())
+                    {
                         current_type_match_score = 0;
                         break;
                     }
@@ -1554,8 +1567,12 @@ pub trait ExecutionContextAlgorithms<
                     for argument_type in
                         &argument_types[(function.get_arguments().len())..argument_types.len()]
                     {
-                        // Only an exactly-equal argument type matches.
-                        if !self.types_equal(argument_type, function.get_var_args_type().unwrap()) {
+                        // Only an exactly-equal argument type matches, and const
+                        // cannot be dropped.
+                        if !self.types_equal(argument_type, function.get_var_args_type().unwrap())
+                            || !self
+                                .const_compatible(argument_type, function.get_var_args_type().unwrap())
+                        {
                             current_type_match_score = 0;
                             break;
                         }
