@@ -2087,6 +2087,16 @@ impl PekoValueSimulator for ClassAST {
             simulator_context.current_method_name =
                 Some(class_method.get_info().name.value.clone());
 
+            // A constructor must initialize every attribute the class declares.
+            // Seed the to-set list with the class's own attributes; each
+            // `this.attr = ...` removes one, and any left over after the body
+            // is an uninitialized attribute.
+            let is_constructor = matches!(class_method, ClassMethod::Constructor(_, _));
+            if is_constructor {
+                simulator_context.attributes_to_set =
+                    self.attributes.keys().map(|name| name.value.clone()).collect();
+            }
+
             // Simulate the method body and check for unreachable code.
             let mut branch_exits = false;
             let mut branch_returns = false;
@@ -2114,6 +2124,24 @@ impl PekoValueSimulator for ClassAST {
                     break;
                 }
             }
+
+            // A constructor that leaves attributes unset is an error.
+            if is_constructor && !simulator_context.attributes_to_set.is_empty() {
+                let uninitialized = simulator_context.attributes_to_set.join(", ");
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        class_method.get_info().start.clone(),
+                        class_method.get_info().end.clone(),
+                        format!(
+                            "constructor of class `{}` does not initialize every attribute. The following attributes are never set: {uninitialized}",
+                            self.class_name.value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
+            simulator_context.attributes_to_set = Vec::new();
 
             // Non-void methods must return on all paths.
             if !branch_returns && class_method.get_return_type().to_string() != "void" {
