@@ -2818,6 +2818,23 @@ impl PekoValueSimulator for ObjectAccessAST {
                     simulator_context.current_method_mutates = true;
                 }
 
+                // Record the call edge so a fixpoint after simulation can
+                // propagate [mutates] through forward references that the
+                // single pass above cannot see yet.
+                if object_is_this_attribute
+                    && let Some(this_variable) = &simulator_context.current_this
+                    && let Some(caller_method) = simulator_context.current_method_name.clone()
+                {
+                    let caller_class = this_variable.variable_type.name().to_string();
+                    let callee_class = object.get_type().name().to_string();
+                    simulator_context.mutates_call_edges.push((
+                        caller_class,
+                        caller_method,
+                        callee_class,
+                        function_name.clone(),
+                    ));
+                }
+
                 if simulator_context
                     .get_class_by_type(&method_call.get_type())
                     .is_some()

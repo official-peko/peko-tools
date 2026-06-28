@@ -159,6 +159,17 @@ pub struct PekoSimulatorContext {
     /// a caller see whether the callee mutates (24.2 rule 2).
     pub last_called_method_mutates: bool,
 
+    /// Name of the method whose body is currently being simulated, if any.
+    /// Pairs with `current_this`'s class to identify the calling method when
+    /// recording mutation-call edges.
+    pub current_method_name: Option<String>,
+
+    /// Recorded `(caller_class, caller_method, callee_class, callee_method)`
+    /// edges for every method call made on `this` or an attribute of `this`.
+    /// A fixpoint over these after simulation propagates `[mutates]` through
+    /// forward references that a single pass cannot see (24.2 rule 2).
+    pub mutates_call_edges: Vec<(String, String, String, String)>,
+
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
 
@@ -298,6 +309,8 @@ impl PekoSimulatorContext {
             expecting_value: false,
             current_method_mutates: false,
             last_called_method_mutates: false,
+            current_method_name: None,
+            mutates_call_edges: Vec::new(),
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),
@@ -1169,6 +1182,86 @@ impl PekoSimulatorContext {
         }
 
         available_symbols
+    }
+
+    /// Propagates `[mutates]` across the recorded call edges to a fixpoint
+    /// (24.2 rule 2). The single pass during simulation cannot see a method
+    /// that is marked `[mutates]` only after the caller was already
+    /// simulated; this corrects every such method's flag after the fact.
+    ///
+    /// This updates the stored flags (so codegen and later analysis read the
+    /// right value). It does not re-issue the const-mutation diagnostics that
+    /// already ran during simulation.
+    pub fn propagate_mutates_fixpoint(&mut self) {
+        // Collect every class by name across the module tree.
+        let mut classes: HashMap<String, Arc<RwLock<SimulatorClass>>> = HashMap::new();
+        let mut module_queue: Vec<Arc<RwLock<SimulatorModule>>> = self
+            .module_context
+            .top_level_modules
+            .values()
+            .cloned()
+            .collect();
+        while let Some(module) = module_queue.pop() {
+            let module_read = module.read().unwrap();
+            for (name, class) in &module_read.classes {
+                classes.entry(name.clone()).or_insert_with(|| class.clone());
+            }
+            for submodule in module_read.modules.values() {
+                module_queue.push(submodule.clone());
+            }
+        }
+
+        let method_mutates = |class: &str, method: &str| -> bool {
+            classes.get(class).is_some_and(|class_ref| {
+                class_ref
+                    .read()
+                    .unwrap()
+                    .main_virtual_table
+                    .methods
+                    .get(method)
+                    .is_some_and(|overloads| {
+                        overloads
+                            .iter()
+                            .any(|overload| overload.read().unwrap().visibility.mutates)
+                    })
+            })
+        };
+
+        let edges = self.mutates_call_edges.clone();
+
+        loop {
+            let mut changed = false;
+
+            for (caller_class, caller_method, callee_class, callee_method) in &edges {
+                if !method_mutates(callee_class, callee_method) {
+                    continue;
+                }
+
+                let overloads = classes.get(caller_class).and_then(|class_ref| {
+                    class_ref
+                        .read()
+                        .unwrap()
+                        .main_virtual_table
+                        .methods
+                        .get(caller_method)
+                        .cloned()
+                });
+
+                if let Some(overloads) = overloads {
+                    for overload in &overloads {
+                        let mut overload_write = overload.write().unwrap();
+                        if !overload_write.visibility.mutates {
+                            overload_write.visibility.mutates = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
     }
 
     /// Records that a symbol named `name` was referenced, marking it used in

@@ -2083,6 +2083,10 @@ impl PekoValueSimulator for ClassAST {
             simulator_context.current_method_mutates =
                 class_method.get_info().visibility.mutates;
 
+            let previous_method_name = simulator_context.current_method_name.clone();
+            simulator_context.current_method_name =
+                Some(class_method.get_info().name.value.clone());
+
             // Simulate the method body and check for unreachable code.
             let mut branch_exits = false;
             let mut branch_returns = false;
@@ -2191,6 +2195,7 @@ impl PekoValueSimulator for ClassAST {
             }
 
             simulator_context.current_method_mutates = previous_method_mutates;
+            simulator_context.current_method_name = previous_method_name;
         }
 
         // Collect the first-constructor arguments (or attribute list

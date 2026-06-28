@@ -255,6 +255,7 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
     for ast in &asts {
         ast.simulate(&mut simulator);
     }
+    simulator.propagate_mutates_fixpoint();
     simulator.report_unused_symbols();
     for diagnostic in simulator.diagnostics.get_diagnostics() {
         diagnostics.report_diagnostic(diagnostic.clone());
