@@ -625,6 +625,7 @@ impl PekoParser {
         }
 
         let mut private = false;
+        let mut public = false;
         let mut constant = false;
         let mut external = false;
         let mut notrack = false;
@@ -640,8 +641,12 @@ impl PekoParser {
                 lexer::TokenType::Private => private = true,
                 lexer::TokenType::External => external = true,
                 lexer::TokenType::Constant => constant = true,
-                // `public` overrides `private` (last-modifier-wins).
-                lexer::TokenType::Public => private = false,
+                // `public` overrides `private` (last-modifier-wins) and is
+                // also recorded so it can suppress the unused warning.
+                lexer::TokenType::Public => {
+                    private = false;
+                    public = true;
+                }
                 lexer::TokenType::Notrack => notrack = true,
                 lexer::TokenType::Variadic => variadic = true,
                 lexer::TokenType::Blockexit => blockexit = true,
@@ -659,8 +664,8 @@ impl PekoParser {
         }
 
         VisibilityData::new(
-            private, constant, external, notrack, variadic, blockexit, hidden, state, mutates,
-            gcsafe, false,
+            private, public, constant, external, notrack, variadic, blockexit, hidden, state,
+            mutates, gcsafe, false,
         )
     }
 

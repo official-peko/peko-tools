@@ -487,6 +487,9 @@ impl PekoValueSimulator for VariableReferenceAST {
         }
 
         // --- Normal variable lookup --- //
+        // Record the reference for usage tracking before resolving it.
+        simulator_context.mark_symbol_used(&self.variable_name.value);
+
         // First: scoped (local) variables, then attributes on `this`,
         // then globals and functions in the module hierarchy.
         let variable_reference = if simulator_context
@@ -726,6 +729,11 @@ impl PekoValueSimulator for FunctionCallAST {
             }
             _ => None,
         };
+
+        // Record the called function for usage tracking.
+        if let Some(name) = &function_name {
+            simulator_context.mark_symbol_used(&name.value);
+        }
 
         // --- Built-in functions: sizeof, Error, __rt_peko_alloc, cstring --- //
         if function_name.is_some()

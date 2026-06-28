@@ -1171,6 +1171,99 @@ impl PekoSimulatorContext {
         available_symbols
     }
 
+    /// Records that a symbol named `name` was referenced, marking it used in
+    /// the current scope. Usage propagates up to the declaring scope during
+    /// the unused-symbol pass (24.1).
+    pub fn mark_symbol_used(&mut self, name: &str) {
+        if let Some(scope) = self.current_scope.as_ref() {
+            scope.write().unwrap().used_symbols.insert(name.to_string());
+        }
+    }
+
+    /// Walks the main module's scope tree and warns about declared symbols
+    /// that are never referenced (24.1). A symbol is exempt when it is
+    /// explicitly `[public]` (an intentional external surface) or named
+    /// `main` (the entry point). Class members are not warned in this pass.
+    pub fn report_unused_symbols(&mut self) {
+        let root = self
+            .module_context
+            .top_level_modules
+            .get("main")
+            .map(|module| module.read().unwrap().scope.clone());
+
+        if let Some(root) = root {
+            self.report_unused_in_scope(&root);
+        }
+    }
+
+    /// Recursive helper for [`Self::report_unused_symbols`]. Returns the set
+    /// of symbol names used anywhere in the subtree rooted at `scope`, and
+    /// warns about this scope's own unused symbols along the way.
+    fn report_unused_in_scope(
+        &mut self,
+        scope: &Arc<RwLock<Scope>>,
+    ) -> std::collections::HashSet<String> {
+        let (top_level, mut subtree_used, child_scopes, own_symbols) = {
+            let scope_read = scope.read().unwrap();
+            (
+                scope_read.top_level,
+                scope_read.used_symbols.clone(),
+                scope_read.scopes.clone(),
+                scope_read
+                    .symbols
+                    .iter()
+                    .map(|(name, symbol)| (name.clone(), symbol.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        for child in &child_scopes {
+            subtree_used.extend(self.report_unused_in_scope(child));
+        }
+
+        for (name, symbol) in own_symbols {
+            if subtree_used.contains(&name) {
+                continue;
+            }
+
+            // Only top-level free declarations and local variables are warned
+            // in this pass. Class members live in non-top-level class scopes
+            // and are skipped.
+            let (visibility, definition_start, kind) = match &symbol {
+                // `this` is injected into every method scope, not declared, so
+                // it is never reported.
+                ScopeSymbol::Variable(variable, visibility)
+                    if !variable.attribute && name != "this" =>
+                {
+                    (visibility, variable.definition_start.clone(), "variable")
+                }
+                ScopeSymbol::Function(function, visibility)
+                    if top_level && !function.generic && name != "main" =>
+                {
+                    (visibility, function.definition_start.clone(), "function")
+                }
+                _ => continue,
+            };
+
+            if visibility.public {
+                continue;
+            }
+
+            let file = self.get_current_file();
+            self.diagnostics.report_diagnostic(diagnostics::PekoDiagnostic::new(
+                definition_start.clone(),
+                definition_start,
+                format!(
+                    "{kind} `{name}` is never used. Remove it, or mark it `[public]` if it is an intentional external surface",
+                ),
+                diagnostics::DiagnosticType::Warning,
+                file,
+            ));
+        }
+
+        subtree_used
+    }
+
     /// Returns a synthetic error-typed [`SimulatorValue`].
     ///
     /// Used as the simulator's "I couldn't make sense of this expression"
