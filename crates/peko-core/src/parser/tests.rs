@@ -104,7 +104,7 @@ fn test_argument_parsing() {
 #[test]
 fn test_function_header_parsing() {
     let mut parser = create_parser_with_source(
-        "(arg1: string, const arg2: int, arg3: Array<int> = default, Args<string> => varargs) \
+        "(arg1: string, arg2: int, arg3: Array<int> = default, Args<string> => varargs) \
          endtest () => Array<int>",
     );
 
@@ -229,31 +229,108 @@ fn test_char_parsing() {
 
 #[test]
 fn test_variable_declaration_parsing() {
-    let mut parser = create_parser_with_source(
-        "variable := value; variable: string = value; const variable := value",
-    );
+    // Inferred (`let x = v`), typed (`let x: T = v`), and the let-less typed
+    // form (`x: T = v`).
+    let mut parser =
+        create_parser_with_source("let a = value; let b: string = value; c: int = value");
 
     let declaration1 = parser.parse_variable_declaration();
-
-    assert!(!declaration1.constant);
-    assert_eq!(declaration1.name.value, "variable");
+    assert_eq!(declaration1.name.value, "a");
     assert!(declaration1.variable_type.is_none());
 
     assert_eq!(parser.tokens.current_token().get_value(), ";");
     parser.tokens.increase_index();
 
     let declaration2 = parser.parse_variable_declaration();
-
-    assert!(!declaration2.constant);
-    assert_eq!(declaration2.name.value, "variable");
-    assert!(declaration2.variable_type.is_some());
+    assert_eq!(declaration2.name.value, "b");
     assert_eq!(declaration2.variable_type.unwrap().to_string(), "string");
 
     assert_eq!(parser.tokens.current_token().get_value(), ";");
     parser.tokens.increase_index();
 
     let declaration3 = parser.parse_variable_declaration();
-    assert!(declaration3.constant);
+    assert_eq!(declaration3.name.value, "c");
+    assert_eq!(declaration3.variable_type.unwrap().to_string(), "int");
+
+    assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+}
+
+#[test]
+fn test_cast_forms_parsing() {
+    use crate::asts::expressions::CastKind;
+
+    let mut parser =
+        create_parser_with_source("x as i64 danger_cast<i32>(y) constant<f64>(1.3)");
+
+    match parser.parse_expression() {
+        PekoAST::Cast(cast) => {
+            assert_eq!(cast.kind, CastKind::Checked);
+            assert_eq!(cast.cast_to.to_string(), "int64");
+        }
+        _ => panic!("expected `x as i64` to parse as a checked cast"),
+    }
+
+    match parser.parse_expression() {
+        PekoAST::Cast(cast) => {
+            assert_eq!(cast.kind, CastKind::Forced);
+            assert_eq!(cast.cast_to.to_string(), "int");
+        }
+        _ => panic!("expected `danger_cast<i32>(y)` to parse as a forced cast"),
+    }
+
+    match parser.parse_expression() {
+        PekoAST::Cast(cast) => {
+            assert_eq!(cast.kind, CastKind::Constant);
+            assert_eq!(cast.cast_to.to_string(), "double");
+        }
+        _ => panic!("expected `constant<f64>(1.3)` to parse as a constant"),
+    }
+
+    assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+}
+
+#[test]
+fn test_new_object_construction_parsing() {
+    let mut parser =
+        create_parser_with_source("new Box(5) new Sorter<int, string>(a, b)");
+
+    match parser.parse_expression() {
+        PekoAST::ObjectConstruction(construction) => {
+            assert_eq!(construction.class_name.value, "Box");
+            assert!(construction.object_generics.is_empty());
+            assert_eq!(construction.arguments.len(), 1);
+        }
+        _ => panic!("expected `new Box(5)` to parse as an object construction"),
+    }
+
+    match parser.parse_expression() {
+        PekoAST::ObjectConstruction(construction) => {
+            assert_eq!(construction.class_name.value, "Sorter");
+            assert_eq!(construction.object_generics.len(), 2);
+            assert_eq!(construction.object_generics[0].to_string(), "int");
+            assert_eq!(construction.object_generics[1].to_string(), "string");
+            assert_eq!(construction.arguments.len(), 2);
+        }
+        _ => panic!("expected `new Sorter<int, string>(a, b)` to parse as an object construction"),
+    }
+
+    assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+}
+
+#[test]
+fn test_let_variable_declaration_parsing() {
+    let mut parser = create_parser_with_source("let x: int = value; let y = value");
+
+    let typed = parser.parse_variable_declaration();
+    assert_eq!(typed.name.value, "x");
+    assert_eq!(typed.variable_type.unwrap().to_string(), "int");
+
+    assert_eq!(parser.tokens.current_token().get_value(), ";");
+    parser.tokens.increase_index();
+
+    let inferred = parser.parse_variable_declaration();
+    assert_eq!(inferred.name.value, "y");
+    assert!(inferred.variable_type.is_none());
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
 }
@@ -297,7 +374,7 @@ fn test_class_declaration_parsing() {
     [state] attr1: string;
     attr2: int;
 
-    constructor(arg1: string, const arg2: int, arg3: Array<int> = default) {}
+    constructor(arg1: string, arg2: int, arg3: Array<int> = default) {}
 
     fn method1() {}
 

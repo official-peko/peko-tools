@@ -290,3 +290,43 @@ fn display_matches_to_string() {
     let t = PekoType::from_string("module::Foo<int>[]?", "");
     assert_eq!(format!("{t}"), t.to_string());
 }
+
+#[test]
+fn v2_ffi_scalar_names_canonicalize_to_internal_names() {
+    assert_eq!(PekoType::from_string("i16", "").type_name, "int16");
+    assert_eq!(PekoType::from_string("i32", "").type_name, "int");
+    assert_eq!(PekoType::from_string("i64", "").type_name, "int64");
+    assert_eq!(PekoType::from_string("i128", "").type_name, "int128");
+    assert_eq!(PekoType::from_string("f32", "").type_name, "float");
+    assert_eq!(PekoType::from_string("f64", "").type_name, "double");
+}
+
+#[test]
+fn v2_ffi_scalars_are_builtins_and_have_the_right_class() {
+    assert!(PekoType::from_string("i32", "").is_integer());
+    assert!(PekoType::from_string("i64", "").is_integer());
+    assert!(PekoType::from_string("f32", "").is_float());
+    assert!(PekoType::from_string("f64", "").is_float());
+    assert!(PekoType::from_string("i32", "").is_builtin_type());
+}
+
+#[test]
+fn v2_half_float_is_recognized() {
+    let half = PekoType::from_string("f16", "");
+    assert_eq!(half.type_name, "f16");
+    assert!(half.is_float());
+    assert!(half.is_builtin_type());
+}
+
+#[test]
+fn v2_lowercase_pointer_canonicalizes_to_pointer() {
+    let managed = PekoType::from_string("pointer<void>", "");
+    assert_eq!(managed.type_name, "Pointer");
+    assert!(managed.is_pointer());
+    assert_eq!(managed.generic_types.len(), 1);
+    assert_eq!(managed.generic_types[0].type_name, "void");
+
+    let typed = PekoType::from_string("pointer<Buffer>", "");
+    assert_eq!(typed.type_name, "Pointer");
+    assert_eq!(typed.generic_types[0].type_name, "Buffer");
+}

@@ -214,6 +214,107 @@ pub fn compile(
     })
 }
 
+/// Parse, simulate, and codegen a source snippet with no standard library,
+/// returning the generated LLVM IR plus all diagnostics.
+///
+/// The `--astir` harness uses this to inspect a single language construct in
+/// isolation. No default imports are prepended and no external modules are
+/// loaded, so only primitive and FFI-level constructs codegen. A construct
+/// that needs the standard library is out of scope for this path.
+pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
+    let file = PathBuf::from("<astir>.peko");
+    let work_dir = std::env::temp_dir();
+    let mut diagnostics = DiagnosticList::new();
+
+    // Parse with no default-import prelude.
+    let mut parser = PekoParser::new(TokenList::from_source(source, &file), &file);
+    let mut asts = Vec::new();
+    while !parser.tokens.finished() {
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+        if parser.tokens.finished() {
+            break;
+        }
+        asts.push(parser.parse());
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+    }
+    for diagnostic in parser.get_diagnostics().get_diagnostics() {
+        diagnostics.report_diagnostic(diagnostic.clone());
+    }
+
+    // Simulate (type-check) without the standard library.
+    let end = asts
+        .last()
+        .map(|ast| ast.get_end().clone())
+        .unwrap_or_else(|| PositionData::new(1, 0, 1, file.clone()));
+    let mut simulator =
+        PekoSimulatorContext::new(PekoTarget::default(), file.clone(), end, work_dir.clone());
+    for ast in &asts {
+        ast.simulate(&mut simulator);
+    }
+    for diagnostic in simulator.diagnostics.get_diagnostics() {
+        diagnostics.report_diagnostic(diagnostic.clone());
+    }
+
+    // Codegen without the standard library. Some constructs (object
+    // allocation, number and string objects) reach for the runtime, which this
+    // harness omits, so codegen can panic on them. Run it under catch_unwind
+    // and report rather than crashing, so the type-check results above still
+    // surface.
+    let asts_for_codegen = &asts;
+    let codegen_file = file.clone();
+    let codegen_dir = work_dir.clone();
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let codegen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut codegen_context = PekoCodegenContext::new(
+            PekoTarget::default(),
+            codegen_file.clone(),
+            false,
+            codegen_dir.clone(),
+        );
+        for ast in asts_for_codegen {
+            ast.build_value(&mut codegen_context);
+        }
+        let codegen_diagnostics = codegen_context.diagnostics.get_diagnostics().to_vec();
+
+        // Emit just the main module's IR. The full link step pulls in the
+        // runtime and standard library, which this harness deliberately omits.
+        let ir_path = codegen_dir.join("peko_astir.ll");
+        codegen_context
+            .module_context
+            .current_module()
+            .write()
+            .unwrap()
+            .top_level_info
+            .as_mut()
+            .unwrap()
+            .emit_ir(&ir_path);
+        let ir = std::fs::read_to_string(&ir_path)
+            .unwrap_or_else(|error| format!("(could not read IR: {error})"));
+
+        (ir, codegen_diagnostics)
+    }));
+    std::panic::set_hook(previous_hook);
+
+    let ir = match codegen_result {
+        Ok((ir, codegen_diagnostics)) => {
+            for diagnostic in codegen_diagnostics {
+                diagnostics.report_diagnostic(diagnostic);
+            }
+            ir
+        }
+        Err(_) => String::from(
+            "(codegen did not complete: this construct needs the runtime or standard library)",
+        ),
+    };
+
+    (ir, diagnostics)
+}
+
 /// Codegen the default-import modules without compiling any user source.
 ///
 /// Used by commands that need the runtime / standard library available as

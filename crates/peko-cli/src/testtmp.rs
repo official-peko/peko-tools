@@ -116,9 +116,19 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     // a shorthand module path / symbol unpack). Without one, every path
     // dependency is imported by its bare name.
     let all_resolved = if let Some(argument) = cli_info.arguments.first() {
-        let source = import_source(argument);
-        println!("  simulating: {}", source.trim_end());
-        simulate_source(&loaded.root, &modules, "custom", &source)
+        if let Some(parsed_ok) = ffi_introspect(&loaded.root, argument) {
+            // The header parsed; now run the real import through the simulator
+            // so the FFI declarations flow through the actual module path and
+            // their V2 types are resolved.
+            let source = import_source(argument);
+            println!("  -- real import simulation --");
+            let simulated = simulate_source(&loaded.root, &modules, "ffi", &source);
+            parsed_ok && simulated
+        } else {
+            let source = import_source(argument);
+            println!("  simulating: {}", source.trim_end());
+            simulate_source(&loaded.root, &modules, "custom", &source)
+        }
     } else {
         let path_deps: Vec<&String> = loaded
             .manifest
@@ -148,6 +158,79 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         reporter.error("testtmp: some imports failed to resolve");
         ExitCode::FAILURE
     }
+}
+
+/// If the import argument names a `.peko.h` under the project's source
+/// directory, parse it with the FFI parser and print the resulting module.
+///
+/// Returns whether it parsed cleanly, or `None` when no such header exists, so
+/// the caller falls back to ordinary simulation.
+fn ffi_introspect(project_root: &Path, argument: &str) -> Option<bool> {
+    let segments: Vec<&str> = module_path(argument)
+        .split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let (last, dirs) = segments.split_last()?;
+
+    let mut header_path = project_root.join("source");
+    for dir in dirs {
+        header_path = header_path.join(dir);
+    }
+    header_path = header_path.join(format!("{last}.peko.h"));
+    if !header_path.is_file() {
+        return None;
+    }
+
+    println!("  ffi header: {}", header_path.display());
+    let source = match std::fs::read_to_string(&header_path) {
+        Ok(source) => source,
+        Err(e) => {
+            println!("  could not read header: {e}");
+            return Some(false);
+        }
+    };
+
+    let parsed = peko_core::ffi::parse_header(&source);
+    println!(
+        "  functions: {}, variables: {}, errors: {}",
+        parsed.module.functions.len(),
+        parsed.module.variables.len(),
+        parsed.errors.len()
+    );
+    for function in &parsed.module.functions {
+        let params: Vec<String> = function
+            .params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.ty.peko))
+            .collect();
+        let variadic = if function.variadic { ", ..." } else { "" };
+        let gcsafe = if function.gc_safe { " [gcsafe]" } else { "" };
+        println!(
+            "    fn  {}({}{variadic}) -> {}{gcsafe}",
+            function.name,
+            params.join(", "),
+            function.return_type.peko
+        );
+    }
+    for variable in &parsed.module.variables {
+        println!("    var {}: {}", variable.name, variable.ty.peko);
+    }
+    for error in &parsed.errors {
+        println!("    error: {error}");
+    }
+
+    Some(parsed.errors.is_empty())
+}
+
+/// Extract the module path from an import argument: the part after `from`, or
+/// the argument with a leading `import` and trailing `;` stripped.
+fn module_path(argument: &str) -> &str {
+    let trimmed = argument.trim().trim_end_matches(';').trim();
+    if let Some(index) = trimmed.rfind("from") {
+        return trimmed[index + "from".len()..].trim();
+    }
+    trimmed.strip_prefix("import").unwrap_or(trimmed).trim()
 }
 
 /// Turn a `--testtmp` argument into an import statement.

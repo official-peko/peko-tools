@@ -167,10 +167,24 @@ impl Spanned for UnwrapAST {
 ///
 /// `CastAST` derives both ends of its span from its children: the start
 /// from `value`, and the end from the cast target's type-end position.
+/// Which of the three cast forms a [`CastAST`] represents.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CastKind {
+    /// `value as T`: a statically-proven-safe cast, checked at compile time.
+    Checked,
+    /// `danger_cast<T>(value)`: an unchecked, forced cast that reinterprets or
+    /// numerically converts at runtime without a safety check.
+    Forced,
+    /// `constant<T>(value)`: a compile-time constant of the FFI type `T`,
+    /// emitted directly as an LLVM constant from a literal.
+    Constant,
+}
+
 #[derive(Clone, new)]
 pub struct CastAST {
     pub value: Box<PekoAST>,
     pub cast_to: types::PekoType,
+    pub kind: CastKind,
 }
 
 impl Spanned for CastAST {

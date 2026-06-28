@@ -61,6 +61,20 @@ async fn main() -> ExitCode {
         return testtmp::run(&cli_info, &reporter).await;
     }
 
+    // ---- TEMPORARY: AST-to-IR language harness ---------------------------
+    //
+    // `--astir "<source>"` parses, type-checks, and codegens a snippet with
+    // no standard library, then prints the diagnostics and the LLVM IR. Used
+    // to exercise V2 language features in isolation. Remove once the V2
+    // language work settles.
+    if cli_info.flags.has_flag("astir") {
+        let source = cli_info.arguments.first().cloned().unwrap_or_default();
+        let (ir, diagnostics) = execution::compile_snippet_to_ir(&source);
+        reporter.report_diagnostics(&diagnostics);
+        println!("{ir}");
+        return ExitCode::SUCCESS;
+    }
+
     // ---- No subcommand: print master help ------------------------------
     if cli_info.arguments.is_empty() {
         print_master_help(&cli_info.executable);

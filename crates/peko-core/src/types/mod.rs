@@ -107,7 +107,7 @@ impl PekoType {
     ) -> PekoType {
         PekoType {
             module_names,
-            type_name,
+            type_name: canonical_builtin_name(type_name),
             generic_types,
             pointer_depth,
             optional_depth,
@@ -577,7 +577,7 @@ impl PekoType {
 
         matches!(
             self.type_name.as_str(),
-            "int" | "int16" | "int128" | "int64" | "float" | "double" | "bool"
+            "int" | "int16" | "int128" | "int64" | "float" | "double" | "f16" | "bool"
         )
     }
 
@@ -632,7 +632,7 @@ impl PekoType {
             return false;
         }
 
-        matches!(self.type_name.as_str(), "float" | "double")
+        matches!(self.type_name.as_str(), "float" | "double" | "f16")
     }
 
     /// Returns the element type one level "inside" a pointer or reference.
@@ -703,6 +703,7 @@ impl PekoType {
                 | "int128"
                 | "float"
                 | "double"
+                | "f16"
                 | "char"
                 | "string"
                 | "cstr"
@@ -943,6 +944,30 @@ impl fmt::Display for PekoType {
 ///
 /// Type names can be plain identifiers or any of the keyword tokens that
 /// double as built-in type names (`string`, `int`, `bool`, etc.).
+/// Maps a V2 FFI builtin spelling to the internal type name the analyzer and
+/// codegen already handle. The V2 surface names the integers `i1` through
+/// `i128`, the floats `f32` and `f64`, and the managed pointer `pointer<T>`.
+/// `i1` and `i8` map to `bool` and `char` (their matching widths). Each lowers
+/// to the same representation as the matching internal name, so downstream type
+/// checks and codegen need no separate cases. The half float `f16` keeps its
+/// own name and is recognized directly. Names without a V2 alias, including
+/// user types and `cstr`, `opaque`, `char`, `bool`, `void`, and `string`, pass
+/// through unchanged.
+fn canonical_builtin_name(name: String) -> String {
+    match name.as_str() {
+        "i1" => String::from("bool"),
+        "i8" => String::from("char"),
+        "i16" => String::from("int16"),
+        "i32" => String::from("int"),
+        "i64" => String::from("int64"),
+        "i128" => String::from("int128"),
+        "f32" => String::from("float"),
+        "f64" => String::from("double"),
+        "pointer" => String::from("Pointer"),
+        _ => name,
+    }
+}
+
 fn is_type_name_token(ty: &lexer::TokenType) -> bool {
     matches!(
         ty,

@@ -660,7 +660,7 @@ impl PekoParser {
 
         VisibilityData::new(
             private, constant, external, notrack, variadic, blockexit, hidden, state, mutates,
-            gcsafe,
+            gcsafe, false,
         )
     }
 
@@ -922,6 +922,75 @@ impl PekoParser {
         (function_generics, arguments, ending_position)
     }
 
+    /// Parses an object instantiation: `new Class(args)` or
+    /// `new Class<T1, T2>(args)`. The cursor starts on `new`.
+    fn parse_new_expression(&mut self) -> PekoAST {
+        let starting_position = self.get_current_position();
+        self.tokens.increase_index();
+
+        let class_name = PositionedValue::from_token(self.tokens.current_token());
+        self.expect_token_type(&lexer::TokenType::Identifier, "class name");
+        self.tokens.increase_index();
+
+        let (object_generics, arguments, ending_position) = self.parse_arguments();
+
+        PekoAST::ObjectConstruction(ObjectConstructionAST::new(
+            starting_position,
+            ending_position,
+            class_name,
+            object_generics,
+            arguments,
+        ))
+    }
+
+    /// Parses a forced cast: `danger_cast<T>(value)`. The cursor starts on
+    /// `danger_cast`.
+    fn parse_danger_cast(&mut self) -> PekoAST {
+        self.tokens.increase_index();
+
+        if self.expect_token_value("<", "danger_cast type parameter") {
+            self.tokens.increase_index();
+        }
+        let cast_to = types::PekoType::from_tokens(self);
+        if self.expect_token_value(">", "danger_cast type parameter") {
+            self.tokens.increase_index();
+        }
+
+        if self.expect_token_value("(", "danger_cast value") {
+            self.tokens.increase_index();
+        }
+        let value = self.parse();
+        if self.expect_token_value(")", "danger_cast value") {
+            self.tokens.increase_index();
+        }
+
+        PekoAST::Cast(CastAST::new(Box::new(value), cast_to, CastKind::Forced))
+    }
+
+    /// Parses an FFI constant builtin: `constant<T>(value)`. The cursor starts
+    /// on `constant`.
+    fn parse_constant_builtin(&mut self) -> PekoAST {
+        self.tokens.increase_index();
+
+        if self.expect_token_value("<", "constant type parameter") {
+            self.tokens.increase_index();
+        }
+        let constant_type = types::PekoType::from_tokens(self);
+        if self.expect_token_value(">", "constant type parameter") {
+            self.tokens.increase_index();
+        }
+
+        if self.expect_token_value("(", "constant value") {
+            self.tokens.increase_index();
+        }
+        let value = self.parse();
+        if self.expect_token_value(")", "constant value") {
+            self.tokens.increase_index();
+        }
+
+        PekoAST::Cast(CastAST::new(Box::new(value), constant_type, CastKind::Constant))
+    }
+
     /// Parses a function-header argument list: `(arg: type, ..., Args<T> => name) => ret`.
     ///
     /// `parse_varargs` controls whether `Args<T> => name` variadic syntax is
@@ -976,14 +1045,9 @@ impl PekoParser {
                 continue;
             }
 
-            // Normal argument: `[const] name: type [= default]`.
-            let visibility = match self.tokens.current_token().get_type() {
-                lexer::TokenType::Const => {
-                    self.tokens.increase_index();
-                    VisibilityData::constant()
-                }
-                _ => VisibilityData::open_visibility(),
-            };
+            // Normal argument: `name: type [= default]`. Constness is carried
+            // by the type (`name: const type`), not an argument modifier.
+            let visibility = VisibilityData::open_visibility();
 
             let argument_start = self.get_current_position();
 
@@ -1299,7 +1363,7 @@ impl PekoParser {
             .tokens
             .current_token()
             .get_value()
-            .parse::<f32>()
+            .parse::<f64>()
             .unwrap();
 
         let is_float = self.tokens.current_token().get_value().contains('.');
@@ -1325,11 +1389,8 @@ impl PekoParser {
     pub fn parse_variable_declaration(&mut self) -> NewVariableAST {
         let starting_position = self.get_current_position();
 
-        let is_constant = matches!(
-            self.tokens.current_token().get_type(),
-            lexer::TokenType::Const
-        );
-        if is_constant {
+        // The `let` keyword introduces the declaration.
+        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Let) {
             self.tokens.increase_index();
         }
 
@@ -1337,30 +1398,28 @@ impl PekoParser {
         self.expect_token_type(&lexer::TokenType::Identifier, "variable name");
         self.tokens.increase_index();
 
+        // `let x: T = v` declares with an explicit type; `let x = v` infers the
+        // type from the initializer.
         let error: bool;
-        let variable_type = match self.tokens.current_token().get_type() {
-            lexer::TokenType::Walrus => {
-                error = false;
+        let variable_type = if self.tokens.current_token().equals(":") {
+            error = false;
+            self.tokens.increase_index();
+
+            let var_type = types::PekoType::from_tokens(self);
+
+            if self.expect_token_value("=", "variable value") {
                 self.tokens.increase_index();
-                None
             }
-            lexer::TokenType::Colon => {
-                error = false;
-                self.tokens.increase_index();
 
-                let var_type = types::PekoType::from_tokens(self);
-
-                if self.expect_token_value("=", "variable value") {
-                    self.tokens.increase_index();
-                }
-
-                Some(var_type)
-            }
-            _ => {
-                error = true;
-                self.report_diagnostic("expected `:` (for a typed declaration like `x: int = 0`) or `:=` (for inferred declaration like `x := 0`) after the variable name");
-                None
-            }
+            Some(var_type)
+        } else if self.tokens.current_token().equals("=") {
+            error = false;
+            self.tokens.increase_index();
+            None
+        } else {
+            error = true;
+            self.report_diagnostic("expected `:` for a typed declaration like `let x: int = 0`, or `=` for an inferred declaration like `let x = 0`");
+            None
         };
 
         let variable_value = if error {
@@ -1377,7 +1436,7 @@ impl PekoParser {
             self.get_current_position(),
             VisibilityData::open_visibility(),
             None,
-            is_constant,
+            false,
             variable_name,
             variable_type,
             Box::new(variable_value),
@@ -1645,14 +1704,9 @@ impl PekoParser {
                             self.expect_token_type(&lexer::TokenType::Identifier, "parameter name");
                             self.tokens.increase_index();
                         } else {
-                            // Normal argument.
-                            let visibility = match self.tokens.current_token().get_type() {
-                                lexer::TokenType::Const => {
-                                    self.tokens.increase_index();
-                                    VisibilityData::constant()
-                                }
-                                _ => VisibilityData::open_visibility(),
-                            };
+                            // Normal argument. Constness is carried by the type
+                            // (`name: const type`), not an argument modifier.
+                            let visibility = VisibilityData::open_visibility();
 
                             let argument_definition_start = self.get_current_position();
                             let argument_name =
@@ -2851,7 +2905,8 @@ impl PekoParser {
                 if matches!(self.tokens.current_token().get_type(), lexer::TokenType::As) {
                     self.tokens.increase_index();
                     let cast_to = types::PekoType::from_tokens(self);
-                    first_val = PekoAST::Cast(CastAST::new(Box::new(first_val), cast_to));
+                    first_val =
+                        PekoAST::Cast(CastAST::new(Box::new(first_val), cast_to, CastKind::Checked));
                 }
 
                 match self.tokens.current_token().get_type() {
@@ -2912,6 +2967,7 @@ impl PekoParser {
                         operand_stack.push(PekoAST::Cast(CastAST::new(
                             Box::new(convert_value),
                             convert_type,
+                            CastKind::Checked,
                         )));
                     } else {
                         self.report_diagnostic("`as` requires a value to cast. Use `value as Type` to cast a value to another type");
@@ -3230,7 +3286,7 @@ impl PekoParser {
                 PekoAST::FunctionDeclaration(function_declaration)
             }
 
-            lexer::TokenType::Const => {
+            lexer::TokenType::Let => {
                 let mut variable_declaration = self.parse_variable_declaration();
                 variable_declaration.docinfo = docinfo;
                 if let Some(v) = visibility {
@@ -3263,21 +3319,9 @@ impl PekoParser {
             lexer::TokenType::Continue => PekoAST::Continue(self.parse_continue()),
             lexer::TokenType::Return => PekoAST::Return(self.parse_return()),
 
-            // Identifier-led: either a variable declaration with explicit
-            // type / walrus, or an expression.
-            lexer::TokenType::Identifier | lexer::TokenType::Super => {
-                match self.tokens.get_token_forward(1).get_type() {
-                    lexer::TokenType::Colon | lexer::TokenType::Walrus => {
-                        let mut variable_declaration = self.parse_variable_declaration();
-                        variable_declaration.docinfo = docinfo;
-                        if let Some(v) = visibility {
-                            variable_declaration.visibility = v;
-                        }
-                        PekoAST::NewVariable(variable_declaration)
-                    }
-                    _ => self.parse_expression(),
-                }
-            }
+            // Identifier-led statements are expressions. Variable declarations
+            // are introduced by `let`, handled above.
+            lexer::TokenType::Identifier | lexer::TokenType::Super => self.parse_expression(),
 
             // Anything else: PekoX tag if it starts with a known HTML tag,
             // otherwise an expression.
@@ -3316,6 +3360,9 @@ impl PekoParser {
             lexer::TokenType::Number => PekoAST::Number(self.parse_number()),
             lexer::TokenType::Null => PekoAST::Null(self.parse_null()),
             lexer::TokenType::Closure => PekoAST::Closure(self.parse_closure_declaration()),
+            lexer::TokenType::New => self.parse_new_expression(),
+            lexer::TokenType::DangerCast => self.parse_danger_cast(),
+            lexer::TokenType::Constant => self.parse_constant_builtin(),
 
             lexer::TokenType::Identifier => {
                 // Generic-call lookahead: if a `<...>` parses as types and

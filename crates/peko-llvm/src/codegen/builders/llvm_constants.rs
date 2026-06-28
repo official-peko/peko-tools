@@ -47,7 +47,7 @@ pub trait LlvmConstantBuilder {
     fn create_constant_float(&mut self, float_value: f32) -> CodegenValue;
 
     /// Build a constant `double` (`f64`).
-    fn create_constant_double(&mut self, double_value: f32) -> CodegenValue;
+    fn create_constant_double(&mut self, double_value: f64) -> CodegenValue;
 
     /// Build a constant `bool` (`i1`).
     fn create_constant_boolean(&mut self, boolean: bool) -> CodegenValue;
@@ -343,9 +343,9 @@ impl LlvmConstantBuilder for PekoCodegenContext {
         )
     }
 
-    fn create_constant_double(&mut self, double_value: f32) -> CodegenValue {
+    fn create_constant_double(&mut self, double_value: f64) -> CodegenValue {
         CodegenValue::new(
-            unsafe { core::LLVMConstReal(core::LLVMDoubleType(), double_value as f64) },
+            unsafe { core::LLVMConstReal(core::LLVMDoubleType(), double_value) },
             PekoType::simple_type("double"),
         )
     }

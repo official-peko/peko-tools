@@ -189,8 +189,10 @@ impl PekoValueSimulator for NewVariableAST {
 
         // External variables get registered on the extern module
         // (preserving their original names), but a scope symbol is
-        // still placed in the current scope for visibility.
-        if self.visibility.external {
+        // still placed in the current scope for visibility. A scoped foreign
+        // variable (a `.peko.h` import) stays in its declaring module so it
+        // resolves through that module.
+        if self.visibility.external && !self.visibility.scoped {
             simulator_context
                 .module_context
                 .extern_module
@@ -500,7 +502,11 @@ impl PekoValueSimulator for FunctionDeclarationAST {
             == "main"
             && self.function_name.value == "OnStart";
 
-        let function_module = if self.visibility.external || is_onstart {
+        // External functions live in the global extern module, except a
+        // scoped foreign symbol (a `.peko.h` import) which stays in its
+        // declaring module so it resolves through that module.
+        let function_module = if (self.visibility.external && !self.visibility.scoped) || is_onstart
+        {
             simulator_context.module_context.extern_module.clone()
         } else {
             simulator_context.module_context.current_module().clone()

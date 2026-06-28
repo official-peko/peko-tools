@@ -198,12 +198,15 @@ impl PekoValueBuilder for NewVariableAST {
             final_name
         };
 
+        // A scoped foreign variable (a `.peko.h` import) is a declaration-only
+        // reference to a C-owned symbol, so it is not initialized here.
+        let initialize_global = !self.visibility.scoped;
         let global_symbol_name = SymbolName::from(None, None, &global_name, None);
         let global_declaration = codegen_context.create_named_global(
             Some(global_symbol_name.clone()),
             &global_type,
             self.visibility.external,
-            true,
+            initialize_global,
         );
         let global_variable = CodegenVariable::new(
             self.visibility.clone(),
@@ -214,9 +217,10 @@ impl PekoValueBuilder for NewVariableAST {
             None,
         );
 
-        // External variables live in the extern module; the rest live
-        // in the current module.
-        if self.visibility.external {
+        // External variables live in the extern module; the rest live in the
+        // current module. A scoped foreign variable stays in its declaring
+        // module so it resolves through that module.
+        if self.visibility.external && !self.visibility.scoped {
             codegen_context
                 .module_context
                 .extern_module
@@ -240,20 +244,26 @@ impl PekoValueBuilder for NewVariableAST {
                 );
         }
 
-        let current_file = codegen_context.get_current_file().to_path_buf();
+        // A scoped foreign variable has no Peko-side initializer to emit; the
+        // declaration-only reference resolves to the C-owned symbol at link
+        // time. Every other global records its initializer for the globals
+        // pass to store.
+        if !self.visibility.scoped {
+            let current_file = codegen_context.get_current_file().to_path_buf();
 
-        CodegenModule::get_top_parent(codegen_context.module_context.current_module())
-            .write()
-            .unwrap()
-            .top_level_info
-            .as_mut()
-            .unwrap()
-            .globals_info
-            .globals_to_set
-            .push((
-                GlobalVariable::new(global_declaration, global_type, global_name, current_file),
-                self.variable_value.as_ref().clone(),
-            ));
+            CodegenModule::get_top_parent(codegen_context.module_context.current_module())
+                .write()
+                .unwrap()
+                .top_level_info
+                .as_mut()
+                .unwrap()
+                .globals_info
+                .globals_to_set
+                .push((
+                    GlobalVariable::new(global_declaration, global_type, global_name, current_file),
+                    self.variable_value.as_ref().clone(),
+                ));
+        }
 
         codegen_context.current_expected_type_options = previous_expected_type;
         codegen_context.create_null_pointer()
@@ -447,7 +457,12 @@ impl PekoValueBuilder for FunctionDeclarationAST {
 
         // --- Create function definition ---
 
-        let function_module = if self.visibility.external || is_onstart {
+        // External functions live in the global extern module, except a scoped
+        // foreign symbol (a `.peko.h` import) which stays in its declaring
+        // module so calls resolve through that module. The raw name and gc-leaf
+        // marking still apply because the function stays external.
+        let function_module = if (self.visibility.external && !self.visibility.scoped) || is_onstart
+        {
             codegen_context.module_context.extern_module.clone()
         } else {
             codegen_context.module_context.current_module().clone()

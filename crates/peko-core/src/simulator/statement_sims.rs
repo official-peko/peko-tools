@@ -18,6 +18,7 @@ use crate::asts::data_structures::{PositionData, UnpackItem, VisibilityData};
 use crate::asts::statements::*;
 use crate::diagnostics;
 use crate::execution::ExecutionContextAlgorithms;
+use crate::ffi;
 use crate::{lexer, parser, types};
 
 use super::PekoValueSimulator;
@@ -761,7 +762,7 @@ impl PekoValueSimulator for ImportStatementAST {
             // Read the source file. If it can't be read (e.g. the file
             // disappeared between the .exists() check and now), report
             // a diagnostic and bail out rather than panicking.
-            let module_source = match std::fs::read_to_string(&module_entry_file_path) {
+            let raw_source = match std::fs::read_to_string(&module_entry_file_path) {
                 Ok(source) => source,
                 Err(err) => {
                     simulator_context
@@ -780,6 +781,31 @@ impl PekoValueSimulator for ImportStatementAST {
                     simulator_context.root_folder = previous_root_folder;
                     return simulator_context.create_error_value();
                 }
+            };
+
+            // An FFI header is parsed as a C interop surface and lowered to
+            // equivalent external Peko declarations. Parse errors and any
+            // unsupported declarations are reported at the import site, then
+            // the lowered source flows through the ordinary module path.
+            let module_source = if ffi::is_ffi_header(&module_entry_file_path) {
+                let parsed = ffi::parse_header(&raw_source);
+                for error in &parsed.errors {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            format!(
+                                "FFI header `{}`: {error}",
+                                module_entry_file_path.display(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                }
+                ffi::header_to_peko_source(&parsed)
+            } else {
+                raw_source
             };
 
             // Parse the module into ASTs.
@@ -946,6 +972,23 @@ impl PekoValueSimulator for ImportStatementAST {
                         Vec::new()
                     },
                 );
+            }
+
+            // Declarations lowered from an FFI header stay external for their
+            // raw name and gc-leaf marking, but are scoped to this module so
+            // they resolve through it rather than the global extern module.
+            if ffi::is_ffi_header(&module_entry_file_path) {
+                for ast in asts.iter_mut() {
+                    match ast {
+                        PekoAST::FunctionDeclaration(declaration) => {
+                            declaration.visibility.scoped = true;
+                        }
+                        PekoAST::NewVariable(declaration) => {
+                            declaration.visibility.scoped = true;
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             for ast in &asts {

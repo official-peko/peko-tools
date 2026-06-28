@@ -1453,9 +1453,10 @@ impl PekoValueSimulator for FunctionCallAST {
             }
         }
 
-        // --- Step 2c: class construction --- //
-        // If the name resolves to a class (generic or otherwise),
-        // re-delegate as an ObjectConstructionAST.
+        // Object construction is its own AST node, produced by the parser from
+        // `new Class(args)`. A bare `Class(args)` that names a class is the
+        // missing-`new` mistake, reported here so it does not fall through to
+        // function-call resolution.
         if !no_parent
             && (function_module
                 .read()
@@ -1468,14 +1469,18 @@ impl PekoValueSimulator for FunctionCallAST {
                     .classes
                     .contains_key(&function_full_name))
         {
-            return ObjectConstructionAST::new(
-                self.start.clone(),
-                self.end.clone(),
-                PositionedValue::create_no_position(function_base_name),
-                function_generics,
-                self.arguments.clone(),
-            )
-            .simulate(simulator_context);
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    format!(
+                        "`{function_base_name}` is a class. Construct it with `new {function_base_name}(...)`"
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
         }
 
         // --- Argument simulation in call module's context --- //
@@ -3306,6 +3311,30 @@ impl PekoValueSimulator for CastAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         let value = self.value.simulate(simulator_context);
         let value_type = value.get_type();
+
+        // A forced `danger_cast<T>(value)` or a `constant<T>(value)` performs no
+        // safety check; the result simply takes the target type.
+        if matches!(self.kind, CastKind::Forced | CastKind::Constant) {
+            if !simulator_context.type_exists(&self.cast_to) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.cast_to.start_position.clone(),
+                        self.cast_to.end_position.clone(),
+                        format!(
+                            "type `{}` is not defined. Check the type name and that the type is in scope",
+                            self.cast_to,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                return simulator_context.create_error_value();
+            }
+            let expanded = simulator_context
+                .expand_type(&self.cast_to)
+                .unwrap_or_else(|| self.cast_to.clone());
+            return SimulatorValue::Value(expanded);
+        }
 
         let box_value = simulator_context.box_value_to_type(&self.cast_to, &value);
 

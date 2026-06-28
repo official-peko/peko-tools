@@ -8,13 +8,15 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use llvm_sys_180::core;
 use llvm_sys_180::prelude::LLVMValueRef;
 use peko_core::asts::PekoAST;
+use peko_core::asts::data_structures::StringChunkContent;
 use peko_core::asts::data_structures::{
     ClassMethod, PositionData, PositionedValue, VisibilityData,
 };
 use peko_core::asts::expressions::{
-    ArrayAST, ArrayAccessAST, BinaryExpressionAST, CastAST, FunctionCallAST, MapAST,
+    ArrayAST, ArrayAccessAST, BinaryExpressionAST, CastAST, CastKind, FunctionCallAST, MapAST,
     ModuleAccessAST, ObjectAccessAST, ObjectConstructionAST, PekoXTagAST, RangeAST,
     UnaryExpressionAST, UnwrapAST, VariableReferenceAST,
 };
@@ -1247,7 +1249,71 @@ impl PekoValueBuilder for UnwrapAST {
 
 impl PekoValueBuilder for CastAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        // A `constant<T>(value)` emits a compile-time LLVM constant of the FFI
+        // type `T` directly from a literal.
+        if self.kind == CastKind::Constant {
+            let Some(target_llvm) = codegen_context.get_llvm_type(&self.cast_to) else {
+                codegen_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.cast_to.start_position.clone(),
+                        self.cast_to.end_position.clone(),
+                        format!("type `{}` is not defined", self.cast_to),
+                        diagnostics::DiagnosticType::Error,
+                        codegen_context.get_current_file().to_path_buf(),
+                    ));
+                return codegen_context.create_error_value();
+            };
+
+            let constant_value = match self.value.as_ref() {
+                PekoAST::Number(number) if number.integer => unsafe {
+                    core::LLVMConstInt(target_llvm, number.value.value as i64 as u64, 1)
+                },
+                PekoAST::Number(number) => unsafe {
+                    core::LLVMConstReal(target_llvm, number.value.value)
+                },
+                PekoAST::Boolean(boolean) => unsafe {
+                    core::LLVMConstInt(target_llvm, boolean.value.value as u64, 0)
+                },
+                PekoAST::Char(character) => unsafe {
+                    core::LLVMConstInt(target_llvm, character.value.value as u64, 0)
+                },
+                PekoAST::String(string) if !string.interpolated => {
+                    // A string literal becomes a C string constant (a pointer
+                    // into a global `i8` array), reinterpreted to the target
+                    // pointer type.
+                    let text: String = string
+                        .chunks
+                        .iter()
+                        .filter_map(|chunk| match &chunk.content {
+                            StringChunkContent::Text(piece) => Some(piece.clone()),
+                            StringChunkContent::Interpolation(_) => None,
+                        })
+                        .collect();
+                    let cstring = codegen_context.create_cstring(text);
+                    return CodegenValue::new(cstring.llvm_value, self.cast_to.clone());
+                }
+                _ => {
+                    // A non-literal value is built normally and reinterpreted to
+                    // the target type.
+                    return CodegenValue::new(
+                        self.value.build_value(codegen_context).llvm_value,
+                        self.cast_to.clone(),
+                    );
+                }
+            };
+
+            return CodegenValue::new(constant_value, self.cast_to.clone());
+        }
+
         let value = self.value.build_value(codegen_context);
+
+        // A forced `danger_cast<T>(value)` numerically converts or reinterprets
+        // without a safety check.
+        if self.kind == CastKind::Forced {
+            return codegen_context.typecast_number_value(&value, &self.cast_to);
+        }
+
         let boxed_value = codegen_context.box_value_to_type(&self.cast_to, &value);
 
         match boxed_value {
@@ -2250,9 +2316,6 @@ impl PekoValueBuilder for FunctionCallAST {
         // Collect generic type info, either explicitly or by inference.
         let mut function_generics = self.function_generics.clone();
 
-        let generated_args = codegen_context.generated_args.clone();
-        let generated_kw_args = codegen_context.generated_kw_args.clone();
-
         // Infer generic types when none were supplied and the function
         // resolves to a generic function or class.
         if found_function
@@ -2480,8 +2543,10 @@ impl PekoValueBuilder for FunctionCallAST {
             function_full_name.push('>');
         }
 
-        // Step 2c: handle object instantiation by forwarding to
-        // ObjectConstructionAST.
+        // Object construction is its own AST node, produced by the parser from
+        // `new Class(args)`. A bare `Class(args)` that names a class is the
+        // missing-`new` mistake, reported here so it does not fall through to
+        // function-call resolution.
         if found_function
             && (function_module
                 .read()
@@ -2494,19 +2559,18 @@ impl PekoValueBuilder for FunctionCallAST {
                     .get_classes()
                     .contains_key(&function_full_name))
         {
-            let final_value = ObjectConstructionAST::new(
-                self.start.clone(),
-                self.end.clone(),
-                PositionedValue::create_no_position(function_base_name),
-                function_generics,
-                self.arguments.clone(),
-            )
-            .build_value(codegen_context);
-
-            codegen_context.generated_args = generated_args;
-            codegen_context.generated_kw_args = generated_kw_args;
-
-            return final_value;
+            codegen_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    format!(
+                        "`{function_base_name}` is a class. Construct it with `new {function_base_name}(...)`"
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    codegen_context.get_current_file().to_path_buf(),
+                ));
+            return codegen_context.create_error_value();
         }
 
         // Generate the call-site arguments in the call module.

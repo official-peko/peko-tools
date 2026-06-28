@@ -46,6 +46,7 @@ pub enum TokenType {
 
     // Visibility modifiers
     Const,     // const
+    Let,       // let
     State,     // state
     External,  // external
     Private,   // private
@@ -84,6 +85,8 @@ pub enum TokenType {
     FunctionDeclarator, // fn
     Args,               // Args
     Closure,            // closure
+    New,                // new
+    DangerCast,         // danger_cast
     Return,             // return
     Class,              // class
     From,               // from
@@ -161,6 +164,7 @@ impl TokenType {
 
             // Visibility modifiers.
             Self::Const => "'const'",
+            Self::Let => "'let'",
             Self::State => "'state'",
             Self::External => "'external'",
             Self::Private => "'private'",
@@ -194,6 +198,8 @@ impl TokenType {
             Self::FunctionDeclarator => "'fn'",
             Self::Args => "'Args'",
             Self::Closure => "'closure'",
+            Self::New => "'new'",
+            Self::DangerCast => "'danger_cast'",
             Self::Return => "'return'",
             Self::Class => "'class'",
             Self::From => "'from'",
@@ -599,11 +605,14 @@ impl TokenList {
                         "false" => TokenType::False,
                         "null" => TokenType::Null,
                         "const" => TokenType::Const,
+                        "let" => TokenType::Let,
                         "state" => TokenType::State,
                         "mutator" => TokenType::Mutator,
                         "constant" => TokenType::Constant,
                         "fn" => TokenType::FunctionDeclarator,
                         "closure" => TokenType::Closure,
+                        "new" => TokenType::New,
+                        "danger_cast" => TokenType::DangerCast,
                         "return" => TokenType::Return,
                         "class" => TokenType::Class,
                         "from" => TokenType::From,

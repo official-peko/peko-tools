@@ -849,6 +849,7 @@ impl PekoValueBuilder for ImportStatementAST {
         };
 
         let module_entry_file_path = resolved.entry_file.clone();
+        let is_ffi = peko_core::ffi::is_ffi_header(&module_entry_file_path);
 
         // Whether this import has an unpack list (`import { ... } from x`).
         let has_unpack_list = !self.symbols_to_unpack.is_empty();
@@ -913,8 +914,28 @@ impl PekoValueBuilder for ImportStatementAST {
         {
             codegen_context.module_context.top_level_modules[&import_as_module_name].clone()
         } else {
-            // Parse the imported module's source into an AST list.
-            let source = std::fs::read_to_string(&module_entry_file_path).unwrap();
+            // Parse the imported module's source into an AST list. An FFI
+            // header is parsed as a C interop surface and lowered to external
+            // Peko declarations first, so its functions reach codegen with
+            // their raw C symbol names through the external linkage path.
+            let raw_source = std::fs::read_to_string(&module_entry_file_path).unwrap();
+            let source = if is_ffi {
+                let parsed = peko_core::ffi::parse_header(&raw_source);
+                for error in &parsed.errors {
+                    codegen_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            format!("FFI header `{}`: {error}", module_entry_file_path.display()),
+                            diagnostics::DiagnosticType::Error,
+                            codegen_context.get_current_file().to_path_buf(),
+                        ));
+                }
+                peko_core::ffi::header_to_peko_source(&parsed)
+            } else {
+                raw_source
+            };
             let mut parser = peko_core::parser::PekoParser::new(
                 peko_core::lexer::TokenList::from_source(&source, &module_entry_file_path),
                 codegen_context.get_current_file(),
@@ -1011,6 +1032,23 @@ impl PekoValueBuilder for ImportStatementAST {
                 .module_context
                 .top_level_modules
                 .insert_before(1, import_as_module_name, Arc::clone(&new_module));
+
+            // Declarations lowered from an FFI header stay external for their
+            // raw name and gc-leaf marking, but are scoped to this module so
+            // they resolve through it rather than the global extern module.
+            if is_ffi {
+                for ast in asts.iter_mut() {
+                    match ast {
+                        PekoAST::FunctionDeclaration(declaration) => {
+                            declaration.visibility.scoped = true;
+                        }
+                        PekoAST::NewVariable(declaration) => {
+                            declaration.visibility.scoped = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
 
             for ast in &asts {
                 ast.build_value(codegen_context);

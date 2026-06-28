@@ -363,8 +363,9 @@ pub trait ExecutionContextAlgorithms<
 
     /// Resolves a name inside a local directory using the local precedence
     /// order. The sibling file `<base>/<name>.peko` wins, then the folder
-    /// entry `<base>/<name>/main.peko`, then `<base>/<name>/page.peko`.
-    /// Returns the first candidate that exists.
+    /// entry `<base>/<name>/main.peko`, then `<base>/<name>/page.peko`, then
+    /// the FFI header `<base>/<name>.peko.h`. Returns the first candidate that
+    /// exists.
     fn resolve_local_name(base: &Path, name: &str) -> Option<PathBuf> {
         let sibling = base.join(format!("{name}.peko"));
         if sibling.exists() {
@@ -379,6 +380,11 @@ pub trait ExecutionContextAlgorithms<
         let folder_page = base.join(name).join("page.peko");
         if folder_page.exists() {
             return Some(folder_page);
+        }
+
+        let ffi_header = base.join(format!("{name}.peko.h"));
+        if ffi_header.exists() {
+            return Some(ffi_header);
         }
 
         None
@@ -1076,7 +1082,7 @@ pub trait ExecutionContextAlgorithms<
         match peko_type.type_name.as_str() {
             // Built-in types obviously exist.
             "string" | "opaque" | "int" | "int16" | "int128" | "int64" | "float" | "double"
-            | "char" | "bool" | "void" | "cstr" => true,
+            | "f16" | "char" | "bool" | "void" | "cstr" => true,
             _ => {
                 // Check generic types again -- perhaps the expanded type name
                 // exists as a generic type.

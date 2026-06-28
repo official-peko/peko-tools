@@ -43,6 +43,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod execution;
+pub mod ffi;
 pub mod lexer;
 pub mod packages;
 pub mod parser;

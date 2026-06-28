@@ -239,6 +239,12 @@ pub struct VisibilityData {
 
     /// `[gcsafe]` -- for garbage collection
     pub gc_safepoint: bool,
+
+    /// Pairs with `external` to keep a foreign symbol in its declaring module
+    /// rather than the global extern module. The symbol keeps its raw name and
+    /// gc-leaf treatment. Set by the `.peko.h` import path and is not written
+    /// in source, so it has no rendered modifier name.
+    pub scoped: bool,
 }
 
 type VisibilityFlagInfo<'a> = &'a [(fn(&VisibilityData) -> bool, &'a str)];
@@ -298,6 +304,7 @@ impl VisibilityData {
             state: false,
             mutates: false,
             gc_safepoint: false,
+            scoped: false,
         }
     }
 }

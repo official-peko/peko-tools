@@ -34,7 +34,7 @@ impl Spanned for BooleanAST {
 /// based on the surrounding context.
 #[derive(Clone, new)]
 pub struct NumberAST {
-    pub value: PositionedValue<f32>,
+    pub value: PositionedValue<f64>,
     pub integer: bool,
 }
 

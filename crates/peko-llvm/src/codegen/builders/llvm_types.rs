@@ -207,6 +207,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
                     "int64" => core::LLVMInt64Type(),
                     "float" => core::LLVMFloatType(),
                     "double" => core::LLVMDoubleType(),
+                    "f16" => core::LLVMHalfType(),
                     "char" => core::LLVMInt8Type(),
                     "bool" => core::LLVMInt1Type(),
                     "void" => core::LLVMVoidType(),
