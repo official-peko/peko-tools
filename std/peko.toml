@@ -1,0 +1,11 @@
+[package]
+name = "std"
+version = "0.1.0"
+description = "The Pekoscript standard library."
+license = "MIT"
+authors = ["Preston Brown"]
+keywords = ["std", "core", "collections"]
+categories = ["standard-library"]
+
+[lib]
+root = "lib.peko"

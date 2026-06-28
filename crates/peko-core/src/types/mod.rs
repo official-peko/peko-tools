@@ -23,7 +23,7 @@
 //! * [`PekoType::from_string`]: lex a standalone type expression. Used by
 //!   the simulator and tests when synthesizing types from string literals.
 //!
-//! A trailing `?` desugars to `standard::Option<T>` during parsing, so an
+//! A trailing `?` desugars to `std::core::Option<T>` during parsing, so an
 //! optional is an ordinary named type rather than a depth modifier.
 
 #[cfg(test)]
@@ -120,7 +120,7 @@ impl PekoType {
     ///
     /// A `function_type` (or `is_closure`) produces a [`PekoTypeKind::Function`];
     /// everything else produces a [`PekoTypeKind::Basic`]. A non-zero
-    /// `optional_depth` wraps the type that many times in `standard::Option`.
+    /// `optional_depth` wraps the type that many times in `std::core::Option`.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -162,7 +162,7 @@ impl PekoType {
             fully_expanded: false,
         };
 
-        // A trailing `?` is sugar for `standard::Option<T>`.
+        // A trailing `?` is sugar for `std::core::Option<T>`.
         for _ in 0..optional_depth {
             peko_type = PekoType::option_of(peko_type);
         }
@@ -170,7 +170,7 @@ impl PekoType {
         peko_type
     }
 
-    /// Wraps a type in `standard::Option<T>`, preserving its source span.
+    /// Wraps a type in `std::core::Option<T>`, preserving its source span.
     #[must_use]
     pub fn option_of(inner: PekoType) -> PekoType {
         let start = inner.start_position.clone();
@@ -180,7 +180,7 @@ impl PekoType {
             kind: PekoTypeKind::Basic {
                 is_const: false,
                 info: PekoTypeInfo {
-                    module_names: vec!["standard".to_string()],
+                    module_names: vec!["std".to_string(), "core".to_string()],
                     name: "Option".to_string(),
                     generics: vec![inner],
                 },
@@ -598,7 +598,7 @@ impl PekoType {
     /// Consumes tokens through the end of the type expression. On
     /// malformed input, emits diagnostics into the parser's diagnostic
     /// list and returns whatever partial type information was successfully
-    /// parsed. A trailing `?` desugars to `standard::Option<T>`.
+    /// parsed. A trailing `?` desugars to `std::core::Option<T>`.
     pub fn from_tokens(parser: &mut parser::PekoParser) -> PekoType {
         let mut module_names: Vec<String> = Vec::new();
         let mut generic_types: Vec<PekoType> = Vec::new();

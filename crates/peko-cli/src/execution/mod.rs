@@ -60,9 +60,12 @@ pub struct TestOutcome {
     pub diagnostics: DiagnosticList,
 }
 
-/// Build the four implicit `import` statements that every Peko source file
-/// receives at the top: `runtime as Runtime`, `from standard import *`,
-/// `import console`, `import pekoui as ui`.
+/// Build the implicit `import` statements that every Peko source file receives
+/// at the top.
+///
+/// `std::core` and `std::collections` are unpacked so their names are used
+/// bare; `std::runtime`, `std::xml`, and `std::json` are imported under their
+/// prefix. Everything else needs an explicit import.
 ///
 /// Returned as a `Vec<PekoAST>` so callers can prepend the list to a
 /// freshly-parsed AST stream.
@@ -71,11 +74,11 @@ fn default_imports() -> Vec<PekoAST> {
         PositionedValue::create_no_position(value.to_owned())
     }
 
-    fn import(module: &str, alias: Option<&str>, unpack: Vec<UnpackItem>) -> PekoAST {
+    fn import(path: &str, alias: Option<&str>, unpack: Vec<UnpackItem>) -> PekoAST {
         PekoAST::ImportStatement(ImportStatementAST::new(
             PositionData::default(),
             PositionData::default(),
-            vec![no_position(module)],
+            path.split("::").map(no_position).collect(),
             alias.map(no_position),
             unpack,
             Option::None,
@@ -83,10 +86,11 @@ fn default_imports() -> Vec<PekoAST> {
     }
 
     vec![
-        import("runtime", Some("Runtime"), Vec::new()),
-        import("standard", None, vec![UnpackItem::All]),
-        import("console", None, Vec::new()),
-        import("pekoui", Some("ui"), Vec::new()),
+        import("std::core", None, vec![UnpackItem::All]),
+        import("std::collections", None, vec![UnpackItem::All]),
+        import("std::runtime", Some("runtime"), Vec::new()),
+        import("std::xml", Some("xml"), Vec::new()),
+        import("std::json", Some("json"), Vec::new()),
     ]
 }
 

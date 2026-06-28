@@ -78,44 +78,30 @@ macro_rules! char_is_peko_type_eligible {
 // Default preloaded imports
 // ---------------------------------------------------------------------------
 
-/// Build the four `import` AST nodes that the analyzer silently injects at
-/// the top of every parsed file: `runtime`, `standard` (with `*`-unpack),
-/// `console`, and `pekoui as ui`. The same set is replayed at startup to
-/// preload the simulator with these modules.
+/// Build the `import` AST nodes the analyzer silently injects at the top of
+/// every parsed file. `std::core` and `std::collections` are unpacked (used
+/// bare); `std::runtime`, `std::xml`, and `std::json` are imported under their
+/// prefix. The same set is replayed at startup to preload the simulator.
 pub(crate) fn default_preloaded_imports() -> Vec<PekoAST> {
+    fn import(path: &str, alias: Option<&str>, unpack: Vec<UnpackItem>) -> PekoAST {
+        PekoAST::ImportStatement(ImportStatementAST::new(
+            PositionData::default(),
+            PositionData::default(),
+            path.split("::")
+                .map(|segment| PositionedValue::create_no_position(segment.to_string()))
+                .collect(),
+            alias.map(|name| PositionedValue::create_no_position(name.to_string())),
+            unpack,
+            Option::None,
+        ))
+    }
+
     vec![
-        PekoAST::ImportStatement(ImportStatementAST::new(
-            PositionData::default(),
-            PositionData::default(),
-            vec![PositionedValue::create_no_position("runtime".to_string())],
-            Some(PositionedValue::create_no_position("Runtime".to_string())),
-            Vec::new(),
-            Option::None,
-        )),
-        PekoAST::ImportStatement(ImportStatementAST::new(
-            PositionData::default(),
-            PositionData::default(),
-            vec![PositionedValue::create_no_position("standard".to_string())],
-            None,
-            vec![UnpackItem::All],
-            Option::None,
-        )),
-        PekoAST::ImportStatement(ImportStatementAST::new(
-            PositionData::default(),
-            PositionData::default(),
-            vec![PositionedValue::create_no_position("console".to_string())],
-            None,
-            Vec::new(),
-            Option::None,
-        )),
-        PekoAST::ImportStatement(ImportStatementAST::new(
-            PositionData::default(),
-            PositionData::default(),
-            vec![PositionedValue::create_no_position("pekoui".to_string())],
-            Some(PositionedValue::create_no_position("ui".to_string())),
-            Vec::new(),
-            Option::None,
-        )),
+        import("std::core", None, vec![UnpackItem::All]),
+        import("std::collections", None, vec![UnpackItem::All]),
+        import("std::runtime", Some("runtime"), Vec::new()),
+        import("std::xml", Some("xml"), Vec::new()),
+        import("std::json", Some("json"), Vec::new()),
     ]
 }
 

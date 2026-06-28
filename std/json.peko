@@ -1,0 +1,3 @@
+//! std::json: JSON parsing and emission.
+//!
+//! Auto-imported and used through the json prefix.

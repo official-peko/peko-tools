@@ -1,0 +1,3 @@
+//! std::crypto: cryptographic primitives.
+//!
+//! Ported from the V1 crypto package.
