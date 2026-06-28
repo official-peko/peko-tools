@@ -1,0 +1,4 @@
+//! std::fs: filesystem access.
+//!
+//! File handles with cursors, buffered and binary I/O, and directory
+//! traversal. Ported from the V1 fs package.

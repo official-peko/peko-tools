@@ -1,0 +1,4 @@
+//! std::xml: element literals and serialization.
+//!
+//! The element type and serialization live here and are usable without
+//! PekoUI. Auto-imported and used through the xml prefix.

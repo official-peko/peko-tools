@@ -1,0 +1,50 @@
+//! std::core: the root object model and the fundamental value types.
+//!
+//! Holds the root Object type and Option (value, None, Error). The boxed
+//! number, string, bool, and char types and the core traits are added as the
+//! object model and trait mechanism land. Auto-imported and used bare.
+
+/// The root type every class inherits from.
+[public] class Object {
+    /// A human-readable rendering of the value.
+    [public] fn to_string() => string {
+        return "Object"
+    }
+
+    /// Called whenever an attribute of the value is modified, by reassignment
+    /// or by a [mutates] method. Overridable per class.
+    [public] fn on_state_changed(name: string) {
+    }
+}
+
+/// An optional value with three states: a value, None, or Error.
+[public] class Option<T> {
+    /// `true` when this option holds a value.
+    has_value: bool
+
+    /// `true` when this option carries an error rather than a plain None.
+    is_error_state: bool
+
+    /// The held value. Only meaningful when `has_value` is true.
+    value: T
+
+    /// `true` when this option holds a value.
+    [public] fn is_value() => bool {
+        return has_value
+    }
+
+    /// `true` when this option is empty and not an error.
+    [public] fn is_none() => bool {
+        return !has_value
+    }
+
+    /// `true` when this option carries an error.
+    [public] fn is_error() => bool {
+        return is_error_state
+    }
+
+    /// The held value. Halts when the option does not hold one.
+    [public] fn unwrap() => T {
+        return value
+    }
+}

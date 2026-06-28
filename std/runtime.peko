@@ -1,0 +1,4 @@
+//! std::runtime: the garbage collector and runtime entry points.
+//!
+//! The V2 home of the V1 Runtime interface. Auto-imported and used through the
+//! runtime prefix.
