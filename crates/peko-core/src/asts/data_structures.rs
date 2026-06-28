@@ -263,7 +263,7 @@ const VISIBILITY_FLAG_ORDER: VisibilityFlagInfo = &[
     (|v| v.blockexit, "blockexit"),
     (|v| v.hidden, "hidden"),
     (|v| v.state, "state"),
-    (|v| v.mutates, "mutator"),
+    (|v| v.mutates, "mutates"),
     (|v| v.gc_safepoint, "gcsafe"),
 ];
 

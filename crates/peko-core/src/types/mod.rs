@@ -1197,7 +1197,8 @@ fn is_type_name_token(ty: &lexer::TokenType) -> bool {
 fn eat_depth_suffixes(parser: &mut parser::PekoParser, index_forward: &mut usize) -> bool {
     while !parser.tokens.finished()
         && parser.tokens.get_index() + *index_forward < parser.tokens.length()
-        && (parser.tokens.get_token_forward(*index_forward).equals("[")
+        && ((parser.tokens.get_token_forward(*index_forward).equals("[")
+            && parser.tokens.get_token_forward(*index_forward + 1).equals("]"))
             || parser.tokens.get_token_forward(*index_forward).equals("?"))
     {
         if parser.tokens.get_token_forward(*index_forward).equals("[") {
@@ -1225,8 +1226,13 @@ fn parse_depth_suffixes(
     mut optional_depth: usize,
     mut ending_position: PositionData,
 ) -> (usize, usize, PositionData) {
+    // A `[` is an array suffix only when followed immediately by `]`. A `[`
+    // that introduces something else (a following member's `[mutates]`
+    // modifier, for example) is left for the surrounding parser.
     while !parser.tokens.finished()
-        && (parser.tokens.current_token().equals("[") || parser.tokens.current_token().equals("?"))
+        && ((parser.tokens.current_token().equals("[")
+            && parser.tokens.get_token_forward(1).equals("]"))
+            || parser.tokens.current_token().equals("?"))
     {
         if parser.tokens.current_token().equals("[") {
             array_depth += 1;

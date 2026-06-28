@@ -142,7 +142,7 @@ fn visibility_renders_flags_in_declaration_order() {
     let v = VisibilityData::new(true, true, true, true, true, true, true, true, true, true, false);
     assert_eq!(
         v.to_string(),
-        "[private constant external notrack variadic blockexit hidden state mutator gcsafe]"
+        "[private constant external notrack variadic blockexit hidden state mutates gcsafe]"
     );
 }
 
@@ -152,7 +152,7 @@ fn visibility_renders_only_active_flags() {
     v.private = true;
     v.external = true;
     v.mutates = true;
-    assert_eq!(v.to_string(), "[private external mutator]");
+    assert_eq!(v.to_string(), "[private external mutates]");
 }
 
 #[test]

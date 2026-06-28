@@ -56,7 +56,7 @@ pub enum TokenType {
     Blockexit, // blockexit
     Hide,      // hide
     Variadic,  // variadic
-    Mutator,   // mutator
+    Mutates,   // mutates
     GCSafe,    // gcsafe
 
     Identifier,
@@ -176,7 +176,7 @@ impl TokenType {
             Self::Blockexit => "'blockexit'",
             Self::Hide => "'hide'",
             Self::Variadic => "'variadic'",
-            Self::Mutator => "'mutator'",
+            Self::Mutates => "'mutates'",
             Self::GCSafe => "'gcsafe'",
 
             // Punctuation.
@@ -611,7 +611,7 @@ impl TokenList {
                         "const" => TokenType::Const,
                         "let" => TokenType::Let,
                         "state" => TokenType::State,
-                        "mutator" => TokenType::Mutator,
+                        "mutates" => TokenType::Mutates,
                         "constant" => TokenType::Constant,
                         "fn" => TokenType::FunctionDeclarator,
                         "closure" => TokenType::Closure,
