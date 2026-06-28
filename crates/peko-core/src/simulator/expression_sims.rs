@@ -2421,6 +2421,11 @@ impl PekoValueSimulator for ObjectAccessAST {
 
         simulator_context.return_references = return_references;
 
+        // Whether the receiver is an attribute of `this`. Captured now because
+        // the flag is reset by the argument simulation that follows. Used to
+        // propagate `[mutates]` from a called method (24.2 rule 2).
+        let object_is_this_attribute = simulator_context.previous_was_this;
+
         // Reassigning an attribute on a `const` object is not allowed (21.2).
         // An attribute set parses as `object.(attr = value)`, so the access
         // node is a reassignment.
@@ -2798,6 +2803,12 @@ impl PekoValueSimulator for ObjectAccessAST {
                         return simulator_context.create_error_value();
                     }
                 };
+
+                // Rule 2 of 24.2: calling a [mutates] method on an attribute of
+                // `this` makes the enclosing method [mutates] too.
+                if object_is_this_attribute && simulator_context.last_called_method_mutates {
+                    simulator_context.current_method_mutates = true;
+                }
 
                 if simulator_context
                     .get_class_by_type(&method_call.get_type())

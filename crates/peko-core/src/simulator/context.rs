@@ -151,9 +151,13 @@ pub struct PekoSimulatorContext {
     pub expecting_value: bool,
 
     /// Set true while simulating a method body when the body reassigns an
-    /// attribute of `this`. Read after the body to auto-mark the method
-    /// `[mutates]`.
+    /// attribute of `this` or calls a `[mutates]` method on one. Read after
+    /// the body to auto-mark the method `[mutates]`.
     pub current_method_mutates: bool,
+
+    /// The `[mutates]` flag of the most recently dispatched method call. Lets
+    /// a caller see whether the callee mutates (24.2 rule 2).
+    pub last_called_method_mutates: bool,
 
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
@@ -293,6 +297,7 @@ impl PekoSimulatorContext {
             current_expected_type_options: None,
             expecting_value: false,
             current_method_mutates: false,
+            last_called_method_mutates: false,
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),
@@ -1724,6 +1729,10 @@ impl
                 "cannot call private method `{method_name_str}` on type `{object_value_type}` from outside the class. Private methods are only accessible from other methods of the same class",
             ));
         }
+
+        // Record the callee's mutation status so a caller can propagate it
+        // (24.2 rule 2).
+        self.last_called_method_mutates = method.visibility.mutates;
 
         // A `[mutates]` method cannot be called on a `const` value (21.2).
         if object_value_type.is_const() && method.visibility.mutates {
