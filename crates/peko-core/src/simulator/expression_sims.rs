@@ -490,6 +490,30 @@ impl PekoValueSimulator for VariableReferenceAST {
         // Record the reference for usage tracking before resolving it.
         simulator_context.mark_symbol_used(&self.variable_name.value);
 
+        // Reading a local that was declared without an initializer and never
+        // assigned on this path is a use-before-init error.
+        if !simulator_context.simulating_assignment_target
+            && simulator_context
+                .scoped_variables
+                .contains_key(&self.variable_name.value)
+            && simulator_context
+                .uninitialized_variables
+                .contains(&self.variable_name.value)
+        {
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.variable_name.start.clone(),
+                    self.variable_name.end.clone(),
+                    format!(
+                        "`{}` is used before it is initialized. The binding may not be assigned on every path that reaches this point",
+                        self.variable_name.value,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        }
+
         // First: scoped (local) variables, then attributes on `this`,
         // then globals and functions in the module hierarchy.
         let variable_reference = if simulator_context

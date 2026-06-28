@@ -175,6 +175,11 @@ pub struct PekoSimulatorContext {
     /// (the binding must be assigned on every path that reaches the read).
     pub uninitialized_variables: std::collections::HashSet<String>,
 
+    /// `true` while simulating the target of a direct assignment (`x = ...`),
+    /// so resolving the target does not count as a read for the
+    /// use-before-init check.
+    pub simulating_assignment_target: bool,
+
     /// `this` binding when simulating a method body.
     pub current_this: Option<SimulatorVariable>,
 
@@ -317,6 +322,7 @@ impl PekoSimulatorContext {
             current_method_name: None,
             mutates_call_edges: Vec::new(),
             uninitialized_variables: std::collections::HashSet::new(),
+            simulating_assignment_target: false,
             current_this: None,
             previous_was_this: false,
             attributes_to_set: Vec::new(),

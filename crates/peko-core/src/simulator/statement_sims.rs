@@ -33,8 +33,16 @@ use super::value::SimulatorValue;
 /// declared operator's overload (compound assignment).
 impl PekoValueSimulator for VariableReassignmentAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // A direct assignment writes its target, so resolving it is not a read
+        // for the use-before-init check. A compound assignment (`+=`) reads the
+        // current value first, so it is left as a read.
+        let is_direct_assignment = self.assignment_operator.is_none();
+        simulator_context.simulating_assignment_target = is_direct_assignment;
+
         // Simulate the LHS variable reference.
         let variable_reference = self.variable_reference.as_ref().simulate(simulator_context);
+
+        simulator_context.simulating_assignment_target = false;
 
         // If this is an attribute set, remove it from the
         // pending-attribute-init list so the constructor knows it's
@@ -156,6 +164,13 @@ impl PekoValueSimulator for VariableReassignmentAST {
                 ));
         }
 
+        // A direct assignment to a local definitely initializes it.
+        if is_direct_assignment
+            && simulator_context.scoped_variables.contains_key(&variable_name)
+        {
+            simulator_context.uninitialized_variables.remove(&variable_name);
+        }
+
         simulator_context.current_expected_type_options = previous_expected_type;
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
@@ -165,6 +180,36 @@ impl PekoValueSimulator for VariableReassignmentAST {
 ///
 /// Tracks whether every branch returns and whether every branch exits
 /// (via `break`) so that the simulator can produce the appropriate
+/// Folds one branch's newly initialized bindings into the running
+/// intersection used by the definite-assignment merge.
+///
+/// `branch_diverges` is true when the branch returns or exits, in which case
+/// it does not reach the code after the `if` and so does not constrain the
+/// merge (it contributes the full pre-`if` set, the intersection identity).
+fn merge_branch_initialization(
+    merged: &mut Option<std::collections::HashSet<String>>,
+    uninitialized_before: &std::collections::HashSet<String>,
+    current_uninitialized: &std::collections::HashSet<String>,
+    branch_diverges: bool,
+) {
+    let branch_initialized: std::collections::HashSet<String> = if branch_diverges {
+        uninitialized_before.clone()
+    } else {
+        uninitialized_before
+            .difference(current_uninitialized)
+            .cloned()
+            .collect()
+    };
+
+    *merged = Some(match merged.take() {
+        None => branch_initialized,
+        Some(existing) => existing
+            .intersection(&branch_initialized)
+            .cloned()
+            .collect(),
+    });
+}
+
 /// control-flow sentinel as the if-statement's result.
 impl PekoValueSimulator for IfStatementAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
@@ -198,6 +243,16 @@ impl PekoValueSimulator for IfStatementAST {
         // expression. `None` for a branch that returns or exits (it does not
         // reach the merge), so a mixed branch makes the `if` a statement.
         let mut branch_tails: Vec<Option<types::PekoType>> = Vec::new();
+
+        // Definite-assignment merge state. A binding declared uninitialized
+        // before the `if` becomes initialized after it only when every branch
+        // that falls through to the merge assigns it (and an `else` exists, so
+        // every condition outcome is covered). `merged_initialized` is the
+        // running intersection of each falling-through branch's newly
+        // initialized names; a branch that returns or exits does not reach the
+        // merge and so does not constrain it.
+        let uninitialized_before = simulator_context.uninitialized_variables.clone();
+        let mut merged_initialized: Option<std::collections::HashSet<String>> = None;
 
         // Simulate every (condition, body) pair.
         for condition_body in &self.conditional_bodies {
@@ -239,6 +294,9 @@ impl PekoValueSimulator for IfStatementAST {
             )));
             simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+            // Each branch begins from the pre-`if` initialization state.
+            simulator_context.uninitialized_variables = uninitialized_before.clone();
+
             let mut branch_exited = false;
             let mut branch_returned = false;
             let mut branch_tail: Option<types::PekoType> = None;
@@ -278,6 +336,14 @@ impl PekoValueSimulator for IfStatementAST {
                     break;
                 }
             }
+
+            // Fold this branch's newly initialized bindings into the merge.
+            merge_branch_initialization(
+                &mut merged_initialized,
+                &uninitialized_before,
+                &simulator_context.uninitialized_variables,
+                branch_returned || branch_exited,
+            );
 
             // Restore scope and attach the branch scope as a child.
             simulator_context.current_scope = previous_scope;
@@ -324,6 +390,9 @@ impl PekoValueSimulator for IfStatementAST {
             )));
             simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+            // The else branch also begins from the pre-`if` state.
+            simulator_context.uninitialized_variables = uninitialized_before.clone();
+
             let mut branch_exited = false;
             let mut branch_returned = false;
             let mut branch_tail: Option<types::PekoType> = None;
@@ -365,6 +434,14 @@ impl PekoValueSimulator for IfStatementAST {
                 }
             }
 
+            // Fold the else branch's initialization into the merge.
+            merge_branch_initialization(
+                &mut merged_initialized,
+                &uninitialized_before,
+                &simulator_context.uninitialized_variables,
+                branch_returned || branch_exited,
+            );
+
             simulator_context.current_scope = previous_scope;
 
             if let Some(outer) = simulator_context.current_scope.as_mut() {
@@ -389,6 +466,20 @@ impl PekoValueSimulator for IfStatementAST {
                 .scoped_variables
                 .extend(simulator_context.previous_scoped_variables.pop().unwrap());
         }
+
+        // Resolve definite assignment after the `if`. Without an `else`, the
+        // implicit fall-through assigns nothing, so no binding becomes
+        // initialized. With an `else`, a binding is initialized when every
+        // falling-through branch assigned it.
+        let newly_initialized = if self.else_body.is_some() {
+            merged_initialized.unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+        simulator_context.uninitialized_variables = uninitialized_before
+            .difference(&newly_initialized)
+            .cloned()
+            .collect();
 
         // An `if` used as an expression yields a value when there is an else
         // and every branch reaches the merge with a tail value of one common,
@@ -494,6 +585,11 @@ impl PekoValueSimulator for SwitchStatementAST {
         let mut covered: Vec<String> = Vec::new();
         let mut has_default = false;
 
+        // Definite-assignment merge across arms (a switch is exhaustive, so it
+        // behaves like an `if`/`else` chain that covers every case).
+        let uninitialized_before = simulator_context.uninitialized_variables.clone();
+        let mut merged_initialized: Option<std::collections::HashSet<String>> = None;
+
         for arm in &self.arms {
             match &arm.pattern {
                 None => {
@@ -572,10 +668,24 @@ impl PekoValueSimulator for SwitchStatementAST {
             )));
             simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+            // Each arm begins from the pre-`switch` initialization state.
+            simulator_context.uninitialized_variables = uninitialized_before.clone();
+
+            let mut arm_diverges = false;
             for peko_ast in &arm.body.value {
                 simulator_context.expecting_value = false;
-                peko_ast.simulate(simulator_context);
+                let value_type = peko_ast.simulate(simulator_context).get_type().to_string();
+                if value_type == "<<branchexit>>" || value_type == "<<returnexit>>" {
+                    arm_diverges = true;
+                }
             }
+
+            merge_branch_initialization(
+                &mut merged_initialized,
+                &uninitialized_before,
+                &simulator_context.uninitialized_variables,
+                arm_diverges,
+            );
 
             simulator_context.current_scope = previous_scope;
 
@@ -613,6 +723,21 @@ impl PekoValueSimulator for SwitchStatementAST {
                     ));
             }
         }
+
+        // After an exhaustive switch, a binding is initialized when every arm
+        // assigned it. A non-exhaustive switch (already an error above) cannot
+        // guarantee anything, so nothing becomes initialized.
+        let is_exhaustive =
+            has_default || all_variants.iter().all(|variant| covered.contains(variant));
+        let newly_initialized = if is_exhaustive {
+            merged_initialized.unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+        simulator_context.uninitialized_variables = uninitialized_before
+            .difference(&newly_initialized)
+            .cloned()
+            .collect();
 
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
@@ -677,6 +802,10 @@ impl PekoValueSimulator for WhileLoopAST {
         )));
         simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+        // A loop body may not run, so assignments inside it do not count
+        // toward definite assignment after the loop.
+        let uninitialized_before_loop = simulator_context.uninitialized_variables.clone();
+
         let mut branch_exited = false;
         let mut branch_returned = false;
 
@@ -708,6 +837,7 @@ impl PekoValueSimulator for WhileLoopAST {
         }
 
         simulator_context.current_scope = previous_scope;
+        simulator_context.uninitialized_variables = uninitialized_before_loop;
 
         if let Some(outer) = simulator_context.current_scope.as_mut() {
             outer.write().unwrap().scopes.push(scope_reference);
@@ -872,6 +1002,10 @@ impl PekoValueSimulator for ForLoopAST {
         let scope_reference = Arc::new(RwLock::new(new_loop_scope));
         simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+        // A loop body may not run, so assignments inside it do not count
+        // toward definite assignment after the loop.
+        let uninitialized_before_loop = simulator_context.uninitialized_variables.clone();
+
         let mut branch_exited = false;
         let mut branch_returned = false;
 
@@ -903,6 +1037,7 @@ impl PekoValueSimulator for ForLoopAST {
         }
 
         simulator_context.current_scope = previous_scope;
+        simulator_context.uninitialized_variables = uninitialized_before_loop;
 
         if let Some(outer) = simulator_context.current_scope.as_mut() {
             outer.write().unwrap().scopes.push(scope_reference);
