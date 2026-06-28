@@ -1114,8 +1114,8 @@ pub fn is_managed_pointer(ty: &PekoType) -> bool {
     // `Pointer<char>`: it is indexable and participates in the managed-pointer
     // coercion/indexing paths exactly like `Pointer<T>`. `cstr` is the raw
     // (address space 0) counterpart and is deliberately NOT managed here.
-    (ty.type_name == "Pointer" || ty.type_name == "string")
-        && ty.pointer_depth == 0
+    (ty.name() == "Pointer" || ty.name() == "string")
+        && ty.array_depth == 0
         && ty.reference_depth == 0
 }
 
@@ -1126,11 +1126,11 @@ pub fn is_managed_pointer(ty: &PekoType) -> bool {
 /// result is `T` with one less pointer depth. This is the single place that
 /// knows how the managed and raw pointer forms each "decrease" by one level.
 pub fn pointee_type(ty: &PekoType) -> PekoType {
-    if ty.type_name == "string" && ty.pointer_depth == 0 && ty.reference_depth == 0 {
+    if ty.name() == "string" && ty.array_depth == 0 && ty.reference_depth == 0 {
         return PekoType::simple_type("char");
     }
     if is_managed_pointer(ty) {
-        ty.generic_types
+        ty.generics()
             .first()
             .cloned()
             .unwrap_or_else(|| PekoType::simple_type("void"))

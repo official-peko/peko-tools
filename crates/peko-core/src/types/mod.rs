@@ -3,18 +3,28 @@
 //! Type representation for Pekoscript.
 //!
 //! [`PekoType`] is the canonical structural representation of a Pekoscript
-//! type expression. It captures the full surface form a user can write
-//! module-qualified type names, generic parameters, pointer/optional/reference
-//! depth indicators, and function and closure type forms, along with the
-//! source span the type was parsed from.
+//! type expression. It pairs a [`PekoTypeKind`] (the V2 enum form that carries
+//! `const`-ness, generics, and restraints) with the array and reference depth
+//! modifiers and the source span the type was parsed from.
 //!
-//! The module also exposes two ways to construct a `PekoType` from source:
+//! The kind is one of three forms:
+//!
+//! * [`PekoTypeKind::Basic`]: a named type with a module path and generic
+//!   arguments (`module::Name<T>`).
+//! * [`PekoTypeKind::Function`]: a function or closure type with argument
+//!   types, an optional return type, and a closure flag.
+//! * [`PekoTypeKind::Generic`]: a generic parameter with its restraints.
+//!
+//! The module exposes two ways to construct a `PekoType` from source:
 //!
 //! * [`PekoType::from_tokens`]: consume tokens from an existing
 //!   [`PekoParser`](crate::parser::PekoParser) cursor. Used inside the parser
 //!   when a type appears inline in a declaration.
 //! * [`PekoType::from_string`]: lex a standalone type expression. Used by
 //!   the simulator and tests when synthesizing types from string literals.
+//!
+//! A trailing `?` desugars to `standard::Option<T>` during parsing, so an
+//! optional is an ordinary named type rather than a depth modifier.
 
 #[cfg(test)]
 mod tests;
@@ -26,50 +36,73 @@ use crate::asts::data_structures::PositionData;
 use crate::lexer::{self, TokenType};
 use crate::parser;
 
-/// Structural representation of a Pekoscript type.
-///
-/// A `PekoType` carries every detail of a type as it appeared in source: its
-/// module path, base name, generic parameters, depth modifiers (pointers,
-/// optionals, references), an optional function-return type and closure
-/// flag, and the source positions it was parsed from. Two `PekoType` values
-/// describing the same underlying type can differ in their source positions;
-/// type *equality* in the language-semantic sense lives on the simulator
-/// (see `PekoSimulatorContext::types_equal`), not via `PartialEq` on this
-/// struct.
+/// The named-type payload of a [`PekoTypeKind::Basic`]: a module path, a bare
+/// name, and the generic arguments written at the use site.
 #[derive(Clone, Debug)]
-pub struct PekoType {
+pub struct PekoTypeInfo {
     /// Module path components of a qualified type (e.g. `["module1", "module2"]`
     /// for `module1::module2::Type`).
     pub module_names: Vec<String>,
 
-    /// The bare type name (e.g. `"Type"`). For function-type forms this is
-    /// empty and the role is taken over by `function_type` + `generic_types`.
-    pub type_name: String,
+    /// The bare type name (e.g. `"Type"`).
+    pub name: String,
 
-    /// Generic type arguments. For function and closure type forms, this
-    /// holds the *argument* types rather than user-supplied generics.
-    pub generic_types: Vec<PekoType>,
+    /// Generic type arguments written at the use site.
+    pub generics: Vec<PekoType>,
+}
 
-    /// Pointer/array depth, counted by trailing `[]` suffixes.
-    pub pointer_depth: usize,
+/// A restraint on a generic parameter.
+#[derive(Clone, Debug)]
+pub enum TypeRestraint {
+    /// The parameter must implement a trait (`T: impl Drawable`).
+    Impl(PekoType),
 
-    /// Optional depth, counted by trailing `?` suffixes.
-    pub optional_depth: usize,
+    /// The parameter must inherit from a type (`T: from Animal`).
+    From(PekoType),
+}
+
+/// The V2 enum form of a type: a function, a basic named type, or a generic
+/// parameter. Each value-bearing form carries its own `const`-ness.
+#[derive(Clone, Debug)]
+pub enum PekoTypeKind {
+    /// A function or closure type. `arguments` are the parameter types,
+    /// `return_type` is the return type, and `is_closure` distinguishes the
+    /// `closure(...)` surface form from the `(ret)(args)` function form.
+    Function {
+        is_const: bool,
+        arguments: Vec<PekoType>,
+        return_type: Option<Box<PekoType>>,
+        is_closure: bool,
+    },
+
+    /// A basic named type with a module path and generic arguments.
+    Basic { is_const: bool, info: PekoTypeInfo },
+
+    /// A generic parameter with its restraints.
+    Generic {
+        name: String,
+        restraints: Vec<TypeRestraint>,
+    },
+}
+
+/// Structural representation of a Pekoscript type.
+///
+/// A `PekoType` carries the [`PekoTypeKind`] enum form plus the array and
+/// reference depth modifiers and the source positions it was parsed from. Two
+/// `PekoType` values describing the same underlying type can differ in their
+/// source positions; type *equality* in the language-semantic sense lives on
+/// the simulator (see `PekoSimulatorContext::types_equal`), not via `PartialEq`
+/// on this struct.
+#[derive(Clone, Debug)]
+pub struct PekoType {
+    /// The enum form of this type.
+    pub kind: PekoTypeKind,
+
+    /// Array depth, counted by trailing `[]` suffixes.
+    pub array_depth: usize,
 
     /// Reference depth, counted by leading `&` prefixes (a `&&` counts as 2).
     pub reference_depth: usize,
-
-    /// For function and closure type forms, this carries the return type.
-    pub function_type: Option<Box<PekoType>>,
-
-    /// `true` if this type was written as a `closure(...)` form rather than
-    /// the bare `(ret)(args)` function-type form.
-    pub is_closure: bool,
-
-    /// Sentinel marker set by [`PekoType::error_type`] to indicate that a
-    /// previous analysis step failed. Used by the simulator and codegen to
-    /// avoid cascading errors.
-    pub is_error_type: bool,
 
     /// Inclusive start position of the type expression in source.
     pub start_position: PositionData,
@@ -83,21 +116,18 @@ pub struct PekoType {
 }
 
 impl PekoType {
-    /// Constructs a fully-specified `PekoType`.
+    /// Constructs a fully-specified `PekoType` from the legacy field set.
     ///
-    /// `is_error_type` and `fully_expanded` always start as `false`; use
-    /// [`PekoType::error_type`] for the error sentinel, and the simulator's
-    /// substitution machinery to mark a type fully expanded.
-    ///
-    /// This constructor is intentionally low-level because every existing
-    /// call site already builds the argument list inline during parsing.
-    /// Higher-level helpers like [`PekoType::simple_type`] cover common cases.
+    /// A `function_type` (or `is_closure`) produces a [`PekoTypeKind::Function`];
+    /// everything else produces a [`PekoTypeKind::Basic`]. A non-zero
+    /// `optional_depth` wraps the type that many times in `standard::Option`.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         module_names: Vec<String>,
         type_name: String,
         generic_types: Vec<PekoType>,
-        pointer_depth: usize,
+        array_depth: usize,
         optional_depth: usize,
         reference_depth: usize,
         function_type: Option<PekoType>,
@@ -105,18 +135,60 @@ impl PekoType {
         start_position: PositionData,
         end_position: PositionData,
     ) -> PekoType {
-        PekoType {
-            module_names,
-            type_name: canonical_builtin_name(type_name),
-            generic_types,
-            pointer_depth,
-            optional_depth,
+        let kind = if function_type.is_some() || is_closure {
+            PekoTypeKind::Function {
+                is_const: false,
+                arguments: generic_types,
+                return_type: function_type.map(Box::new),
+                is_closure,
+            }
+        } else {
+            PekoTypeKind::Basic {
+                is_const: false,
+                info: PekoTypeInfo {
+                    module_names,
+                    name: canonical_builtin_name(type_name),
+                    generics: generic_types,
+                },
+            }
+        };
+
+        let mut peko_type = PekoType {
+            kind,
+            array_depth,
             reference_depth,
-            function_type: function_type.map(Box::new),
-            is_closure,
-            is_error_type: false,
             start_position,
             end_position,
+            fully_expanded: false,
+        };
+
+        // A trailing `?` is sugar for `standard::Option<T>`.
+        for _ in 0..optional_depth {
+            peko_type = PekoType::option_of(peko_type);
+        }
+
+        peko_type
+    }
+
+    /// Wraps a type in `standard::Option<T>`, preserving its source span.
+    #[must_use]
+    pub fn option_of(inner: PekoType) -> PekoType {
+        let start = inner.start_position.clone();
+        let end = inner.end_position.clone();
+
+        PekoType {
+            kind: PekoTypeKind::Basic {
+                is_const: false,
+                info: PekoTypeInfo {
+                    module_names: vec!["standard".to_string()],
+                    name: "Option".to_string(),
+                    generics: vec![inner],
+                },
+            },
+            array_depth: 0,
+            reference_depth: 0,
+            start_position: start,
+            end_position: end,
             fully_expanded: false,
         }
     }
@@ -128,20 +200,189 @@ impl PekoType {
     /// cascading diagnostics on already-failed expressions.
     #[must_use]
     pub fn error_type() -> PekoType {
+        PekoType::simple_type("<<error_type>>")
+    }
+
+    /// Constructs a type with only a bare name, no module path, no generics,
+    /// no depth, no source position.
+    #[must_use]
+    pub fn simple_type(type_name: &str) -> PekoType {
         PekoType {
-            module_names: Vec::new(),
-            type_name: String::from("<<error_type>>"),
-            generic_types: Vec::new(),
-            pointer_depth: 0,
-            optional_depth: 0,
+            kind: PekoTypeKind::Basic {
+                is_const: false,
+                info: PekoTypeInfo {
+                    module_names: Vec::new(),
+                    name: canonical_builtin_name(String::from(type_name)),
+                    generics: Vec::new(),
+                },
+            },
+            array_depth: 0,
             reference_depth: 0,
-            function_type: None,
-            is_closure: false,
-            is_error_type: true,
             start_position: PositionData::default(),
             end_position: PositionData::default(),
             fully_expanded: false,
         }
+    }
+
+    /// Constructs a generic-parameter type with its restraints.
+    #[must_use]
+    pub fn generic_type(name: impl Into<String>, restraints: Vec<TypeRestraint>) -> PekoType {
+        PekoType {
+            kind: PekoTypeKind::Generic {
+                name: name.into(),
+                restraints,
+            },
+            array_depth: 0,
+            reference_depth: 0,
+            start_position: PositionData::default(),
+            end_position: PositionData::default(),
+            fully_expanded: false,
+        }
+    }
+
+    // ----- Accessors over the kind enum -------------------------------------
+
+    /// The bare type name. For a function type this is empty; for a generic
+    /// parameter it is the parameter name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match &self.kind {
+            PekoTypeKind::Basic { info, .. } => &info.name,
+            PekoTypeKind::Generic { name, .. } => name,
+            PekoTypeKind::Function { .. } => "",
+        }
+    }
+
+    /// Sets the bare type name. A no-op for function types.
+    pub fn set_name(&mut self, new_name: impl Into<String>) {
+        match &mut self.kind {
+            PekoTypeKind::Basic { info, .. } => info.name = new_name.into(),
+            PekoTypeKind::Generic { name, .. } => *name = new_name.into(),
+            PekoTypeKind::Function { .. } => {}
+        }
+    }
+
+    /// The module path components of a qualified named type. Empty for
+    /// function and generic forms.
+    #[must_use]
+    pub fn module_names(&self) -> &[String] {
+        match &self.kind {
+            PekoTypeKind::Basic { info, .. } => &info.module_names,
+            _ => &[],
+        }
+    }
+
+    /// Mutable view of the module path. Only meaningful for basic named types.
+    pub fn module_names_mut(&mut self) -> &mut Vec<String> {
+        match &mut self.kind {
+            PekoTypeKind::Basic { info, .. } => &mut info.module_names,
+            _ => panic!("module_names_mut on a non-basic type"),
+        }
+    }
+
+    /// The generic arguments. For a function type this is the argument-type
+    /// list. Empty for a generic parameter.
+    #[must_use]
+    pub fn generics(&self) -> &[PekoType] {
+        match &self.kind {
+            PekoTypeKind::Basic { info, .. } => &info.generics,
+            PekoTypeKind::Function { arguments, .. } => arguments,
+            PekoTypeKind::Generic { .. } => &[],
+        }
+    }
+
+    /// Mutable view of the generic arguments (or function argument types).
+    pub fn generics_mut(&mut self) -> &mut Vec<PekoType> {
+        match &mut self.kind {
+            PekoTypeKind::Basic { info, .. } => &mut info.generics,
+            PekoTypeKind::Function { arguments, .. } => arguments,
+            PekoTypeKind::Generic { .. } => panic!("generics_mut on a generic-parameter type"),
+        }
+    }
+
+    /// `true` if this type is `const`.
+    #[must_use]
+    pub fn is_const(&self) -> bool {
+        match &self.kind {
+            PekoTypeKind::Basic { is_const, .. } | PekoTypeKind::Function { is_const, .. } => {
+                *is_const
+            }
+            PekoTypeKind::Generic { .. } => false,
+        }
+    }
+
+    /// Sets this type's `const`-ness. A no-op for generic parameters.
+    pub fn set_const(&mut self, value: bool) {
+        match &mut self.kind {
+            PekoTypeKind::Basic { is_const, .. } | PekoTypeKind::Function { is_const, .. } => {
+                *is_const = value
+            }
+            PekoTypeKind::Generic { .. } => {}
+        }
+    }
+
+    /// `true` if this is a function or closure type.
+    #[must_use]
+    pub fn is_function(&self) -> bool {
+        matches!(self.kind, PekoTypeKind::Function { .. })
+    }
+
+    /// `true` if this type was written as a `closure(...)` form.
+    #[must_use]
+    pub fn is_closure(&self) -> bool {
+        matches!(
+            self.kind,
+            PekoTypeKind::Function {
+                is_closure: true,
+                ..
+            }
+        )
+    }
+
+    /// Sets the closure flag on a function type. A no-op otherwise.
+    pub fn set_closure(&mut self, value: bool) {
+        if let PekoTypeKind::Function { is_closure, .. } = &mut self.kind {
+            *is_closure = value;
+        }
+    }
+
+    /// The return type of a function or closure type, if any.
+    #[must_use]
+    pub fn function_return(&self) -> Option<&PekoType> {
+        match &self.kind {
+            PekoTypeKind::Function { return_type, .. } => return_type.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Sets the return type, converting this value into a function type if it
+    /// is not one already.
+    pub fn set_function_return(&mut self, return_type: Option<PekoType>) {
+        match &mut self.kind {
+            PekoTypeKind::Function {
+                return_type: slot, ..
+            } => *slot = return_type.map(Box::new),
+            _ => {
+                self.kind = PekoTypeKind::Function {
+                    is_const: self.is_const(),
+                    arguments: self.generics().to_vec(),
+                    return_type: return_type.map(Box::new),
+                    is_closure: false,
+                };
+            }
+        }
+    }
+
+    /// `true` if this is the error sentinel type.
+    #[must_use]
+    pub fn is_error_type(&self) -> bool {
+        self.name() == "<<error_type>>"
+    }
+
+    /// `true` if this is a generic-parameter type.
+    #[must_use]
+    pub fn is_generic_param(&self) -> bool {
+        matches!(self.kind, PekoTypeKind::Generic { .. })
     }
 
     /// Parses a `PekoType` from a standalone string.
@@ -156,10 +397,9 @@ impl PekoType {
     /// ```
     /// use peko_core::types::PekoType;
     ///
-    /// let t = PekoType::from_string("int[]?", "<inline>");
-    /// assert_eq!(t.type_name, "int");
-    /// assert_eq!(t.pointer_depth, 1);
-    /// assert_eq!(t.optional_depth, 1);
+    /// let t = PekoType::from_string("int[]", "<inline>");
+    /// assert_eq!(t.name(), "int");
+    /// assert_eq!(t.array_depth, 1);
     /// ```
     pub fn from_string(string: &str, current_file: impl AsRef<Path>) -> PekoType {
         let file = current_file.as_ref().to_path_buf();
@@ -190,6 +430,11 @@ impl PekoType {
         parser: &mut parser::PekoParser,
         index_forward: &mut usize,
     ) -> bool {
+        // Eat a leading `const` modifier.
+        if parser.tokens.get_token_forward(*index_forward).equals("const") {
+            parser.tokens.index_increase_index(index_forward);
+        }
+
         // Eat any leading references (& or &&).
         while !parser.tokens.finished()
             && (parser.tokens.get_token_forward(*index_forward).equals("&")
@@ -353,17 +598,23 @@ impl PekoType {
     /// Consumes tokens through the end of the type expression. On
     /// malformed input, emits diagnostics into the parser's diagnostic
     /// list and returns whatever partial type information was successfully
-    /// parsed.
+    /// parsed. A trailing `?` desugars to `standard::Option<T>`.
     pub fn from_tokens(parser: &mut parser::PekoParser) -> PekoType {
         let mut module_names: Vec<String> = Vec::new();
         let mut generic_types: Vec<PekoType> = Vec::new();
-        let mut pointer_depth = 0;
+        let mut array_depth = 0;
         let mut optional_depth = 0;
         let mut reference_depth = 0;
         let mut function_type: Option<PekoType> = None;
 
         let starting_position = parser.get_current_position();
         let mut ending_position;
+
+        // Leading `const` modifier marks the type as immutable.
+        let is_const = parser.tokens.current_token().equals("const");
+        if is_const {
+            parser.tokens.increase_index();
+        }
 
         // Leading references: `&` adds 1, `&&` adds 2.
         // Done this way since the parser will parse && together as one token.
@@ -408,14 +659,14 @@ impl PekoType {
                 function_type = Some(PekoType::simple_type("void"));
             }
 
-            (pointer_depth, optional_depth, ending_position) =
-                parse_depth_suffixes(parser, pointer_depth, optional_depth, ending_position);
+            (array_depth, optional_depth, ending_position) =
+                parse_depth_suffixes(parser, array_depth, optional_depth, ending_position);
 
-            return PekoType::new(
+            let mut closure_type = PekoType::new(
                 module_names,
                 String::new(),
                 generic_types,
-                pointer_depth,
+                array_depth,
                 optional_depth,
                 reference_depth,
                 function_type,
@@ -423,6 +674,8 @@ impl PekoType {
                 starting_position,
                 ending_position,
             );
+            closure_type.set_const(is_const);
+            return closure_type;
         }
 
         // Function type form: `(returntype)(arg, arg, ...)`.
@@ -453,14 +706,14 @@ impl PekoType {
                 parser.tokens.increase_index();
             }
 
-            (pointer_depth, optional_depth, ending_position) =
-                parse_depth_suffixes(parser, pointer_depth, optional_depth, ending_position);
+            (array_depth, optional_depth, ending_position) =
+                parse_depth_suffixes(parser, array_depth, optional_depth, ending_position);
 
-            return PekoType::new(
+            let mut function_form = PekoType::new(
                 module_names,
                 String::new(),
                 generic_types,
-                pointer_depth,
+                array_depth,
                 optional_depth,
                 reference_depth,
                 function_type,
@@ -468,6 +721,8 @@ impl PekoType {
                 starting_position,
                 ending_position,
             );
+            function_form.set_const(is_const);
+            return function_form;
         }
 
         // Main type name.
@@ -525,76 +780,52 @@ impl PekoType {
             }
         }
 
-        (pointer_depth, optional_depth, ending_position) =
-            parse_depth_suffixes(parser, pointer_depth, optional_depth, ending_position);
+        (array_depth, optional_depth, ending_position) =
+            parse_depth_suffixes(parser, array_depth, optional_depth, ending_position);
 
-        PekoType::new(
+        let mut basic_type = PekoType::new(
             module_names,
             type_name,
             generic_types,
-            pointer_depth,
+            array_depth,
             optional_depth,
             reference_depth,
             function_type,
             false,
             starting_position,
             ending_position,
-        )
+        );
+        basic_type.set_const(is_const);
+        basic_type
     }
 
-    /// Constructs a type with only a bare name, no module path, no
-    /// generics, no depth, no source position.
-    #[must_use]
-    pub fn simple_type(type_name: &str) -> PekoType {
-        PekoType::new(
-            Vec::new(),
-            String::from(type_name),
-            Vec::new(),
-            0,
-            0,
-            0,
-            None,
-            false,
-            PositionData::default(),
-            PositionData::default(),
-        )
-    }
-
-    /// Returns `true` if this is a non-pointer, non-optional, non-reference
-    /// numeric or boolean primitive (`int`, `float`, `double`, `bool`).
+    /// Returns `true` if this is a non-array, non-reference numeric or boolean
+    /// primitive (`int`, `float`, `double`, `bool`).
     ///
     /// Notably excludes `char` (see [`PekoType::is_integer`] for the
     /// integer-class predicate that includes it).
     #[must_use]
     pub fn is_datatype(&self) -> bool {
-        if self.pointer_depth > 0
-            || self.optional_depth > 0
-            || self.reference_depth > 0
-            || self.function_type.is_some()
-        {
+        if self.array_depth > 0 || self.reference_depth > 0 || self.is_function() {
             return false;
         }
 
         matches!(
-            self.type_name.as_str(),
+            self.name(),
             "int" | "int16" | "int128" | "int64" | "float" | "double" | "f16" | "bool"
         )
     }
 
-    /// Returns `true` if this is a non-pointer, non-optional, non-reference
-    /// integer-class primitive (`int`, `char`, `bool`).
+    /// Returns `true` if this is a non-array, non-reference integer-class
+    /// primitive (`int`, `char`, `bool`).
     #[must_use]
     pub fn is_integer(&self) -> bool {
-        if self.pointer_depth > 0
-            || self.optional_depth > 0
-            || self.reference_depth > 0
-            || self.function_type.is_some()
-        {
+        if self.array_depth > 0 || self.reference_depth > 0 || self.is_function() {
             return false;
         }
 
         matches!(
-            self.type_name.as_str(),
+            self.name(),
             "int" | "int16" | "int128" | "int64" | "char" | "bool"
         )
     }
@@ -605,7 +836,7 @@ impl PekoType {
     #[must_use]
     pub fn is_base_type(&self) -> bool {
         matches!(
-            self.type_name.as_str(),
+            self.name(),
             "int"
                 | "int16"
                 | "int128"
@@ -616,41 +847,36 @@ impl PekoType {
                 | "cstr"
                 | "opaque"
                 | "void"
-        ) || self.function_type.is_some()
-            || self.is_closure
+        ) || self.is_function()
     }
 
-    /// Returns `true` if this is a non-pointer, non-optional, non-reference
-    /// floating-point primitive (`float`, `double`).
+    /// Returns `true` if this is a non-array, non-reference floating-point
+    /// primitive (`float`, `double`).
     #[must_use]
     pub fn is_float(&self) -> bool {
-        if self.pointer_depth > 0
-            || self.optional_depth > 0
-            || self.reference_depth > 0
-            || self.function_type.is_some()
-        {
+        if self.array_depth > 0 || self.reference_depth > 0 || self.is_function() {
             return false;
         }
 
-        matches!(self.type_name.as_str(), "float" | "double" | "f16")
+        matches!(self.name(), "float" | "double" | "f16")
     }
 
-    /// Returns the element type one level "inside" a pointer or reference.
+    /// Returns the element type one level "inside" an array or reference.
     ///
-    /// For a type with `pointer_depth = 2` this returns the same type with
-    /// `pointer_depth = 1`; for a type with `reference_depth = 1` this
-    /// returns the same type with `reference_depth = 0`. Types without any
-    /// pointer or reference depth are returned unchanged.
+    /// For a type with `array_depth = 2` this returns the same type with
+    /// `array_depth = 1`; for a type with `reference_depth = 1` this returns
+    /// the same type with `reference_depth = 0`. Types without any array or
+    /// reference depth are returned unchanged.
     #[must_use]
     pub fn get_element_type(&self) -> PekoType {
-        if self.pointer_depth == 0 || self.reference_depth == 0 {
+        if self.array_depth == 0 || self.reference_depth == 0 {
             return self.clone();
         }
 
         let mut element_type = self.clone();
 
-        if self.pointer_depth > 0 {
-            element_type.pointer_depth -= 1;
+        if self.array_depth > 0 {
+            element_type.array_depth -= 1;
         } else {
             element_type.reference_depth -= 1;
         }
@@ -658,8 +884,8 @@ impl PekoType {
         element_type
     }
 
-    /// Decreases this type's pointer depth by one, falling back to reference
-    /// depth if no pointer depth remains.
+    /// Decreases this type's array depth by one, falling back to reference
+    /// depth if no array depth remains.
     ///
     /// Has a special case for `string` and `opaque` types: dereferencing one
     /// of those yields a `char`. This matches the language semantics of
@@ -668,35 +894,31 @@ impl PekoType {
         // Cache the rendered form to avoid two allocations per call.
         let stringified = self.to_string();
         if stringified == "string" || stringified == "opaque" {
-            self.type_name = "char".to_string();
+            self.set_name("char");
         }
 
-        if self.pointer_depth > 0 {
-            self.pointer_depth -= 1;
+        if self.array_depth > 0 {
+            self.array_depth -= 1;
         } else if self.reference_depth > 0 {
             self.reference_depth -= 1;
-        } else if self.type_name == "Pointer" && !self.generic_types.is_empty() {
-            *self = self.generic_types[0].clone();
+        } else if self.name() == "Pointer" && !self.generics().is_empty() {
+            *self = self.generics()[0].clone();
         }
     }
 
     /// Returns `true` if this is a built-in primitive in its base form (no
-    /// pointer, optional, reference, or function-type modifier).
+    /// array, reference, or function-type modifier).
     ///
     /// Unlike [`PekoType::is_base_type`], this excludes function and closure
     /// forms and is strict about depth modifiers.
     #[must_use]
     pub fn is_builtin_type(&self) -> bool {
-        if self.pointer_depth > 0
-            || self.optional_depth > 0
-            || self.reference_depth > 0
-            || self.function_type.is_some()
-        {
+        if self.array_depth > 0 || self.reference_depth > 0 || self.is_function() {
             return false;
         }
 
         matches!(
-            self.type_name.as_str(),
+            self.name(),
             "int"
                 | "int64"
                 | "int16"
@@ -713,60 +935,59 @@ impl PekoType {
         )
     }
 
-    /// Returns a copy of this type with all "extra" information stripped.
-    /// Including function type, closure flag, error flag, module names, and
-    /// all depth modifiers. Useful when comparing the underlying named type
-    /// independently of how it's wrapped at a given use-site.
+    /// Returns a copy of this type with all "extra" information stripped:
+    /// module names, generics-wrapping function/closure structure, and all
+    /// depth modifiers. The result is the underlying named type, useful when
+    /// comparing names independently of how a type is wrapped at a use site.
     #[must_use]
     pub fn declutter(&self) -> Self {
-        let mut decluttered = self.clone();
-        decluttered.function_type = None;
-        decluttered.is_closure = false;
-        decluttered.is_error_type = false;
-        decluttered.module_names.clear();
-        decluttered.optional_depth = 0;
-        decluttered.pointer_depth = 0;
-        decluttered.reference_depth = 0;
-
-        decluttered
+        PekoType {
+            kind: PekoTypeKind::Basic {
+                is_const: false,
+                info: PekoTypeInfo {
+                    module_names: Vec::new(),
+                    name: self.name().to_string(),
+                    generics: self.generics().to_vec(),
+                },
+            },
+            array_depth: 0,
+            reference_depth: 0,
+            start_position: self.start_position.clone(),
+            end_position: self.end_position.clone(),
+            fully_expanded: self.fully_expanded,
+        }
     }
 
-    /// Returns a copy of this type with all depth modifiers
-    /// (pointer/optional/reference) zeroed but module path, generics, and
-    /// function-type info preserved.
+    /// Returns a copy of this type with all depth modifiers (array/reference)
+    /// zeroed but module path, generics, and function-type info preserved.
     #[must_use]
     pub fn no_depth(&self) -> Self {
         let mut decluttered = self.clone();
-        decluttered.optional_depth = 0;
-        decluttered.pointer_depth = 0;
+        decluttered.array_depth = 0;
         decluttered.reference_depth = 0;
 
         decluttered
     }
 
     /// Returns `true` if this type behaves as a pointer in codegen. Any
-    /// non-zero pointer or reference depth, or `string` / `opaque`, which
-    /// are pointer-typed at the implementation level.
+    /// non-zero array or reference depth, or `string` / `opaque`, which are
+    /// pointer-typed at the implementation level.
     #[must_use]
     pub fn is_pointer(&self) -> bool {
-        self.pointer_depth > 0
-            || self.type_name == "opaque"
-            || self.type_name == "string"
-            || self.type_name == "cstr"
-            || self.type_name == "Pointer"
+        self.array_depth > 0
+            || self.name() == "opaque"
+            || self.name() == "string"
+            || self.name() == "cstr"
+            || self.name() == "Pointer"
             || self.reference_depth > 0
     }
 
-    /// If this type is `Option<T>` or has `optional_depth > 0`, returns the
-    /// inner unwrapped type. Otherwise returns `None`.
+    /// If this type is `Option<T>`, returns the inner unwrapped type.
+    /// Otherwise returns `None`.
     #[must_use]
     pub fn optional_get_inner_type(&self) -> Option<PekoType> {
-        if self.type_name == "Option" && self.generic_types.len() == 1 {
-            Some(self.generic_types[0].clone())
-        } else if self.optional_depth > 0 {
-            let mut inner_type = self.clone();
-            inner_type.optional_depth -= 1;
-            Some(inner_type)
+        if self.name() == "Option" && self.generics().len() == 1 {
+            Some(self.generics()[0].clone())
         } else {
             None
         }
@@ -800,57 +1021,47 @@ impl PekoType {
         const FUNCTION_TYPE: &str = "$$$__";
         const REFERENCE: &str = "$_$_$";
         const POINTER: &str = "_$_$_";
-        const OPTIONAL: &str = "$$$$";
 
         let mut final_type = String::new();
 
-        if self.is_closure {
+        if self.is_closure() {
             final_type.push_str("closure");
             final_type.push_str(PAREN_OPEN);
 
-            let mangled_args: Vec<String> = self
-                .generic_types
-                .iter()
-                .map(PekoType::to_mangled_string)
-                .collect();
+            let mangled_args: Vec<String> =
+                self.generics().iter().map(PekoType::to_mangled_string).collect();
             final_type.push_str(&mangled_args.join(TYPE_SEPERATOR));
 
             final_type.push_str(PAREN_CLOSE);
 
-            if let Some(ret) = &self.function_type {
+            if let Some(ret) = self.function_return() {
                 final_type.push_str(FUNCTION_TYPE);
                 final_type.push_str(&ret.to_string());
             }
-        } else if let Some(ret) = &self.function_type {
+        } else if let Some(ret) = self.function_return() {
             final_type.push_str(PAREN_OPEN);
             final_type.push_str(&ret.to_mangled_string());
             final_type.push_str(PAREN_CLOSE);
             final_type.push_str(PAREN_OPEN);
 
-            let arg_strs: Vec<String> = self
-                .generic_types
-                .iter()
-                .map(PekoType::to_mangled_string)
-                .collect();
+            let arg_strs: Vec<String> =
+                self.generics().iter().map(PekoType::to_mangled_string).collect();
             final_type.push_str(&arg_strs.join(TYPE_SEPERATOR));
 
             final_type.push_str(PAREN_CLOSE);
         } else {
-            for name in &self.module_names {
+            for name in self.module_names() {
                 final_type.push_str(name);
                 final_type.push_str(MODULE_SEPERATOR);
             }
 
-            final_type.push_str(&self.type_name);
+            final_type.push_str(self.name());
 
-            if !self.generic_types.is_empty() {
+            if !self.generics().is_empty() {
                 final_type.push_str(GENERIC_SEPERATOR_LEFT);
 
-                let mangled_generics: Vec<String> = self
-                    .generic_types
-                    .iter()
-                    .map(PekoType::to_mangled_string)
-                    .collect();
+                let mangled_generics: Vec<String> =
+                    self.generics().iter().map(PekoType::to_mangled_string).collect();
                 final_type.push_str(&mangled_generics.join(TYPE_SEPERATOR));
 
                 final_type.push_str(GENERIC_SEPERATOR_RIGHT);
@@ -860,11 +1071,8 @@ impl PekoType {
         for _ in 0..self.reference_depth {
             final_type.insert_str(0, REFERENCE);
         }
-        for _ in 0..self.pointer_depth {
+        for _ in 0..self.array_depth {
             final_type.push_str(POINTER);
-        }
-        for _ in 0..self.optional_depth {
-            final_type.push_str(OPTIONAL);
         }
 
         final_type
@@ -881,44 +1089,42 @@ impl fmt::Display for PekoType {
     /// * Function: `(ret)(arg, arg)`
     /// * Plain:    `module::path::Name<T, U>`
     ///
-    /// Depth modifiers are appended (`[]` for pointer, `?` for optional) or
-    /// prepended (`&` for reference).
+    /// Depth modifiers are appended (`[]` for array) or prepended (`&` for
+    /// reference).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut final_type = String::new();
 
-        if self.is_closure {
+        if self.is_closure() {
             final_type.push_str("closure(");
-            let arg_strs: Vec<String> =
-                self.generic_types.iter().map(PekoType::to_string).collect();
+            let arg_strs: Vec<String> = self.generics().iter().map(PekoType::to_string).collect();
             final_type.push_str(&arg_strs.join(", "));
             final_type.push(')');
 
-            if let Some(ret) = &self.function_type {
+            if let Some(ret) = self.function_return() {
                 final_type.push_str(" => ");
                 final_type.push_str(&ret.to_string());
             }
-        } else if let Some(ret) = &self.function_type {
+        } else if let Some(ret) = self.function_return() {
             final_type.push('(');
             final_type.push_str(&ret.to_string());
             final_type.push_str(")(");
 
-            let arg_strs: Vec<String> =
-                self.generic_types.iter().map(PekoType::to_string).collect();
+            let arg_strs: Vec<String> = self.generics().iter().map(PekoType::to_string).collect();
             final_type.push_str(&arg_strs.join(", "));
 
             final_type.push(')');
         } else {
-            for name in &self.module_names {
+            for name in self.module_names() {
                 final_type.push_str(name);
                 final_type.push_str("::");
             }
 
-            final_type.push_str(&self.type_name);
+            final_type.push_str(self.name());
 
-            if !self.generic_types.is_empty() {
+            if !self.generics().is_empty() {
                 final_type.push('<');
                 let gen_strs: Vec<String> =
-                    self.generic_types.iter().map(PekoType::to_string).collect();
+                    self.generics().iter().map(PekoType::to_string).collect();
                 final_type.push_str(&gen_strs.join(", "));
                 final_type.push('>');
             }
@@ -927,11 +1133,8 @@ impl fmt::Display for PekoType {
         for _ in 0..self.reference_depth {
             final_type.insert(0, '&');
         }
-        for _ in 0..self.pointer_depth {
+        for _ in 0..self.array_depth {
             final_type.push_str("[]");
-        }
-        for _ in 0..self.optional_depth {
-            final_type.push('?');
         }
 
         f.write_str(&final_type)
@@ -940,10 +1143,6 @@ impl fmt::Display for PekoType {
 
 // ----- Private helpers ------------------------------------------------------
 
-/// Returns `true` if a token type can introduce or continue a type name.
-///
-/// Type names can be plain identifiers or any of the keyword tokens that
-/// double as built-in type names (`string`, `int`, `bool`, etc.).
 /// Maps a V2 FFI builtin spelling to the internal type name the analyzer and
 /// codegen already handle. The V2 surface names the integers `i1` through
 /// `i128`, the floats `f32` and `f64`, and the managed pointer `pointer<T>`.
@@ -968,6 +1167,10 @@ fn canonical_builtin_name(name: String) -> String {
     }
 }
 
+/// Returns `true` if a token type can introduce or continue a type name.
+///
+/// Type names can be plain identifiers or any of the keyword tokens that
+/// double as built-in type names (`string`, `int`, `bool`, etc.).
 fn is_type_name_token(ty: &lexer::TokenType) -> bool {
     matches!(
         ty,
@@ -1014,11 +1217,11 @@ fn eat_depth_suffixes(parser: &mut parser::PekoParser, index_forward: &mut usize
 
 /// Consuming variant of the depth-suffix loop used by [`PekoType::from_tokens`].
 ///
-/// Returns the updated `(pointer_depth, optional_depth, ending_position)`
-/// tuple after walking the suffix sequence.
+/// Returns the updated `(array_depth, optional_depth, ending_position)` tuple
+/// after walking the suffix sequence.
 fn parse_depth_suffixes(
     parser: &mut parser::PekoParser,
-    mut pointer_depth: usize,
+    mut array_depth: usize,
     mut optional_depth: usize,
     mut ending_position: PositionData,
 ) -> (usize, usize, PositionData) {
@@ -1026,7 +1229,7 @@ fn parse_depth_suffixes(
         && (parser.tokens.current_token().equals("[") || parser.tokens.current_token().equals("?"))
     {
         if parser.tokens.current_token().equals("[") {
-            pointer_depth += 1;
+            array_depth += 1;
             parser.tokens.increase_index();
 
             ending_position = parser.tokens.current_token().get_end().clone();
@@ -1040,5 +1243,5 @@ fn parse_depth_suffixes(
         }
     }
 
-    (pointer_depth, optional_depth, ending_position)
+    (array_depth, optional_depth, ending_position)
 }

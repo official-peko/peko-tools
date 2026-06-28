@@ -96,7 +96,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         get_base_type: bool,
         has_var_args: bool,
     ) -> Option<LLVMTypeRef> {
-        if type1.is_error_type {
+        if type1.is_error_type() {
             return Some(self.llvm_error_type());
         }
 
@@ -104,14 +104,14 @@ impl LlvmTypeBuilder for PekoCodegenContext {
 
         // Closure types: lower to a struct containing
         // { closure_context: managed i8*, function: <function_pointer> }.
-        if fully_qualified_type.is_closure {
+        if fully_qualified_type.is_closure() {
             let mut function_type = fully_qualified_type.clone();
             function_type
-                .generic_types
+                .generics_mut()
                 .insert(0, managed_pointer_type(PekoType::simple_type("void")));
-            function_type.is_closure = false;
-            if function_type.function_type.is_none() {
-                function_type.function_type = Some(Box::new(PekoType::simple_type("void")));
+            function_type.set_closure(false);
+            if !function_type.is_function() {
+                function_type.set_function_return(Some(PekoType::simple_type("void")));
             }
 
             let closure_function_type = self.get_llvm_type(&function_type)?;
@@ -141,9 +141,9 @@ impl LlvmTypeBuilder for PekoCodegenContext {
 
         // Function types: collect argument LLVM types, then return type,
         // then emit `LLVMFunctionType`.
-        if let Some(function_type) = &fully_qualified_type.function_type {
+        if let Some(function_type) = fully_qualified_type.function_return() {
             let mut argument_types = Vec::new();
-            for argument_type in &fully_qualified_type.generic_types {
+            for argument_type in fully_qualified_type.generics() {
                 let argument_llvm_type = self.get_llvm_type(argument_type)?;
                 argument_types.push(argument_llvm_type);
             }
@@ -169,17 +169,17 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // Pointer<T>: a managed pointer (address space 1) to a value of
         // type T. Pointer<void> is the managed opaque pointer and lowers
         // to an i8 pointer in address space 1.
-        if fully_qualified_type.type_name == "Pointer"
-            && fully_qualified_type.pointer_depth == 0
+        if fully_qualified_type.name() == "Pointer"
+            && fully_qualified_type.array_depth == 0
             && fully_qualified_type.reference_depth == 0
         {
             let inner = fully_qualified_type
-                .generic_types
+                .generics()
                 .first()
                 .cloned()
                 .unwrap_or_else(|| PekoType::simple_type("void"));
 
-            let inner_llvm_type = if inner.type_name == "void" && inner.pointer_depth == 0 {
+            let inner_llvm_type = if inner.name() == "void" && inner.array_depth == 0 {
                 unsafe { core::LLVMInt8Type() }
             } else {
                 self.get_llvm_type(&inner)?
@@ -192,11 +192,11 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // integer holding the variant index. Extra pointer or reference depth
         // wraps it in raw (address space 0) pointers.
         if self
-            .get_enum_variants(&fully_qualified_type.type_name)
+            .get_enum_variants(fully_qualified_type.name())
             .is_some()
         {
             let mut base_llvm_type = unsafe { core::LLVMInt32Type() };
-            for _ in 0..(fully_qualified_type.pointer_depth + fully_qualified_type.reference_depth) {
+            for _ in 0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth) {
                 base_llvm_type = unsafe { core::LLVMPointerType(base_llvm_type, 0) };
             }
             return Some(base_llvm_type);
@@ -245,7 +245,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // Extra pointer or reference depth is always raw (address space
         // 0). Only the base of a managed type (handled above) is in
         // address space 1.
-        for _ in 0..(fully_qualified_type.pointer_depth + fully_qualified_type.reference_depth) {
+        for _ in 0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth) {
             base_llvm_type = unsafe { core::LLVMPointerType(base_llvm_type, 0) }
         }
 
@@ -259,7 +259,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
     fn is_managed(&mut self, type1: &PekoType) -> bool {
         // A raw pointer or reference to a managed type is itself unmanaged
         // (e.g. `Object*` is a plain address-space-0 pointer).
-        if type1.pointer_depth > 0 || type1.reference_depth > 0 {
+        if type1.array_depth > 0 || type1.reference_depth > 0 {
             return false;
         }
 
@@ -268,9 +268,9 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // are managed. `string` MUST be included here (it lowers to
         // addrspace(1)) so that string-typed fields are traced and relocated by
         // the collector (matching is_managed_pointer, which already lists it).
-        type1.type_name == "Pointer"
-            || type1.type_name == "string"
-            || type1.is_closure
+        type1.name() == "Pointer"
+            || type1.name() == "string"
+            || type1.is_closure()
             || self.get_class_by_type(type1).is_some()
     }
 
@@ -307,15 +307,15 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         let mut resolved = attr_type.clone();
         let mut guard = 0;
         while guard < 16 {
-            match self.get_generic_types().get(&resolved.type_name).cloned() {
+            match self.get_generic_types().get(resolved.name()).cloned() {
                 Some(bound) => {
                     // Substitute, preserving any pointer/reference depth the
                     // parameter itself carried (a `T&` field stays a reference).
                     let mut next = bound;
-                    next.pointer_depth += resolved.pointer_depth;
+                    next.array_depth += resolved.array_depth;
                     next.reference_depth += resolved.reference_depth;
-                    if next.type_name == resolved.type_name
-                        && next.pointer_depth == resolved.pointer_depth
+                    if next.name() == resolved.name()
+                        && next.array_depth == resolved.array_depth
                         && next.reference_depth == resolved.reference_depth
                     {
                         break; // bound to itself
@@ -329,12 +329,12 @@ impl LlvmTypeBuilder for PekoCodegenContext {
 
         unsafe {
             // Any explicit pointer/reference depth -> raw (as0) pointer, 8 bytes.
-            if resolved.pointer_depth > 0 || resolved.reference_depth > 0 {
+            if resolved.array_depth > 0 || resolved.reference_depth > 0 {
                 return core::LLVMPointerType(core::LLVMInt8Type(), 0);
             }
             // By-value closure field -> 16-byte { context-ptr, fn-ptr } struct,
             // NOT a single pointer. Match it or the size is off by 8.
-            if resolved.is_closure {
+            if resolved.is_closure() {
                 let mut fields = [
                     core::LLVMPointerType(core::LLVMInt8Type(), 1), // managed context
                     core::LLVMPointerType(core::LLVMInt8Type(), 0), // function pointer
@@ -380,7 +380,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             )
         };
 
-        if type1.is_builtin_type() || type1.is_error_type {
+        if type1.is_builtin_type() || type1.is_error_type() {
             return unsafe {
                 llvm_sys_180::target::LLVMABISizeOfType(
                     datalayout,
@@ -390,14 +390,14 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         }
 
         if !base_type
-            || type1.function_type.is_some()
-            || type1.pointer_depth > 0
+            || type1.is_function()
+            || type1.array_depth > 0
             || type1.reference_depth > 0
         {
             return 8;
         }
 
-        if type1.is_closure {
+        if type1.is_closure() {
             return self.get_type_size(&PekoType::simple_type("opaque"), false) * 2;
         }
 

@@ -121,7 +121,7 @@ impl PekoValueBuilder for NewVariableAST {
 
             // Stack-allocate the variable and store its initial value.
             let allocate_variable = codegen_context.build_stack_allocation(&variable_type);
-            if !variable_value.value_type.is_error_type && !variable_type.is_error_type {
+            if !variable_value.value_type.is_error_type() && !variable_type.is_error_type() {
                 codegen_context.build_store(&allocate_variable, &variable_value);
             }
 
@@ -1207,7 +1207,7 @@ impl PekoValueBuilder for ClassAST {
         let mut next_module = codegen_context.module_context.current_module().clone();
         loop {
             class_type
-                .module_names
+                .module_names_mut()
                 .insert(0, next_module.read().unwrap().get_name().to_owned());
             let parent = next_module.read().unwrap().get_parent().cloned();
             match parent {
@@ -1524,7 +1524,7 @@ impl PekoValueBuilder for ClassAST {
             );
             method_function_symbol_name
                 .module_names
-                .extend(class_type.module_names.clone());
+                .extend(class_type.module_names().to_vec());
 
             let method_function = codegen_context.create_function(
                 Some(method_function_symbol_name.clone()),

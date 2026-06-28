@@ -390,7 +390,7 @@ impl PekoValueSimulator for VariableReferenceAST {
                 let expand_option = expand_option.unwrap();
 
                 // Only Option<T> can hold None.
-                if expand_option.type_name == "Option" && expand_option.generic_types.len() == 1 {
+                if expand_option.name() == "Option" && expand_option.generics().len() == 1 {
                     simulator_context.defined_objects.push(DefinedObject::new(
                         false,
                         expand_option.clone(),
@@ -452,7 +452,7 @@ impl PekoValueSimulator for VariableReferenceAST {
                 // Otherwise the inferred type must exist for Default
                 // to produce a value of that type.
                 if !simulator_context.type_exists(&main_expected_type)
-                    && !main_expected_type.is_error_type
+                    && !main_expected_type.is_error_type()
                 {
                     simulator_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
@@ -536,8 +536,8 @@ impl PekoValueSimulator for VariableReferenceAST {
             let mut value_type = attribute.get_type();
             if value_type.reference_depth > 0 {
                 value_type.reference_depth -= 1;
-            } else if value_type.pointer_depth > 0 {
-                value_type.pointer_depth -= 1;
+            } else if value_type.array_depth > 0 {
+                value_type.array_depth -= 1;
             }
 
             SimulatorVariable::new(
@@ -880,7 +880,7 @@ impl PekoValueSimulator for FunctionCallAST {
                 // Build the managed pointer type `Pointer<T>`.
                 let mut allocated_type = types::PekoType::simple_type("Pointer");
                 allocated_type
-                    .generic_types
+                    .generics_mut()
                     .push(self.function_generics[0].clone());
 
                 return SimulatorValue::Value(allocated_type);
@@ -959,7 +959,7 @@ impl PekoValueSimulator for FunctionCallAST {
 
                     // The inference type must be an Option with one
                     // generic parameter to hold the error.
-                    if expand_option.type_name == "Option" && expand_option.generic_types.len() == 1
+                    if expand_option.name() == "Option" && expand_option.generics().len() == 1
                     {
                         simulator_context.defined_objects.push(DefinedObject::new(
                             false,
@@ -1424,15 +1424,15 @@ impl PekoValueSimulator for FunctionCallAST {
                 && needed_generics_count > 0
             {
                 current_expected_types.iter().find(|expected| {
-                    expected.type_name == function_base_name
-                        && expected.generic_types.len() == needed_generics_count
+                    expected.name() == function_base_name
+                        && expected.generics().len() == needed_generics_count
                 })
             } else {
                 None
             };
 
             if let Some(find_expected_type) = find_expected_type {
-                function_generics = find_expected_type.generic_types.clone();
+                function_generics = find_expected_type.generics().to_vec();
             } else if needed_generics_count == 0 {
                 needed_generics.iter().for_each(|generic_typename| {
                     function_generics.push(collected_generic_types[generic_typename].clone());
@@ -1600,7 +1600,7 @@ impl PekoValueSimulator for FunctionCallAST {
             let function_from_expression =
                 self.function_reference.as_ref().simulate(simulator_context);
 
-            if function_from_expression.get_type().function_type.is_none() {
+            if !function_from_expression.get_type().is_function() {
                 simulator_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -1614,18 +1614,17 @@ impl PekoValueSimulator for FunctionCallAST {
             }
 
             function_call_info.write().unwrap().return_type =
-                if function_from_expression.get_type().function_type.is_none() {
+                if !function_from_expression.get_type().is_function() {
                     PekoType::simple_type("void")
                 } else {
                     function_from_expression
                         .get_type()
-                        .function_type
+                        .function_return()
                         .unwrap()
-                        .as_ref()
                         .clone()
                 };
 
-            for argument_type in &function_from_expression.get_type().generic_types {
+            for argument_type in function_from_expression.get_type().generics() {
                 function_call_info
                     .write()
                     .unwrap()
@@ -1771,10 +1770,10 @@ impl PekoValueSimulator for FunctionCallAST {
 
             function_type = {
                 let mut new_type = types::PekoType::simple_type("");
-                new_type.function_type = Some(Box::new(function_choice.return_type.clone()));
+                new_type.set_function_return(Some(function_choice.return_type.clone()));
 
                 for (_, arg) in &function_choice.arguments {
-                    new_type.generic_types.push(arg.argument_type.clone());
+                    new_type.generics_mut().push(arg.argument_type.clone());
                 }
 
                 new_type
@@ -1799,15 +1798,15 @@ impl PekoValueSimulator for FunctionCallAST {
             }
         }
 
-        let return_type = function_type.function_type.unwrap().as_mut().clone();
+        let return_type = function_type.function_return().unwrap().clone();
 
         // Variadic-argument type-check: if extras were passed, they
         // all need to fit into an Array<varargs_type>.
         if let Some(function_var_args) = &function_var_args_type
-            && function_type.generic_types.len() - 1 < arguments.len()
+            && function_type.generics().len() - 1 < arguments.len()
         {
             let mut variable_arguments = Vec::new();
-            for arg in arguments.iter().skip(function_type.generic_types.len() - 1) {
+            for arg in arguments.iter().skip(function_type.generics().len() - 1) {
                 variable_arguments.push(arg.clone());
             }
 
@@ -1815,7 +1814,7 @@ impl PekoValueSimulator for FunctionCallAST {
                 simulator_context.create_standard_array(function_var_args, variable_arguments);
 
             if create_array.is_none() {
-                let index = function_type.generic_types.len() - 1;
+                let index = function_type.generics().len() - 1;
 
                 simulator_context
                     .diagnostics
@@ -1879,10 +1878,10 @@ impl PekoValueSimulator for FunctionCallAST {
         // function's declared types and type-check each pair.
         for (index, (argument, argument_type)) in arguments
             .iter()
-            .zip(function_type.generic_types.iter())
+            .zip(function_type.generics().iter())
             .enumerate()
         {
-            if function_var_args_type.is_some() && index == function_type.generic_types.len() - 1 {
+            if function_var_args_type.is_some() && index == function_type.generics().len() - 1 {
                 break;
             }
 
@@ -2094,7 +2093,7 @@ impl PekoValueSimulator for ObjectConstructionAST {
         let mut class_name_to_type =
             types::PekoType::from_string(self.class_name.value.as_str(), "");
         class_name_to_type
-            .generic_types
+            .generics_mut()
             .extend(self.object_generics.clone());
         let class_to_create = simulator_context.get_class_by_type(&class_name_to_type);
 
@@ -2499,29 +2498,27 @@ impl PekoValueSimulator for ObjectAccessAST {
                 // matches an attribute whose type is a function or
                 // closure, call it as a function value.
                 if class.attributes.contains_key(&function_name)
-                    && (class.attributes[&function_name].attribute_type.is_closure
+                    && (class.attributes[&function_name].attribute_type.is_closure()
                         || class.attributes[&function_name]
                             .attribute_type
-                            .function_type
-                            .is_some())
+                            .is_function())
                 {
                     let attribute_function = simulator_context
                         .get_object_attribute(&object, function_name.clone(), true)
                         .unwrap();
 
                     function_call_info.write().unwrap().return_type =
-                        if attribute_function.get_type().function_type.is_some() {
+                        if attribute_function.get_type().is_function() {
                             attribute_function
                                 .get_type()
-                                .function_type
+                                .function_return()
                                 .unwrap()
-                                .as_ref()
                                 .clone()
                         } else {
                             PekoType::simple_type("void")
                         };
 
-                    for argument_type in &attribute_function.get_type().generic_types {
+                    for argument_type in attribute_function.get_type().generics() {
                         function_call_info
                             .write()
                             .unwrap()
@@ -2529,7 +2526,7 @@ impl PekoValueSimulator for ObjectAccessAST {
                             .insert(String::new(), argument_type.clone());
                     }
 
-                    let argument_types = attribute_function.get_type().generic_types.clone();
+                    let argument_types = attribute_function.get_type().generics().to_vec();
 
                     // Attribute-functions don't support variadic
                     // parameters, so the argument count must match.
@@ -2608,9 +2605,8 @@ impl PekoValueSimulator for ObjectAccessAST {
 
                     let function_return_type = attribute_function
                         .get_type()
-                        .function_type
+                        .function_return()
                         .unwrap()
-                        .as_ref()
                         .clone();
 
                     if simulator_context
@@ -2804,17 +2800,17 @@ impl PekoValueSimulator for ObjectAccessAST {
                 // Closures have two pseudo-attributes: `function`
                 // (the function pointer) and `context` (the
                 // captured-variables blob). Both are opaque.
-                if object.get_type().is_closure {
+                if object.get_type().is_closure() {
                     let mut context_type = types::PekoType::simple_type("Pointer");
                     context_type
-                        .generic_types
+                        .generics_mut()
                         .push(types::PekoType::simple_type("void"));
 
                     match variable_name.as_str() {
                         "function" => {
                             let mut function_type = object.get_type();
-                            function_type.is_closure = false;
-                            function_type.generic_types.insert(0, context_type);
+                            function_type.set_closure(false);
+                            function_type.generics_mut().insert(0, context_type);
 
                             return SimulatorValue::Value(function_type);
                         }
@@ -3069,9 +3065,9 @@ impl PekoValueSimulator for UnaryExpressionAST {
                 let value = self.operand.simulate(simulator_context);
                 let value_type = simulator_context.expand_type(&value.get_type()).unwrap();
 
-                if value_type.pointer_depth == 0
+                if value_type.array_depth == 0
                     && value_type.reference_depth == 0
-                    && value_type.type_name != "Pointer"
+                    && value_type.name() != "Pointer"
                 {
                     simulator_context
                         .diagnostics
@@ -3244,7 +3240,7 @@ impl PekoValueSimulator for ArrayAccessAST {
         simulator_context.return_references = return_references;
 
         // Class-with-indexing-overload path.
-        if (array.get_type().pointer_depth == 0 && array.get_type().reference_depth == 0)
+        if (array.get_type().array_depth == 0 && array.get_type().reference_depth == 0)
             && simulator_context
                 .get_class_by_type(&array.get_type())
                 .is_some()

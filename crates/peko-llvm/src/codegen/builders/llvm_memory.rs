@@ -91,7 +91,7 @@ pub trait LlvmMemoryBuilder {
 impl LlvmMemoryBuilder for PekoCodegenContext {
     fn build_stack_allocation(&mut self, value_type: &PekoType) -> CodegenValue {
         let mut pointer_type = value_type.clone();
-        pointer_type.pointer_depth += 1;
+        pointer_type.array_depth += 1;
 
         let llvm_type = self.get_llvm_type(value_type).unwrap();
 

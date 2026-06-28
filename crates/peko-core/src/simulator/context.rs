@@ -1607,10 +1607,10 @@ impl
 
         // Walk the module path to find the function's defining module.
         let mut next_module =
-            self.module_context.top_level_modules[&function_name_type.module_names[0]].clone();
-        for i in 1..function_name_type.module_names.len() {
+            self.module_context.top_level_modules[&function_name_type.module_names()[0]].clone();
+        for i in 1..function_name_type.module_names().len() {
             let child =
-                next_module.read().unwrap().modules[&function_name_type.module_names[i]].clone();
+                next_module.read().unwrap().modules[&function_name_type.module_names()[i]].clone();
             next_module = child;
         }
 
@@ -1620,7 +1620,7 @@ impl
             .collect();
 
         let function_to_call = self.choose_function(
-            next_module.read().unwrap().functions[&function_name_type.type_name]
+            next_module.read().unwrap().functions[function_name_type.name()]
                 .iter()
                 .map(|f| f.read().unwrap().clone())
                 .collect(),
@@ -1809,7 +1809,7 @@ impl
         }
 
         let mut array_object_type = types::PekoType::from_string("standard::Array", String::new());
-        array_object_type.generic_types.push(array_type.clone());
+        array_object_type.generics_mut().push(array_type.clone());
 
         Some(SimulatorValue::Value(array_object_type))
     }
@@ -1833,8 +1833,8 @@ impl
         }
 
         let mut map_object_type = types::PekoType::from_string("standard::Map", String::new());
-        map_object_type.generic_types.push(key_type.clone());
-        map_object_type.generic_types.push(value_type.clone());
+        map_object_type.generics_mut().push(key_type.clone());
+        map_object_type.generics_mut().push(value_type.clone());
 
         Some(SimulatorValue::Value(map_object_type))
     }
@@ -1921,8 +1921,8 @@ impl
 
         // Closure-to-closure: any operator returns bool (closures are
         // first-class and the language permits comparisons).
-        if lhs_value_type.is_closure
-            && rhs_value_type.is_closure
+        if lhs_value_type.is_closure()
+            && rhs_value_type.is_closure()
             && self.types_equal(&lhs_value_type, &rhs_value_type)
         {
             return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
@@ -1994,10 +1994,10 @@ impl
         // classes), so unrelated reference types do not compare.
         if matches!(operator.to_string().as_str(), "==" | "!=") {
             let lhs_is_reference_like = lhs_value_type.is_pointer()
-                || lhs_value_type.type_name == "Pointer"
+                || lhs_value_type.name() == "Pointer"
                 || self.get_class_by_type(&lhs_value_type).is_some();
             let rhs_is_reference_like = rhs_value_type.is_pointer()
-                || rhs_value_type.type_name == "Pointer"
+                || rhs_value_type.name() == "Pointer"
                 || self.get_class_by_type(&rhs_value_type).is_some();
 
             if lhs_is_reference_like

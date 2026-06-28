@@ -646,11 +646,10 @@ impl PekoValueBuilder for ObjectAccessAST {
                 // Method-named attribute on a class: treat as a function
                 // attribute and call it directly.
                 if class.attributes.contains_key(&function_name)
-                    && (class.attributes[&function_name].attribute_type.is_closure
+                    && (class.attributes[&function_name].attribute_type.is_closure()
                         || class.attributes[&function_name]
                             .attribute_type
-                            .function_type
-                            .is_some())
+                            .is_function())
                 {
                     let attribute_function = codegen_context
                         .get_object_attribute(&object, function_name.clone(), true)
@@ -659,7 +658,7 @@ impl PekoValueBuilder for ObjectAccessAST {
                     codegen_context.accessed_state = None;
                     codegen_context.primary_object = None;
 
-                    let argument_types = attribute_function.value_type.generic_types.clone();
+                    let argument_types = attribute_function.value_type.generics().to_vec();
 
                     // Attribute functions don't support overloading or
                     // varargs: argument counts must match exactly.
@@ -889,17 +888,17 @@ impl PekoValueBuilder for ObjectAccessAST {
                 // Closures have just two pseudo-attributes (`function`
                 // and `context`) that expose the underlying parts of
                 // the closure pair.
-                if object.value_type.is_closure {
+                if object.value_type.is_closure() {
                     match variable_name.as_str() {
                         "function" => {
                             let mut function_type = object.value_type.clone();
-                            function_type.is_closure = false;
+                            function_type.set_closure(false);
                             function_type
-                                .generic_types
+                                .generics_mut()
                                 .insert(0, managed_pointer_type(PekoType::simple_type("void")));
-                            if function_type.function_type.is_none() {
-                                function_type.function_type =
-                                    Some(Box::new(PekoType::simple_type("void")));
+                            if !function_type.is_function() {
+                                function_type
+                                    .set_function_return(Some(PekoType::simple_type("void")));
                             }
 
                             let closure_function_element =
@@ -1129,7 +1128,7 @@ impl PekoValueBuilder for ArrayAccessAST {
         codegen_context.return_references = return_references;
 
         // Object case: dispatch to the `[]` / `[]=` operator overload.
-        if (array.value_type.pointer_depth == 0 && array.value_type.reference_depth == 0)
+        if (array.value_type.array_depth == 0 && array.value_type.reference_depth == 0)
             && codegen_context
                 .get_class_by_type(&array.value_type)
                 .is_some()
@@ -1504,7 +1503,7 @@ impl PekoValueBuilder for VariableReferenceAST {
                 }
 
                 let expand_option = codegen_context.expand_type(expected_type_option).unwrap();
-                if expand_option.type_name == "Option" && expand_option.generic_types.len() == 1 {
+                if expand_option.name() == "Option" && expand_option.generics().len() == 1 {
                     let create_option = codegen_context.create_object(&expand_option, Vec::new());
                     if let Some(v) = create_option {
                         return v;
@@ -2063,7 +2062,7 @@ impl PekoValueBuilder for FunctionCallAST {
 
                     let expand_option = codegen_context.expand_type(expected_type).unwrap();
 
-                    if expand_option.type_name == "Option" || expand_option.generic_types.len() == 1
+                    if expand_option.name() == "Option" || expand_option.generics().len() == 1
                     {
                         let create_error_optional =
                             codegen_context.create_object(&expand_option, arguments.clone());
@@ -2481,15 +2480,15 @@ impl PekoValueBuilder for FunctionCallAST {
                 && let Some(expected_types) = &codegen_context.current_expected_type_options
             {
                 expected_types.iter().find(|expected| {
-                    expected.type_name == function_base_name
-                        && expected.generic_types.len() == needed_generics_count
+                    expected.name() == function_base_name
+                        && expected.generics().len() == needed_generics_count
                 })
             } else {
                 None
             };
 
             if let Some(expected) = find_expected_type {
-                function_generics = expected.generic_types.clone();
+                function_generics = expected.generics().to_vec();
             } else if needed_generics_count == 0 {
                 needed_generics.iter().for_each(|generic_typename| {
                     function_generics.push(collected_generic_types[generic_typename].clone());
@@ -2613,7 +2612,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 .as_ref()
                 .build_value(codegen_context);
 
-            if function_from_expression.value_type.function_type.is_none() {
+            if !function_from_expression.value_type.is_function() {
                 codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -2734,10 +2733,10 @@ impl PekoValueBuilder for FunctionCallAST {
 
             function_type = {
                 let mut new_type = PekoType::simple_type("");
-                new_type.function_type = Some(Box::new(function_choice.return_type.clone()));
+                new_type.set_function_return(Some(function_choice.return_type.clone()));
 
                 for (_, arg) in &function_choice.arguments {
-                    new_type.generic_types.push(arg.argument_type.clone());
+                    new_type.generics_mut().push(arg.argument_type.clone());
                 }
 
                 new_type
@@ -2806,11 +2805,11 @@ impl PekoValueBuilder for FunctionCallAST {
             // Positional form.
             for (index, (argument, argument_type)) in arguments
                 .iter()
-                .zip(function_type.generic_types.iter())
+                .zip(function_type.generics().iter())
                 .enumerate()
             {
                 if function_var_args_type.is_some()
-                    && index == function_type.generic_types.len() - 1
+                    && index == function_type.generics().len() - 1
                 {
                     break;
                 }
@@ -2837,8 +2836,8 @@ impl PekoValueBuilder for FunctionCallAST {
             }
 
             // C-style variadics: pass extra arguments through unchecked.
-            if arguments.len() > function_type.generic_types.len() && function_visibility.variadic {
-                for argument in &arguments[function_type.generic_types.len()..] {
+            if arguments.len() > function_type.generics().len() && function_visibility.variadic {
+                for argument in &arguments[function_type.generics().len()..] {
                     argument_values.push(argument.clone());
                 }
             }
@@ -2862,10 +2861,10 @@ impl PekoValueBuilder for FunctionCallAST {
 
         // Peko-style variadics: collect into a typed array.
         if let Some(function_var_args_type) = &function_var_args_type
-            && function_type.generic_types.len() - 1 < arguments.len()
+            && function_type.generics().len() - 1 < arguments.len()
         {
             let mut variable_arguments = Vec::new();
-            for argument in arguments.iter().skip(function_type.generic_types.len() - 1) {
+            for argument in arguments.iter().skip(function_type.generics().len() - 1) {
                 variable_arguments.push(argument.clone());
             }
 
@@ -2875,7 +2874,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 argument_values.push(create_array);
             } else {
                 arguments_errored = true;
-                let index = function_type.generic_types.len() - 1;
+                let index = function_type.generics().len() - 1;
                 codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -3086,9 +3085,9 @@ impl PekoValueBuilder for UnaryExpressionAST {
                 let value = self.operand.build_value(codegen_context);
                 let value_type = value.value_type.clone();
 
-                if value_type.pointer_depth == 0
+                if value_type.array_depth == 0
                     && value_type.reference_depth == 0
-                    && value_type.type_name != "Pointer"
+                    && value_type.name() != "Pointer"
                 {
                     codegen_context
                         .diagnostics

@@ -195,14 +195,14 @@ impl FunctionBuilder for PekoCodegenContext {
         // Closures are { context: managed i8*, function: fn-pointer }
         // structs. Unwrap them: prepend the context to the argument list
         // and replace `function_value` with the loaded function pointer.
-        if function_type.is_closure {
-            final_function_type.is_closure = false;
+        if function_type.is_closure() {
+            final_function_type.set_closure(false);
             final_function_type
-                .generic_types
+                .generics_mut()
                 .insert(0, managed_pointer_type(PekoType::simple_type("void")));
 
-            if function_type.function_type.is_none() {
-                final_function_type.function_type = Some(Box::new(PekoType::simple_type("void")));
+            if !function_type.is_function() {
+                final_function_type.set_function_return(Some(PekoType::simple_type("void")));
             }
 
             let function_llvm_type = self.get_llvm_type(&final_function_type).unwrap();
@@ -254,12 +254,7 @@ impl FunctionBuilder for PekoCodegenContext {
         let final_function_llvm_type = self
             .get_llvm_type_full(&final_function_type, true, var_args)
             .unwrap();
-        let return_type = final_function_type
-            .function_type
-            .as_ref()
-            .unwrap()
-            .as_ref()
-            .clone();
+        let return_type = final_function_type.function_return().unwrap().clone();
 
         let mut argument_values = arguments.iter().map(|value| value.llvm_value).collect_vec();
 
@@ -285,7 +280,7 @@ impl FunctionBuilder for PekoCodegenContext {
     ) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMGetParam(function.llvm_value, argument_index as u32) },
-            function.value_type.generic_types[argument_index].clone(),
+            function.value_type.generics()[argument_index].clone(),
         )
     }
 
@@ -295,10 +290,10 @@ impl FunctionBuilder for PekoCodegenContext {
         argument_index: usize,
     ) -> CodegenValue {
         let argument_variable_alloc =
-            self.build_stack_allocation(&function.value_type.generic_types[argument_index]);
+            self.build_stack_allocation(&function.value_type.generics()[argument_index]);
         let argument_value = CodegenValue::new(
             unsafe { core::LLVMGetParam(function.llvm_value, argument_index as u32) },
-            function.value_type.generic_types[argument_index].clone(),
+            function.value_type.generics()[argument_index].clone(),
         );
 
         self.build_store(&argument_variable_alloc, &argument_value);
