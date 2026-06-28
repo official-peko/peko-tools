@@ -804,70 +804,39 @@ pub trait ExecutionContextAlgorithms<
         let mut type1 = type1.clone();
 
         // Error types cannot be expanded.
-        if type1.is_error_type {
+        if type1.is_error_type() {
             type1.fully_expanded = true;
             return Some(type1);
         }
 
         // Save the non-definition type info.
-        let mut pointer_depth = type1.pointer_depth;
-        let mut optional_depth = type1.optional_depth;
+        let mut array_depth = type1.array_depth;
         let mut reference_depth = type1.reference_depth;
 
         // Expand a generic type. e.g. T = String, T -> String.
-        while self.get_generic_types().contains_key(&type1.type_name) {
-            type1 = self.get_generic_types()[&type1.type_name].clone();
+        while self.get_generic_types().contains_key(type1.name()) {
+            type1 = self.get_generic_types()[type1.name()].clone();
 
             // Add all the non-definition type info back in.
-            type1.pointer_depth += pointer_depth;
-            type1.optional_depth += optional_depth;
+            type1.array_depth += array_depth;
             type1.reference_depth += reference_depth;
 
-            pointer_depth = type1.pointer_depth;
-            optional_depth = type1.optional_depth;
+            array_depth = type1.array_depth;
             reference_depth = type1.reference_depth;
         }
 
-        // If the type is an optional declared with '?', convert it into a
-        // generic Optional. e.g. string?? -> standard::Option<standard::Option<string>>.
-        if type1.optional_depth > 0 {
-            // Capture the type that is being made optional.
-            let mut inner_type = type1.clone();
-            inner_type.optional_depth = 0;
-
-            // Expand that type.
-            let expanded_inner_type = self.expand_type(&inner_type);
-            inner_type = expanded_inner_type?;
-
-            let mut expanded = PekoType::new(
-                vec!["standard".to_string()],
-                "Option".to_string(),
-                vec![inner_type],
-                type1.pointer_depth,
-                0,
-                type1.reference_depth,
-                None,
-                false,
-                type1.start_position.clone(),
-                type1.end_position.clone(),
-            );
-            expanded.fully_expanded = true;
-            return Some(expanded);
-        }
-
         // Expand the argument and return types of functions/closures.
-        if type1.is_closure || type1.function_type.is_some() {
+        if type1.is_function() {
             // Expand the argument types.
-            for argument_type in type1.generic_types.iter_mut() {
+            for argument_type in type1.generics_mut().iter_mut() {
                 let type_expanded = self.expand_type(argument_type);
                 *argument_type = type_expanded?;
             }
 
             // If the function has a return type, then expand that too.
-            if type1.function_type.is_some() {
-                let return_type_expanded =
-                    self.expand_type(type1.clone().function_type.unwrap().as_ref());
-                type1.function_type = Some(Box::new(return_type_expanded?));
+            if let Some(return_type) = type1.function_return().cloned() {
+                let return_type_expanded = self.expand_type(&return_type)?;
+                type1.set_function_return(Some(return_type_expanded));
             }
 
             type1.fully_expanded = true;
@@ -875,7 +844,7 @@ pub trait ExecutionContextAlgorithms<
         }
 
         // Get the type on its own, no other clutter.
-        let type1_no_pointers = PekoType::from_string(type1.type_name.as_str(), "");
+        let type1_no_pointers = PekoType::from_string(type1.name(), "");
 
         // Built-in types cannot be expanded (they have no class or modules).
         if type1_no_pointers.is_datatype() {
@@ -885,7 +854,7 @@ pub trait ExecutionContextAlgorithms<
 
         // Enums are terminal named types backed by an integer. They have no
         // class body or modules to expand, so they expand to themselves.
-        if self.get_enum_variants(&type1.type_name).is_some() {
+        if self.get_enum_variants(type1.name()).is_some() {
             type1.fully_expanded = true;
             return Some(type1);
         }
@@ -903,7 +872,7 @@ pub trait ExecutionContextAlgorithms<
         // the failure path, so the stack is never left short.
         let argument_post_stack = self.get_module_context_mut().step_back();
         let mut argument_expansion_failed = false;
-        for generic_type in type1.generic_types.iter_mut() {
+        for generic_type in type1.generics_mut().iter_mut() {
             match self.expand_type(generic_type) {
                 Some(expanded) => *generic_type = expanded,
                 None => {
@@ -918,15 +887,15 @@ pub trait ExecutionContextAlgorithms<
             return None;
         }
 
-        if type1.is_base_type() || type1.type_name == "Pointer" {
+        if type1.is_base_type() || type1.name() == "Pointer" {
             return Some(type1);
         }
 
         // Convert the type to a string that can be interpreted as a class name.
-        let mut module_names = type1.module_names.clone();
+        let mut module_names = type1.module_names().to_vec();
         let class_name = type1.declutter().to_string();
         let mut class_name_base = type1.clone().declutter();
-        class_name_base.generic_types.clear();
+        class_name_base.generics_mut().clear();
         let class_name_base = class_name_base.to_string();
 
         let mut class_parent = if !module_names.is_empty() {
@@ -1006,8 +975,8 @@ pub trait ExecutionContextAlgorithms<
             } else {
                 return None;
             }
-        } else if self.find_class_in_current(&type1.type_name).is_some() {
-            self.find_class_in_current(&type1.type_name)
+        } else if self.find_class_in_current(type1.name()).is_some() {
+            self.find_class_in_current(type1.name())
                 .as_ref()
                 .unwrap()
                 .get_parent_module()
@@ -1044,14 +1013,14 @@ pub trait ExecutionContextAlgorithms<
                 .unwrap()
                 .clone();
             return self
-                .create_generic_class(&generic, type1.generic_types.clone())
+                .create_generic_class(&generic, type1.generics().to_vec())
                 .map(|class| class.get_class_type().clone());
         }
 
-        type1.module_names.clear();
+        type1.module_names_mut().clear();
         loop {
             type1
-                .module_names
+                .module_names_mut()
                 .insert(0, class_parent.read().unwrap().get_name().to_owned());
             if class_parent.read().unwrap().get_parent().is_none() {
                 break;
@@ -1066,35 +1035,35 @@ pub trait ExecutionContextAlgorithms<
     /// Returns `true` if `peko_type` resolves to a valid type in scope.
     fn type_exists(&mut self, peko_type: &PekoType) -> bool {
         // Error types are treated as poison (they technically exist).
-        if peko_type.is_error_type {
+        if peko_type.is_error_type() {
             return true;
         }
 
-        if peko_type.type_name == "Pointer" && !peko_type.generic_types.is_empty() {
-            return self.type_exists(&peko_type.generic_types[0]);
+        if peko_type.name() == "Pointer" && !peko_type.generics().is_empty() {
+            return self.type_exists(&peko_type.generics()[0]);
         }
 
         // If it's a closure, convert it into its equivalent function type
         // and type-check that. More efficient than separate code for
         // closure types.
-        if peko_type.is_closure {
+        if peko_type.is_closure() {
             let mut function_type = peko_type.clone();
             function_type
-                .generic_types
+                .generics_mut()
                 .insert(0, PekoType::simple_type("opaque"));
-            function_type.is_closure = false;
+            function_type.set_closure(false);
 
-            if function_type.function_type.is_none() {
-                function_type.function_type = Some(Box::new(PekoType::simple_type("void")));
+            if !function_type.is_function() {
+                function_type.set_function_return(Some(PekoType::simple_type("void")));
             }
 
             return self.type_exists(&function_type);
         }
 
         // Check function types.
-        if let Some(return_type) = &peko_type.function_type {
+        if let Some(return_type) = peko_type.function_return() {
             // First, check all the argument types.
-            for argument_type in &peko_type.generic_types {
+            for argument_type in peko_type.generics() {
                 if !self.type_exists(argument_type) {
                     return false;
                 }
@@ -1106,8 +1075,8 @@ pub trait ExecutionContextAlgorithms<
         // If the current type is a generic type, substitute it for its
         // actual type and check that.
         // e.g. T -> string | context.type_exists(T) -> context.type_exists(string).
-        if self.get_generic_types().contains_key(&peko_type.type_name) {
-            return self.type_exists(&self.get_generic_types()[&peko_type.type_name].clone());
+        if self.get_generic_types().contains_key(peko_type.name()) {
+            return self.type_exists(&self.get_generic_types()[peko_type.name()].clone());
         }
 
         // Expand the type to its full official definition.
@@ -1116,16 +1085,16 @@ pub trait ExecutionContextAlgorithms<
             return false;
         };
 
-        match peko_type.type_name.as_str() {
+        match peko_type.name() {
             // Built-in types obviously exist.
             "string" | "opaque" | "int" | "int16" | "int128" | "int64" | "float" | "double"
             | "f16" | "char" | "bool" | "void" | "cstr" => true,
             _ => {
                 // Check generic types again -- perhaps the expanded type name
                 // exists as a generic type.
-                if self.get_generic_types().contains_key(&peko_type.type_name) {
-                    self.type_exists(&self.get_generic_types()[&peko_type.type_name].clone())
-                } else if self.get_enum_variants(&peko_type.type_name).is_some() {
+                if self.get_generic_types().contains_key(peko_type.name()) {
+                    self.type_exists(&self.get_generic_types()[peko_type.name()].clone())
+                } else if self.get_enum_variants(peko_type.name()).is_some() {
                     // Enums are user-defined named types backed by an integer.
                     true
                 } else {
@@ -1143,7 +1112,7 @@ pub trait ExecutionContextAlgorithms<
     /// tree and instantiating generic-class declarations as needed.
     fn get_class_by_type(&mut self, type1: &PekoType) -> Option<ClassType> {
         // Error types cannot have a class type.
-        if type1.is_error_type {
+        if type1.is_error_type() {
             return None;
         }
 
@@ -1155,34 +1124,35 @@ pub trait ExecutionContextAlgorithms<
 
         // Find the module the class is defined in, based on the expanded
         // type's module path.
-        let (mut next_module, starting_point) = if !type_expanded.module_names.is_empty()
+        let (mut next_module, starting_point) = if !type_expanded.module_names().is_empty()
             && self
                 .get_module_context()
                 .top_level_modules
-                .contains_key(&type_expanded.module_names[0])
+                .contains_key(&type_expanded.module_names()[0])
         {
             (
-                self.get_module_context().top_level_modules[&type_expanded.module_names[0]].clone(),
+                self.get_module_context().top_level_modules[&type_expanded.module_names()[0]]
+                    .clone(),
                 1,
             )
-        } else if !type_expanded.module_names.is_empty() && {
+        } else if !type_expanded.module_names().is_empty() && {
             let current = self.get_module_context().current_module();
-            current.read().unwrap().get_name() == type_expanded.module_names[0]
+            current.read().unwrap().get_name() == type_expanded.module_names()[0]
         } {
             (self.get_module_context().current_module(), 1)
         } else {
             (self.get_module_context().current_module(), 0)
         };
 
-        for i in starting_point..type_expanded.module_names.len() {
+        for i in starting_point..type_expanded.module_names().len() {
             if !next_module
                 .read()
                 .unwrap()
                 .get_modules()
-                .contains_key(&type_expanded.module_names[i])
+                .contains_key(&type_expanded.module_names()[i])
             {
-                if next_module.read().unwrap().get_name() == type_expanded.module_names[i] {
-                    if next_module.read().unwrap().get_name() == type_expanded.module_names[i] {
+                if next_module.read().unwrap().get_name() == type_expanded.module_names()[i] {
+                    if next_module.read().unwrap().get_name() == type_expanded.module_names()[i] {
                         break;
                     }
 
@@ -1193,7 +1163,7 @@ pub trait ExecutionContextAlgorithms<
             }
 
             let parent = next_module.as_ref().read().unwrap().get_modules()
-                [&type_expanded.module_names[i]]
+                [&type_expanded.module_names()[i]]
                 .clone();
             next_module = parent;
         }
@@ -1206,23 +1176,23 @@ pub trait ExecutionContextAlgorithms<
             .get_classes()
             .contains_key(&class_name)
         {
-            if !type_expanded.generic_types.is_empty()
+            if !type_expanded.generics().is_empty()
                 && next_module
                     .read()
                     .unwrap()
                     .get_class_generics()
-                    .contains_key(&type_expanded.type_name)
+                    .contains_key(type_expanded.name())
             {
                 // Instantiate the generic using the provided generic
                 // types as the type parameters.
                 let next_generic = next_module.clone().read().unwrap().get_class_generics()
-                    [&type_expanded.type_name]
+                    [type_expanded.name()]
                     .read()
                     .unwrap()
                     .clone();
 
                 return self
-                    .create_generic_class(&next_generic, type_expanded.generic_types.clone());
+                    .create_generic_class(&next_generic, type_expanded.generics().to_vec());
             }
 
             return None;
@@ -1272,7 +1242,7 @@ pub trait ExecutionContextAlgorithms<
     /// casts via user-defined `operator to_X` conversions all count.
     fn types_similar(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
         // Error types "work" with any other type.
-        if type1.is_error_type || type2.is_error_type {
+        if type1.is_error_type() || type2.is_error_type() {
             return true;
         }
 
@@ -1293,19 +1263,19 @@ pub trait ExecutionContextAlgorithms<
         let type2_expanded = type2_expanded.unwrap();
 
         // Non-optional types can be casted to options.
-        if type2_expanded.type_name == "Option"
-                && type2_expanded.generic_types.len() == 1
+        if type2_expanded.name() == "Option"
+                && type2_expanded.generics().len() == 1
                 // Check if the inner type of the optional is similar to other type.
                 && self.types_similar(
-                    &type2_expanded.generic_types[0],
+                    &type2_expanded.generics()[0],
                     &type1_expanded,
                 )
         {
             return true;
         }
 
-        let type1_is_managed = type1.type_name == "Pointer";
-        let type2_is_managed = type2.type_name == "Pointer";
+        let type1_is_managed = type1.name() == "Pointer";
+        let type2_is_managed = type2.name() == "Pointer";
 
         // Pointers can be blindly cast to each other.
         if (type1_expanded.is_pointer() || type1_is_managed)
@@ -1320,23 +1290,23 @@ pub trait ExecutionContextAlgorithms<
         // with a bare class value, `opaque[]` with a class array, and so
         // on. The element type on the class side is what must be a class.
         let type1_is_untyped_pointer = type1_expanded.no_depth().to_string() == "opaque"
-            || (type1_expanded.type_name == "Pointer"
-                && type1_expanded.generic_types.len() == 1
-                && type1_expanded.generic_types[0].type_name == "void");
+            || (type1_expanded.name() == "Pointer"
+                && type1_expanded.generics().len() == 1
+                && type1_expanded.generics()[0].name() == "void");
         let type2_is_untyped_pointer = type2_expanded.no_depth().to_string() == "opaque"
-            || (type2_expanded.type_name == "Pointer"
-                && type2_expanded.generic_types.len() == 1
-                && type2_expanded.generic_types[0].type_name == "void");
+            || (type2_expanded.name() == "Pointer"
+                && type2_expanded.generics().len() == 1
+                && type2_expanded.generics()[0].name() == "void");
 
         // Compare pointer/reference depth so the untyped pointer and the
         // class are at the same level of indirection.
-        let depths_match = type1_expanded.pointer_depth + type1_expanded.reference_depth
-            == type2_expanded.pointer_depth + type2_expanded.reference_depth;
+        let depths_match = type1_expanded.array_depth + type1_expanded.reference_depth
+            == type2_expanded.array_depth + type2_expanded.reference_depth;
 
         if depths_match && (type1_is_untyped_pointer || type2_is_untyped_pointer) {
             if type1_is_untyped_pointer {
                 let mut class_side = type2_expanded.clone();
-                class_side.pointer_depth = 0;
+                class_side.array_depth = 0;
                 class_side.reference_depth = 0;
                 if self.get_class_by_type(&class_side).is_some() {
                     return true;
@@ -1345,7 +1315,7 @@ pub trait ExecutionContextAlgorithms<
 
             if type2_is_untyped_pointer {
                 let mut class_side = type1_expanded.clone();
-                class_side.pointer_depth = 0;
+                class_side.array_depth = 0;
                 class_side.reference_depth = 0;
                 if self.get_class_by_type(&class_side).is_some() {
                     return true;
@@ -1353,8 +1323,8 @@ pub trait ExecutionContextAlgorithms<
             }
         }
 
-        let type1_is_managed_string = type1.type_name == "string";
-        let type2_is_managed_string = type2.type_name == "string";
+        let type1_is_managed_string = type1.name() == "string";
+        let type2_is_managed_string = type2.name() == "string";
 
         if (type1_is_managed_string || type1.is_string_type())
             && (type2_is_managed_string || type2.is_string_type())
@@ -1447,7 +1417,7 @@ pub trait ExecutionContextAlgorithms<
 
     fn types_equal(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
         // Error types "work" with any type.
-        if type1.is_error_type || type2.is_error_type {
+        if type1.is_error_type() || type2.is_error_type() {
             return true;
         }
 

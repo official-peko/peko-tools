@@ -1381,9 +1381,9 @@ impl PekoValueSimulator for ClassAST {
                 }
 
                 if !parent.as_ref().unwrap().derives_from.is_empty() {
-                    if !self.derives_from[0].generic_types.is_empty() {
+                    if !self.derives_from[0].generics().is_empty() {
                         let mut generic_class_simple = self.derives_from[0].clone();
-                        generic_class_simple.generic_types.clear();
+                        generic_class_simple.generics_mut().clear();
 
                         let find_generic = simulator_context
                             .find_class_generic_in_current(generic_class_simple.to_string());
@@ -1487,7 +1487,7 @@ impl PekoValueSimulator for ClassAST {
         let mut next_module = simulator_context.module_context.current_module().clone();
         loop {
             class_type
-                .module_names
+                .module_names_mut()
                 .insert(0, next_module.read().unwrap().name.clone());
             let parent = next_module.read().unwrap().parent.clone();
             if let Some(p) = parent {

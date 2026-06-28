@@ -764,8 +764,8 @@ impl
 
         // For closures, any operation returns `true`. This is so closures
         // can be used in generic classes without creating type errors.
-        if lhs.value_type.is_closure
-            && rhs.value_type.is_closure
+        if lhs.value_type.is_closure()
+            && rhs.value_type.is_closure()
             && self.types_equal(&lhs.value_type, &rhs.value_type)
         {
             return Some(self.create_constant_boolean(true));
@@ -892,20 +892,20 @@ impl
         function_arguments: Vec<CodegenValue>,
     ) -> Option<CodegenValue> {
         let mut function_name_type = PekoType::from_string(&function_name.to_string(), "");
-        for generic_type in function_name_type.generic_types.iter_mut() {
+        for generic_type in function_name_type.generics_mut().iter_mut() {
             *generic_type = self.expand_type(generic_type)?;
         }
 
         // Walk to the module that owns the function.
-        let mut next_module = if !function_name_type.module_names.is_empty() {
-            self.module_context.top_level_modules[&function_name_type.module_names[0]].clone()
+        let mut next_module = if !function_name_type.module_names().is_empty() {
+            self.module_context.top_level_modules[&function_name_type.module_names()[0]].clone()
         } else {
             CodegenModule::get_top_parent(self.module_context.current_module())
         };
 
-        for i in 1..function_name_type.module_names.len() {
+        for i in 1..function_name_type.module_names().len() {
             let child = next_module.read().unwrap().get_modules()
-                [&function_name_type.module_names[i]]
+                [&function_name_type.module_names()[i]]
                 .clone();
             next_module = child;
         }
@@ -917,7 +917,7 @@ impl
 
         // Pick the best-matching overload from the function's option set.
         let function_to_call = self.choose_function(
-            next_module.read().unwrap().get_functions()[&function_name_type.type_name]
+            next_module.read().unwrap().get_functions()[function_name_type.name()]
                 .iter()
                 .map(|option| option.read().unwrap().clone())
                 .collect(),
@@ -1298,8 +1298,8 @@ impl
         key_value_pairs: Vec<(CodegenValue, CodegenValue)>,
     ) -> Option<CodegenValue> {
         let mut map_object_type = PekoType::from_string("Map", "");
-        map_object_type.generic_types.push(key_type.clone());
-        map_object_type.generic_types.push(value_type.clone());
+        map_object_type.generics_mut().push(key_type.clone());
+        map_object_type.generics_mut().push(value_type.clone());
 
         let map_object = self.create_object(&map_object_type, Vec::new())?;
 
@@ -1326,7 +1326,7 @@ impl
         values: Vec<CodegenValue>,
     ) -> Option<CodegenValue> {
         let mut array_object_type = PekoType::from_string("Array", "");
-        array_object_type.generic_types.push(array_type.clone());
+        array_object_type.generics_mut().push(array_type.clone());
 
         let array_object = self.create_object(&array_object_type, Vec::new())?;
 

@@ -556,7 +556,7 @@ impl PekoValueBuilder for SwitchStatementAST {
         let subject = self.subject.build_value(codegen_context);
         codegen_context.expecting_value = false;
 
-        let enum_name = subject.value_type.type_name.clone();
+        let enum_name = subject.value_type.name().to_string();
         let variants = codegen_context
             .get_enum_variants(&enum_name)
             .unwrap_or_default();

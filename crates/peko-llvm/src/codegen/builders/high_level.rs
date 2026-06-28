@@ -101,7 +101,7 @@ impl HighLevelCodegen for PekoCodegenContext {
         value: &CodegenValue,
     ) -> Option<CodegenValue> {
         // Error values pass through unchanged.
-        if value.value_type.is_error_type {
+        if value.value_type.is_error_type() {
             return Some(value.clone());
         }
 
@@ -109,20 +109,20 @@ impl HighLevelCodegen for PekoCodegenContext {
         if let Some(inner) = expected_type.optional_get_inner_type() {
             // Only wrap in Option when the value genuinely matches the
             // inner type.
-            let neither_is_opaque = value.value_type.type_name != "opaque"
-                && inner.type_name != "opaque"
-                && !(value.value_type.type_name == "Pointer"
+            let neither_is_opaque = value.value_type.name() != "opaque"
+                && inner.name() != "opaque"
+                && !(value.value_type.name() == "Pointer"
                     && value
                         .value_type
-                        .generic_types
+                        .generics()
                         .first()
-                        .map(|t| t.type_name == "void")
+                        .map(|t| t.name() == "void")
                         .unwrap_or(false))
-                && !(inner.type_name == "Pointer"
+                && !(inner.name() == "Pointer"
                     && inner
-                        .generic_types
+                        .generics()
                         .first()
-                        .map(|t| t.type_name == "void")
+                        .map(|t| t.name() == "void")
                         .unwrap_or(false));
             if neither_is_opaque && self.types_similar(&value.value_type, &inner) {
                 let current_file = self.get_current_file();
@@ -171,12 +171,12 @@ impl HighLevelCodegen for PekoCodegenContext {
 
         // Class -> opaque: as1 -> as0 via addrspacecast.
         // Class -> Pointer<void>: both as1, relabel only.
-        let expected_is_opaque = expected_type.type_name == "opaque";
-        let expected_is_managed_void = expected_type.type_name == "Pointer"
+        let expected_is_opaque = expected_type.name() == "opaque";
+        let expected_is_managed_void = expected_type.name() == "Pointer"
             && expected_type
-                .generic_types
+                .generics()
                 .first()
-                .map(|t| t.type_name == "void")
+                .map(|t| t.name() == "void")
                 .unwrap_or(false);
         if value_type_class.is_some() && (expected_is_opaque || expected_is_managed_void) {
             if expected_is_opaque {
@@ -199,13 +199,13 @@ impl HighLevelCodegen for PekoCodegenContext {
 
         // opaque -> class: as0 -> as1 via addrspacecast.
         // Pointer<void> -> class: both as1, relabel only.
-        let value_is_opaque = value.value_type.type_name == "opaque";
-        let value_is_managed_void = value.value_type.type_name == "Pointer"
+        let value_is_opaque = value.value_type.name() == "opaque";
+        let value_is_managed_void = value.value_type.name() == "Pointer"
             && value
                 .value_type
-                .generic_types
+                .generics()
                 .first()
-                .map(|t| t.type_name == "void")
+                .map(|t| t.name() == "void")
                 .unwrap_or(false);
         if expected_type_class.is_some() && (value_is_opaque || value_is_managed_void) {
             if value_is_opaque {
@@ -228,7 +228,7 @@ impl HighLevelCodegen for PekoCodegenContext {
 
         // Object to builtin via the `[operator to_<builtin>]` overload.
         if value_type_class.is_some()
-            && value.value_type.pointer_depth == 0
+            && value.value_type.array_depth == 0
             && value.value_type.reference_depth == 0
             && expected_type.is_builtin_type()
         {
@@ -243,7 +243,7 @@ impl HighLevelCodegen for PekoCodegenContext {
 
         // Builtin to wrapper class via the wrapper's constructor.
         if let Some(class_to_create) = &expected_type_class
-            && expected_type.pointer_depth == 0
+            && expected_type.array_depth == 0
             && expected_type.reference_depth == 0
             && value.value_type.is_builtin_type()
         {

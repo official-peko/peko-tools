@@ -434,8 +434,8 @@ impl PekoValueSimulator for SwitchStatementAST {
 
         // The subject must be an enum value. An error-typed subject already
         // reported a diagnostic, so it suppresses the further error.
-        let all_variants = simulator_context.get_enum_variants(&subject_type.type_name);
-        if all_variants.is_none() && !subject_type.is_error_type {
+        let all_variants = simulator_context.get_enum_variants(subject_type.name());
+        if all_variants.is_none() && !subject_type.is_error_type() {
             simulator_context
                 .diagnostics
                 .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -476,9 +476,9 @@ impl PekoValueSimulator for SwitchStatementAST {
                     // shape and that the variant exists.
                     let pattern_type = pattern.simulate(simulator_context).get_type();
 
-                    if !pattern_type.is_error_type
-                        && !subject_type.is_error_type
-                        && pattern_type.type_name != subject_type.type_name
+                    if !pattern_type.is_error_type()
+                        && !subject_type.is_error_type()
+                        && pattern_type.name() != subject_type.name()
                     {
                         simulator_context
                             .diagnostics
@@ -550,7 +550,7 @@ impl PekoValueSimulator for SwitchStatementAST {
         }
 
         // A switch must cover every variant or include the default arm.
-        if !has_default && !subject_type.is_error_type {
+        if !has_default && !subject_type.is_error_type() {
             let missing: Vec<String> = all_variants
                 .iter()
                 .filter(|variant| !covered.contains(variant))
@@ -565,7 +565,7 @@ impl PekoValueSimulator for SwitchStatementAST {
                         self.end.clone(),
                         format!(
                             "`switch` over `{}` is not exhaustive. Add arms for the missing variants ({}) or a `_` default arm",
-                            subject_type.type_name,
+                            subject_type.name(),
                             missing.join(", "),
                         ),
                         diagnostics::DiagnosticType::Error,

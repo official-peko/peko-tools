@@ -84,7 +84,7 @@ impl GlobalBuilder for PekoCodegenContext {
         initialize: bool,
     ) -> CodegenValue {
         let mut pointer_type = global_type.clone();
-        pointer_type.pointer_depth += 1;
+        pointer_type.array_depth += 1;
 
         let llvm_type = self.get_llvm_type(global_type).unwrap();
 
