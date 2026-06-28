@@ -57,6 +57,13 @@ impl PekoValueSimulator for VariableReassignmentAST {
                     .unwrap(),
             );
         }
+
+        // Reassigning an attribute of `this` auto-marks the enclosing method
+        // `[mutates]` (24.2).
+        if simulator_context.previous_was_this {
+            simulator_context.current_method_mutates = true;
+        }
+
         simulator_context.previous_was_this = false;
 
         // Set the inference type so the RHS knows what it's expected to
