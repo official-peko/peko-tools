@@ -1436,25 +1436,22 @@ pub trait ExecutionContextAlgorithms<
         type1_expanded.to_string() == type2_expanded.to_string()
     }
 
-    /// Picks the best-matching function from `function_choices` for the
-    /// supplied positional and keyword argument types.
+    /// Picks the matching function from `function_choices` for the supplied
+    /// positional and keyword argument types.
     ///
-    /// Scoring rules:
+    /// A choice matches only when every argument type is exactly equal to the
+    /// corresponding parameter type. Implicit casts are gone, so a
+    /// similar-but-unequal argument is not a candidate and the caller must
+    /// cast explicitly. Argument-count, keyword, default-value, and variadic
+    /// rules still gate which choices are eligible:
     ///
-    /// 1. **+1** if the choice's positional-argument count matches what
-    ///    was provided.
-    /// 2. **0 overall** if the choice takes more arguments than were
-    ///    provided (and isn't all-keyword-default).
-    /// 3. **0 overall** if a keyword arg is provided that doesn't exist
-    ///    on the choice.
-    /// 4. **1 overall** if every argument has a default and zero
-    ///    positional args were provided.
-    /// 5. **+1** per argument of similar type at the correct position.
-    /// 6. **+2** per argument of equal type at the correct position.
-    /// 7. **0 overall** on a single mismatched-type argument.
+    /// 1. A choice taking more arguments than were provided is rejected
+    ///    (unless every argument has a default and none were provided).
+    /// 2. A keyword arg that does not exist on the choice rejects it.
+    /// 3. A single unequal-type argument rejects the whole choice.
     ///
-    /// Returns `Some((index, choice))` for the highest-scoring choice, or
-    /// `None` if nothing scored above zero.
+    /// Returns `Some((index, choice))` for the first fully-equal choice, or
+    /// `None` if nothing matched.
     fn choose_function_and_index(
         &mut self,
         function_choices: Vec<FunctionType>,
@@ -1495,21 +1492,14 @@ pub trait ExecutionContextAlgorithms<
                     if function.get_arguments().contains_key(argument_name)
                         && function.get_arguments()[argument_name].has_default_value()
                     {
-                        // Rule 6: equal type.
+                        // Only an exactly-equal argument type matches. Implicit
+                        // casts are gone, so a similar-but-unequal type is not a
+                        // candidate.
                         if self.types_equal(
                             function.get_arguments()[argument_name].get_argument_type(),
                             argument_type,
                         ) {
                             current_type_match_score += 2;
-
-                        // Rule 5: similar type.
-                        } else if self.types_similar(
-                            function.get_arguments()[argument_name].get_argument_type(),
-                            argument_type,
-                        ) {
-                            current_type_match_score += 1;
-
-                        // Rule 7: dissimilar.
                         } else {
                             current_type_match_score = 0;
                             break;
@@ -1548,22 +1538,13 @@ pub trait ExecutionContextAlgorithms<
                         break;
                     }
 
-                    // Rule 7.
-                    if !self.types_similar(&argument_types[index], arg.get_argument_type()) {
+                    // Only an exactly-equal argument type matches.
+                    if !self.types_equal(arg.get_argument_type(), &argument_types[index]) {
                         current_type_match_score = 0;
                         break;
                     }
 
-                    // Rule 6.
-                    if self.types_equal(arg.get_argument_type(), &argument_types[index])
-                        || (arg.get_argument_type().is_float() && argument_types[index].is_float())
-                    {
-                        current_type_match_score += 2;
-
-                    // Rule 5.
-                    } else {
-                        current_type_match_score += 1;
-                    }
+                    current_type_match_score += 2;
                 }
 
                 // Score any provided variadic arguments.
@@ -1573,22 +1554,13 @@ pub trait ExecutionContextAlgorithms<
                     for argument_type in
                         &argument_types[(function.get_arguments().len())..argument_types.len()]
                     {
-                        // Rule 7.
-                        if !self.types_similar(argument_type, function.get_var_args_type().unwrap())
-                        {
+                        // Only an exactly-equal argument type matches.
+                        if !self.types_equal(argument_type, function.get_var_args_type().unwrap()) {
                             current_type_match_score = 0;
                             break;
-
-                        // Rule 6.
-                        } else if self
-                            .types_equal(argument_type, function.get_var_args_type().unwrap())
-                        {
-                            current_type_match_score += 2;
-
-                        // Rule 5.
-                        } else {
-                            current_type_match_score += 1;
                         }
+
+                        current_type_match_score += 2;
                     }
                 }
             }
