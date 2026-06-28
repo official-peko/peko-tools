@@ -80,14 +80,12 @@ pub fn header_to_peko_source(header: &ParsedHeader) -> String {
         }
     }
 
-    // A variable becomes an external global. The import path marks it scoped,
-    // so codegen emits a declaration-only reference to the C-owned symbol and
-    // skips the initializer. The `= 0` placeholder is never evaluated; it only
-    // satisfies the grammar, which requires an initializer.
+    // A variable becomes an external global with no initializer: the C side
+    // owns the storage, and codegen emits a declaration-only reference to it.
     for variable in &header.module.variables {
         let _ = writeln!(
             source,
-            "[external] {}: {} = 0;",
+            "[external] let {}: {};",
             variable.name, variable.ty.peko
         );
     }
@@ -265,8 +263,8 @@ mod tests {
         let source = header_to_peko_source(&parsed);
         assert_eq!(
             source,
-            "[external] frame_count: i64 = 0;\n\
-             [external] shared_buffer: pointer<void> = 0;\n"
+            "[external] let frame_count: i64;\n\
+             [external] let shared_buffer: pointer<void>;\n"
         );
     }
 }
