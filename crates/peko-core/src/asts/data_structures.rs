@@ -216,6 +216,10 @@ impl<T> PositionedValue<T> {
 pub struct VisibilityData {
     /// `[private]` -- only allows local access.
     pub private: bool,
+    /// `[public]` -- explicit public marker. Public is the default, so this
+    /// records that the modifier was written, which suppresses the unused
+    /// warning by declaring an intentional external surface.
+    pub public: bool,
     /// `[constant]` -- disallows modification of the variable.
     pub constant: bool,
     /// `[external]` -- linkage signifier; suppresses name mangling.
@@ -256,6 +260,7 @@ type VisibilityFlagInfo<'a> = &'a [(fn(&VisibilityData) -> bool, &'a str)];
 /// and the [`Display`] impl in lockstep.
 const VISIBILITY_FLAG_ORDER: VisibilityFlagInfo = &[
     (|v| v.private, "private"),
+    (|v| v.public, "public"),
     (|v| v.constant, "constant"),
     (|v| v.external, "external"),
     (|v| v.notrack, "notrack"),
@@ -295,6 +300,7 @@ impl VisibilityData {
     pub fn open_visibility() -> Self {
         Self {
             private: false,
+            public: false,
             constant: false,
             external: false,
             notrack: false,

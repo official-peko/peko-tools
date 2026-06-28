@@ -921,6 +921,10 @@ pub struct Scope {
     /// Symbols visible at this scope level (excluding inherited ones).
     pub symbols: IndexMap<String, ScopeSymbol>,
 
+    /// Names of symbols declared in this scope that were referenced at least
+    /// once. Drives the unused-symbol warning (24.1).
+    pub used_symbols: std::collections::HashSet<String>,
+
     /// Human-readable scope name (e.g. the containing function or module
     /// name).
     pub scope_name: String,
@@ -946,6 +950,7 @@ impl Scope {
             end,
             scopes: Vec::new(),
             symbols: IndexMap::new(),
+            used_symbols: std::collections::HashSet::new(),
             scope_name,
         }
     }
