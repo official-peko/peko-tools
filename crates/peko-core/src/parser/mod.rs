@@ -1404,36 +1404,35 @@ impl PekoParser {
         self.tokens.increase_index();
 
         // `let x: T = v` declares with an explicit type; `let x = v` infers the
-        // type from the initializer.
-        let error: bool;
+        // type from the initializer; `let x: T` declares without one.
+        let mut error = false;
+        let mut has_initializer = true;
         let variable_type = if self.tokens.current_token().equals(":") {
-            error = false;
             self.tokens.increase_index();
 
             let var_type = types::PekoType::from_tokens(self);
 
-            if self.expect_token_value("=", "variable value") {
+            // The initializer is optional for a typed declaration.
+            if self.tokens.current_token().equals("=") {
                 self.tokens.increase_index();
+            } else {
+                has_initializer = false;
             }
 
             Some(var_type)
         } else if self.tokens.current_token().equals("=") {
-            error = false;
             self.tokens.increase_index();
             None
         } else {
             error = true;
-            self.report_diagnostic("expected `:` for a typed declaration like `let x: int = 0`, or `=` for an inferred declaration like `let x = 0`");
+            self.report_diagnostic("expected `:` for a typed declaration like `let x: int = 0`, an inferred declaration like `let x = 0`, or `let x: int` to declare without an initializer");
             None
         };
 
-        let variable_value = if error {
-            PekoAST::Null(NullAST::new(
-                self.get_current_position(),
-                self.get_current_position(),
-            ))
+        let variable_value = if error || !has_initializer {
+            None
         } else {
-            self.parse()
+            Some(Box::new(self.parse()))
         };
 
         NewVariableAST::new(
@@ -1444,7 +1443,7 @@ impl PekoParser {
             false,
             variable_name,
             variable_type,
-            Box::new(variable_value),
+            variable_value,
         )
     }
 
