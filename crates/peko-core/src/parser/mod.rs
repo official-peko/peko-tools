@@ -1596,9 +1596,43 @@ impl PekoParser {
         ) {
             self.tokens.increase_index();
 
-            while !self.tokens.finished() && !self.tokens.current_token().equals("{") {
+            while !self.tokens.finished()
+                && !self.tokens.current_token().equals("{")
+                && !matches!(
+                    self.tokens.current_token().get_type(),
+                    lexer::TokenType::Impl
+                )
+            {
                 let index_before = self.tokens.get_index();
                 derives_from.push(types::PekoType::from_tokens(self));
+                // If from_tokens consumed nothing the cursor is stuck. Force
+                // one token of progress so the loop always terminates.
+                if !self.tokens.finished()
+                    && !self.tokens.current_token().equals("{")
+                    && self.tokens.get_index() == index_before
+                {
+                    self.tokens.increase_index();
+                }
+
+                if self.tokens.current_token().equals(",") {
+                    self.tokens.increase_index();
+                }
+            }
+        }
+
+        // Optional `impl Trait1, Trait2, ...` clause declaring the traits the
+        // class conforms to.
+        let mut implements = Vec::new();
+
+        if matches!(
+            self.tokens.current_token().get_type(),
+            lexer::TokenType::Impl
+        ) {
+            self.tokens.increase_index();
+
+            while !self.tokens.finished() && !self.tokens.current_token().equals("{") {
+                let index_before = self.tokens.get_index();
+                implements.push(types::PekoType::from_tokens(self));
                 // If from_tokens consumed nothing the cursor is stuck. Force
                 // one token of progress so the loop always terminates.
                 if !self.tokens.finished()
@@ -1897,9 +1931,100 @@ impl PekoParser {
             None,
             class_name,
             derives_from,
+            implements,
             attributes,
             methods,
             generics,
+        )
+    }
+
+    /// Parses a trait declaration: `trait Name<G> { fn sig; fn sig { default } }`.
+    ///
+    /// Each member is a function header. A header ending in `;` (no block) is a
+    /// required method the implementer must supply; a header with a block is a
+    /// default the implementer may keep or replace.
+    pub fn parse_trait_declaration(&mut self) -> TraitDeclarationAST {
+        let starting_position = self.get_current_position();
+        self.tokens.increase_index(); // eat 'trait'
+
+        let trait_name = PositionedValue::from_token(self.tokens.current_token());
+        self.expect_token_type(&lexer::TokenType::Identifier, "trait name");
+        self.tokens.increase_index();
+
+        // Optional generic parameter list.
+        let mut generics: Vec<PositionedValue<String>> = Vec::new();
+        if self.tokens.current_token().equals("<") {
+            self.tokens.increase_index();
+
+            while !self.tokens.finished()
+                && !self.tokens.current_token().equals(">")
+                && !self.tokens.current_token().equals("{")
+            {
+                generics.push(PositionedValue::from_token(self.tokens.current_token()));
+                self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
+                self.tokens.increase_index();
+
+                if self.tokens.current_token().equals(",") {
+                    self.tokens.increase_index();
+                }
+            }
+
+            if self.tokens.current_token().equals(">") {
+                self.tokens.increase_index();
+            } else {
+                self.report_diagnostic("expected `>` to close the generic parameter list");
+            }
+        }
+
+        if self.expect_token_value("{", "trait body") {
+            self.tokens.increase_index();
+        }
+
+        let mut methods: Vec<FunctionDeclarationAST> = Vec::new();
+
+        while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
+            // A bodyless method ends with `;`; consume the marker between slots.
+            if self.tokens.current_token().equals(";") {
+                self.tokens.increase_index();
+                continue;
+            }
+
+            let mut docinfo: Option<DocInfo> = None;
+            while self.tokens.current_token().equals("///") {
+                docinfo = Some(self.parse_doc_info());
+            }
+
+            match self.tokens.current_token().get_type() {
+                lexer::TokenType::FunctionDeclarator => {
+                    let mut method = self.parse_function_declaration();
+                    method.docinfo = docinfo;
+                    methods.push(method);
+                }
+
+                lexer::TokenType::Comment => self.skip_comment(),
+
+                // Skip stray tokens so a malformed member cannot wedge the loop.
+                _ => {
+                    self.report_diagnostic(
+                        "expected a method declaration (`fn name(...) => Type`) in the trait body",
+                    );
+                    self.tokens.increase_index();
+                }
+            }
+        }
+
+        if self.expect_token_value("}", "trait body") {
+            self.tokens.increase_index();
+        }
+
+        TraitDeclarationAST::new(
+            starting_position,
+            self.get_current_position(),
+            VisibilityData::open_visibility(),
+            None,
+            trait_name,
+            generics,
+            methods,
         )
     }
 
@@ -3410,6 +3535,15 @@ impl PekoParser {
                     class_declaration.visibility = v;
                 }
                 PekoAST::Class(class_declaration)
+            }
+
+            lexer::TokenType::Trait => {
+                let mut trait_declaration = self.parse_trait_declaration();
+                trait_declaration.docinfo = docinfo;
+                if let Some(v) = visibility {
+                    trait_declaration.visibility = v;
+                }
+                PekoAST::Trait(trait_declaration)
             }
 
             lexer::TokenType::Enum => {

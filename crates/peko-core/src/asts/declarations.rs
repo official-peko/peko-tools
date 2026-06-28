@@ -109,10 +109,13 @@ impl Spanned for ClosureAST {
     }
 }
 
-/// A class declaration: `class Name<G> from Parent { attrs; methods }`.
+/// A class declaration:
+/// `class Name<G> from Parent impl Trait1, Trait2 { attrs; methods }`.
 ///
 /// `derives_from` carries the list of parent types this class inherits from
 /// (Pekoscript doesn't currently support multiple inheritance, added for future support).
+/// `implements` carries the traits the class declares conformance to with the
+/// `impl` clause.
 #[derive(Clone, new)]
 pub struct ClassAST {
     pub start: PositionData,
@@ -121,12 +124,40 @@ pub struct ClassAST {
     pub docinfo: Option<DocInfo>,
     pub class_name: PositionedValue<String>,
     pub derives_from: Vec<types::PekoType>,
+    pub implements: Vec<types::PekoType>,
     pub attributes: IndexMap<PositionedValue<String>, ClassAttributeData>,
     pub methods: Vec<ClassMethod>,
     pub generics: Vec<PositionedValue<String>>,
 }
 
 impl Spanned for ClassAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
+/// A trait declaration: `trait Name<G> { fn sig; fn sig { default } }`.
+///
+/// A trait is a set of method slots. Each slot is a [`FunctionDeclarationAST`]:
+/// a slot whose `function_body` is `None` is a required method the implementer
+/// must supply, and a slot with a body is a default the implementer may keep or
+/// replace.
+#[derive(Clone, new)]
+pub struct TraitDeclarationAST {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub visibility: VisibilityData,
+    pub docinfo: Option<DocInfo>,
+    pub trait_name: PositionedValue<String>,
+    pub generics: Vec<PositionedValue<String>>,
+    pub methods: Vec<FunctionDeclarationAST>,
+}
+
+impl Spanned for TraitDeclarationAST {
     fn get_start(&self) -> &PositionData {
         &self.start
     }
