@@ -110,6 +110,23 @@ impl PekoValueSimulator for VariableReassignmentAST {
                     diagnostics::DiagnosticType::Error,
                     current_file.clone(),
                 ));
+        } else if self.assignment_operator.is_none()
+            && !simulator_context.const_compatible(&variable_value.get_type(), &variable_type)
+        {
+            // Assigning a const value into a non-const slot drops const.
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.variable_value.get_start().clone(),
+                    self.variable_value.get_end().clone(),
+                    format!(
+                        "cannot assign a `const` value of type `{}` to a non-const target of type `{}`. Casting away const requires an explicit `as`",
+                        variable_value.get_type(),
+                        variable_type,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    current_file.clone(),
+                ));
         }
 
         // Compound assignment (e.g. `+=`): the operator must apply
@@ -1553,10 +1570,8 @@ impl PekoValueSimulator for ReturnAST {
             .simulate(simulator_context);
         simulator_context.expecting_value = false;
 
-        if !simulator_context.types_similar(
-            &return_value.get_type(),
-            &simulator_context.current_return_type.clone().unwrap(),
-        ) {
+        let return_type = simulator_context.current_return_type.clone().unwrap();
+        if !simulator_context.types_similar(&return_value.get_type(), &return_type) {
             simulator_context
                 .diagnostics
                 .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -1565,7 +1580,23 @@ impl PekoValueSimulator for ReturnAST {
                     format!(
                         "cannot return value of type `{}`. The enclosing function's declared return type is `{}`, and the returned value's type is not compatible",
                         return_value.get_type(),
-                        simulator_context.current_return_type.as_ref().unwrap(),
+                        return_type,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+        } else if !simulator_context.const_compatible(&return_value.get_type(), &return_type) {
+            // Returning a const value where a non-const type is declared drops
+            // const.
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.return_value.clone().unwrap().get_start().clone(),
+                    self.return_value.clone().unwrap().get_end().clone(),
+                    format!(
+                        "cannot return a `const` value of type `{}` where the declared return type `{}` is not const. Casting away const requires an explicit `as`",
+                        return_value.get_type(),
+                        return_type,
                     ),
                     diagnostics::DiagnosticType::Error,
                     simulator_context.get_current_file(),
