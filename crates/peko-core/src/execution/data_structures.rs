@@ -39,6 +39,42 @@ use crate::asts::data_structures::{PositionedValue, VisibilityData};
 use crate::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use crate::types;
 
+/// One method slot of a trait.
+///
+/// A slot's index is its position in the trait's method list. Witness tables
+/// reference slots by that index.
+#[derive(Clone)]
+pub struct TraitMethodSlot {
+    /// The method name.
+    pub name: String,
+
+    /// The argument types, in declaration order.
+    pub argument_types: Vec<types::PekoType>,
+
+    /// The declared return type, or `void` when none was declared.
+    pub return_type: types::PekoType,
+
+    /// Whether the trait supplies a default body for this slot. A slot with no
+    /// default is a required method the implementer must provide.
+    pub has_default: bool,
+}
+
+/// A registered trait: a named, ordered set of method slots.
+///
+/// Stored by value in each module, mirroring how enums are stored. The slot
+/// order is fixed by the declaration and defines the witness-table layout.
+#[derive(Clone)]
+pub struct TraitDefinition {
+    /// The trait name.
+    pub name: String,
+
+    /// Generic parameter names, in declaration order.
+    pub generics: Vec<String>,
+
+    /// The method slots, in declaration order.
+    pub methods: Vec<TraitMethodSlot>,
+}
+
 /// A runtime value with a type.
 ///
 /// The simulator uses this for tracking value types during execution;
@@ -347,6 +383,14 @@ pub trait ExecutionModule<
 
     /// Mutable view of the enum map.
     fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>>;
+
+    /// Trait map (name -> trait definition), preserving declaration order.
+    /// Traits are immutable once declared, so they are stored by value rather
+    /// than behind a lock.
+    fn get_traits(&self) -> &IndexMap<String, TraitDefinition>;
+
+    /// Mutable view of the trait map.
+    fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition>;
 
     /// Generic-class map (name -> generic-class data), preserving
     /// declaration order. Keyed on the bare name without type parameters.

@@ -23,6 +23,7 @@ use crate::asts::data_structures::{ClassMethod, DocInfo, PositionData, Visibilit
 use crate::asts::declarations::*;
 use crate::diagnostics;
 use crate::execution::ExecutionContextAlgorithms;
+use crate::execution::data_structures::{TraitDefinition, TraitMethodSlot};
 use crate::simulator::data_structures::{
     ScopeClass, SimulatorClass, SimulatorClassAttribute, SimulatorClassGeneric,
     SimulatorClassVirtualTable,
@@ -1233,6 +1234,7 @@ impl PekoValueSimulator for ModuleCreationAST {
             Arc::clone(&scope_reference),
             Vec::new(),
             IndexMap::new(),
+            IndexMap::new(),
         );
 
         let new_module_ref = Arc::new(RwLock::new(new_module));
@@ -1331,9 +1333,59 @@ impl PekoValueSimulator for EnumDeclarationAST {
 }
 
 impl PekoValueSimulator for TraitDeclarationAST {
-    fn simulate(&self, _simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
-        // Trait registration, conformance, and slot assignment are wired in a
-        // following step. The declaration parses and threads through analysis.
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let generics: Vec<String> = self
+            .generics
+            .iter()
+            .map(|generic| generic.value.clone())
+            .collect();
+
+        let mut slots: Vec<TraitMethodSlot> = Vec::new();
+
+        for method in &self.methods {
+            let method_name = method.function_name.value.clone();
+
+            if slots.iter().any(|slot| slot.name == method_name) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        method.function_name.start.clone(),
+                        method.function_name.end.clone(),
+                        format!(
+                            "duplicate trait method `{}`. Each method in a trait must have a unique name",
+                            method_name,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                continue;
+            }
+
+            let argument_types: Vec<types::PekoType> = method
+                .arguments
+                .values()
+                .map(|argument| argument.argument_type.clone())
+                .collect();
+
+            let return_type = method
+                .return_type
+                .clone()
+                .unwrap_or_else(|| types::PekoType::simple_type("void"));
+
+            slots.push(TraitMethodSlot {
+                name: method_name,
+                argument_types,
+                return_type,
+                has_default: method.function_body.is_some(),
+            });
+        }
+
+        simulator_context.register_trait(TraitDefinition {
+            name: self.trait_name.value.clone(),
+            generics,
+            methods: slots,
+        });
+
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
 }
@@ -2315,6 +2367,81 @@ impl PekoValueSimulator for ClassAST {
 
             simulator_context.current_method_mutates = previous_method_mutates;
             simulator_context.current_method_name = previous_method_name;
+        }
+
+        // Trait conformance and coherence. The class's virtual table now holds
+        // every method (inherited and own), so a required trait method is
+        // satisfied by any method of the same name in scope.
+        let conformance_class = simulator_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .classes[&self.class_name.value]
+            .clone();
+        let class_method_names: std::collections::HashSet<String> = conformance_class
+            .read()
+            .unwrap()
+            .main_virtual_table
+            .methods
+            .keys()
+            .cloned()
+            .collect();
+
+        let mut implemented_traits: Vec<String> = Vec::new();
+        for implemented in &self.implements {
+            let trait_name = implemented.name().to_string();
+
+            let Some(trait_definition) = simulator_context.get_trait(&trait_name) else {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        implemented.start_position.clone(),
+                        implemented.end_position.clone(),
+                        format!(
+                            "`{trait_name}` is not a trait. The `impl` clause lists traits the class conforms to",
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                continue;
+            };
+
+            // Coherence: a class implements a given trait at most once.
+            if implemented_traits.contains(&trait_name) {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        implemented.start_position.clone(),
+                        implemented.end_position.clone(),
+                        format!(
+                            "class `{}` implements trait `{trait_name}` more than once. A type implements a given trait at most once",
+                            self.class_name.value,
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+                continue;
+            }
+            implemented_traits.push(trait_name.clone());
+
+            // Every required slot (one with no default body) must be provided.
+            for slot in &trait_definition.methods {
+                if !slot.has_default && !class_method_names.contains(&slot.name) {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            implemented.start_position.clone(),
+                            implemented.end_position.clone(),
+                            format!(
+                                "class `{}` does not implement method `{}` required by trait `{trait_name}`. Provide a `fn {}(...)` method or a trait default",
+                                self.class_name.value, slot.name, slot.name,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                }
+            }
         }
 
         // Collect the first-constructor arguments (or attribute list

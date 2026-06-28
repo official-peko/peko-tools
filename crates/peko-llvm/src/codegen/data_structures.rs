@@ -24,7 +24,7 @@ use peko_core::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use peko_core::execution::data_structures::{
     ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
     ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionValue, ExecutionVariable,
+    ExecutionValue, ExecutionVariable, TraitDefinition,
 };
 use peko_core::target::{OperatingSystem, PekoTarget};
 use peko_core::types::PekoType;
@@ -1115,6 +1115,7 @@ pub struct CodegenModule {
     pub variables: IndexMap<String, Arc<RwLock<CodegenVariable>>>,
     pub classes: IndexMap<String, Arc<RwLock<CodegenClass>>>,
     pub enums: IndexMap<String, Vec<String>>,
+    pub traits: IndexMap<String, TraitDefinition>,
     pub class_generics: IndexMap<String, Arc<RwLock<CodegenClassGeneric>>>,
     pub function_generics: IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>>,
 }
@@ -1273,6 +1274,7 @@ impl CodegenModule {
             variables: IndexMap::new(),
             classes: IndexMap::new(),
             enums: IndexMap::new(),
+            traits: IndexMap::new(),
             class_generics: IndexMap::new(),
             function_generics: IndexMap::new(),
         }
@@ -1291,6 +1293,7 @@ impl CodegenModule {
             variables: IndexMap::new(),
             classes: IndexMap::new(),
             enums: IndexMap::new(),
+            traits: IndexMap::new(),
             class_generics: IndexMap::new(),
             function_generics: IndexMap::new(),
         }
@@ -1387,6 +1390,14 @@ impl
 
     fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
         &mut self.enums
+    }
+
+    fn get_traits(&self) -> &IndexMap<String, TraitDefinition> {
+        &self.traits
+    }
+
+    fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition> {
+        &mut self.traits
     }
 
     fn get_class_generics_mut(
