@@ -2171,10 +2171,17 @@ impl PekoValueSimulator for ObjectConstructionAST {
         // constructor overload (used as expected-type options for
         // argument simulation, enabling better inference for nested
         // literals like `Array()`).
-        let method_options: Vec<_> = class_to_create.main_virtual_table.methods["constructor"]
-            .iter()
-            .map(|function| function.read().unwrap().clone())
-            .collect();
+        let method_options: Vec<_> = class_to_create
+            .main_virtual_table
+            .methods
+            .get("constructor")
+            .map(|overloads| {
+                overloads
+                    .iter()
+                    .map(|function| function.read().unwrap().clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
         for method_option in method_options {
@@ -2236,7 +2243,11 @@ impl PekoValueSimulator for ObjectConstructionAST {
 
         simulator_context.current_function_call = previous_function_call;
 
-        if !class_to_create.main_virtual_table.methods.is_empty() {
+        if class_to_create
+            .main_virtual_table
+            .methods
+            .contains_key("constructor")
+        {
             // Try the strict overload selector first.
             let post_stack = simulator_context.module_context.step_back();
             let constructor_choice = simulator_context.choose_function(
