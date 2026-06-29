@@ -350,7 +350,7 @@ impl LlvmConstantBuilder for PekoCodegenContext {
     fn create_constant_char(&mut self, char_value: char) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstInt(core::LLVMInt8Type(), char_value as u64, 1) },
-            PekoType::simple_type("char"),
+            PekoType::simple_type("i8"),
         )
     }
 
@@ -385,7 +385,7 @@ impl LlvmConstantBuilder for PekoCodegenContext {
     fn create_constant_boolean(&mut self, boolean: bool) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstInt(core::LLVMInt1Type(), boolean as u64, 0) },
-            PekoType::simple_type("bool"),
+            PekoType::simple_type("i1"),
         )
     }
 

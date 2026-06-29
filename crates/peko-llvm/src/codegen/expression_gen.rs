@@ -3024,28 +3024,22 @@ impl PekoValueBuilder for UnaryExpressionAST {
         match self.operator.as_str() {
             "!" => {
                 let negate = self.get_operand().build_value(codegen_context);
-                let negate_boxed =
-                    codegen_context.box_value_to_type(&PekoType::simple_type("bool"), &negate);
 
-                if negate_boxed.is_none() {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                            self.operand.get_start().clone(),
-                            self.operand.get_end().clone(),
-                            format!(
-                                "the `!` (logical not) operator requires a `bool`-compatible operand, but the operand has type `{}`",
-                                negate.value_type
-                            ),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ));
+                // An object operand routes through the Not trait; a raw i1 is
+                // negated by comparing it against false.
+                if codegen_context.get_class_by_type(&negate.value_type).is_some() {
+                    if let Ok(value) =
+                        codegen_context.call_object_method(&negate, "not", Vec::new(), None)
+                    {
+                        return value;
+                    }
                 }
 
+                let negate_raw = codegen_context.to_raw_bool(&negate);
                 let false_value = codegen_context.create_constant_boolean(false);
                 codegen_context.build_int_operation(
                     NumericalOperation::Equals,
-                    &negate_boxed.unwrap(),
+                    &negate_raw,
                     &false_value,
                 )
             }

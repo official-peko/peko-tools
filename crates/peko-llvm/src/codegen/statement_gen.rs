@@ -314,26 +314,9 @@ impl PekoValueBuilder for IfStatementAST {
             codegen_context.goto_block_end(current_elsecheck_block);
 
             let condition = condition_body.condition.build_value(codegen_context);
-            let condition_boxed =
-                codegen_context.box_value_to_type(&PekoType::simple_type("bool"), &condition);
-            let condition_boxed = match condition_boxed {
-                Some(boxed) => boxed,
-                None => {
-                    codegen_context.diagnostics.report_diagnostic(
-                        diagnostics::PekoDiagnostic::new(
-                            condition_body.condition.get_start().clone(),
-                            condition_body.condition.get_end().clone(),
-                            format!(
-                                "condition cannot be of type `{}`, must be of type `bool`",
-                                condition.get_type()
-                            ),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ),
-                    );
-                    codegen_context.create_constant_boolean(false)
-                }
-            };
+            // Branch on a raw i1: a bool object unboxes through to_raw(), a raw
+            // i1 passes through. The analysis pass already validated the type.
+            let condition_boxed = codegen_context.to_raw_bool(&condition);
 
             // Branching logic: not-last goes to next else-check;
             // last with else goes to else; last without else goes after.
@@ -670,26 +653,8 @@ impl PekoValueBuilder for WhileLoopAST {
         codegen_context.goto_block_end(loop_condition_check);
 
         let condition = self.conditional_body.condition.build_value(codegen_context);
-        let condition_boxed =
-            codegen_context.box_value_to_type(&PekoType::simple_type("bool"), &condition);
-        let condition_boxed = match condition_boxed {
-            Some(boxed) => boxed,
-            None => {
-                codegen_context
-                    .diagnostics
-                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        self.conditional_body.condition.get_start().clone(),
-                        self.conditional_body.condition.get_end().clone(),
-                        format!(
-                            "condition cannot be of type `{}`, must be of type `bool`",
-                            condition.get_type()
-                        ),
-                        diagnostics::DiagnosticType::Error,
-                        codegen_context.get_current_file().to_path_buf(),
-                    ));
-                codegen_context.create_constant_boolean(false)
-            }
-        };
+        // Branch on a raw i1: a bool object unboxes through to_raw().
+        let condition_boxed = codegen_context.to_raw_bool(&condition);
 
         codegen_context.build_conditional_branch(&condition_boxed, loop_block, after_block);
 

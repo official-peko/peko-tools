@@ -84,6 +84,10 @@ pub trait HighLevelCodegen {
     /// trait_type). The returned value carries `trait_type`.
     fn build_trait_object(&mut self, value: &CodegenValue, trait_type: &PekoType) -> CodegenValue;
 
+    /// Reduce a boolean value to a raw i1 for branching. A bool object unboxes
+    /// through its `to_raw()` method; a raw i1 passes through unchanged.
+    fn to_raw_bool(&mut self, value: &CodegenValue) -> CodegenValue;
+
     /// Dispatch a method call on a trait-typed value (a fat pointer). Loads the
     /// vtable index from the carried witness table for the method's slot, loads
     /// the object's runtime vtable, indexes it, and calls the function pointer
@@ -634,6 +638,17 @@ impl HighLevelCodegen for PekoCodegenContext {
 
             CodegenValue::new(result, slot.return_type.clone())
         }
+    }
+
+    fn to_raw_bool(&mut self, value: &CodegenValue) -> CodegenValue {
+        // An object (the bool wrapper, or a user type) unboxes through to_raw();
+        // a raw i1 is used directly.
+        if self.get_class_by_type(&value.value_type).is_some()
+            && let Ok(raw) = self.call_object_method(value, "to_raw", Vec::new(), None)
+        {
+            return raw;
+        }
+        value.clone()
     }
 
     fn build_managed_store(&mut self, slot: &CodegenValue, value: &CodegenValue) {

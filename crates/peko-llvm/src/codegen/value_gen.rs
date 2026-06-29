@@ -16,7 +16,11 @@ use crate::codegen::data_structures::{CodegenValue, managed_pointer_type};
 
 impl PekoValueBuilder for BooleanAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
-        codegen_context.create_constant_boolean(self.value.value)
+        // A bool literal is the boxed `bool` value type wrapping a raw i1.
+        let raw = codegen_context.create_constant_boolean(self.value.value);
+        codegen_context
+            .box_value_to_type(&PekoType::simple_type("bool"), &raw)
+            .unwrap_or_else(|| codegen_context.create_error_value())
     }
 }
 
@@ -34,7 +38,11 @@ impl PekoValueBuilder for NumberAST {
 
 impl PekoValueBuilder for CharAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
-        codegen_context.create_constant_char(self.value.value)
+        // A char literal is the boxed `char` value type wrapping a raw i8.
+        let raw = codegen_context.create_constant_char(self.value.value);
+        codegen_context
+            .box_value_to_type(&PekoType::simple_type("char"), &raw)
+            .unwrap_or_else(|| codegen_context.create_error_value())
     }
 }
 

@@ -258,9 +258,11 @@ impl PekoValueSimulator for IfStatementAST {
         for condition_body in &self.conditional_bodies {
             let condition = condition_body.condition.simulate(simulator_context);
 
-            // Condition must be `bool`-compatible.
+            // Condition must be a raw i1 or a bool object.
             if !simulator_context
-                .types_similar(&condition.get_type(), &types::PekoType::simple_type("bool"))
+                .types_similar(&condition.get_type(), &types::PekoType::simple_type("i1"))
+                && !simulator_context
+                    .types_similar(&condition.get_type(), &types::PekoType::simple_type("bool"))
             {
                 simulator_context
                     .diagnostics
@@ -268,7 +270,7 @@ impl PekoValueSimulator for IfStatementAST {
                         condition_body.condition.get_start().clone(),
                         condition_body.condition.get_end().clone(),
                         format!(
-                            "`if` condition has type `{}` but must have a `bool`-compatible type. The condition expression's type does not match the expected `bool`",
+                            "`if` condition has type `{}` but must be a bool or raw i1. The condition expression's type does not match",
                             condition.get_type(),
                         ),
                         diagnostics::DiagnosticType::Error,
@@ -770,7 +772,9 @@ impl PekoValueSimulator for WhileLoopAST {
         let condition = self.conditional_body.condition.simulate(simulator_context);
 
         if !simulator_context
-            .types_similar(&condition.get_type(), &types::PekoType::simple_type("bool"))
+            .types_similar(&condition.get_type(), &types::PekoType::simple_type("i1"))
+            && !simulator_context
+                .types_similar(&condition.get_type(), &types::PekoType::simple_type("bool"))
         {
             simulator_context
                 .diagnostics
@@ -778,7 +782,7 @@ impl PekoValueSimulator for WhileLoopAST {
                     self.conditional_body.condition.get_start().clone(),
                     self.conditional_body.condition.get_end().clone(),
                     format!(
-                        "`while` condition has type `{}` but must have a `bool`-compatible type. The condition expression's type does not match the expected `bool`",
+                        "`while` condition has type `{}` but must be a bool or raw i1. The condition expression's type does not match",
                         condition.get_type(),
                     ),
                     diagnostics::DiagnosticType::Error,

@@ -217,7 +217,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::NotEquals => CodegenValue::new(
                 unsafe {
@@ -229,7 +229,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::GreaterThan => CodegenValue::new(
                 unsafe {
@@ -241,7 +241,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::GreaterThanEqual => CodegenValue::new(
                 unsafe {
@@ -253,7 +253,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::LessThan => CodegenValue::new(
                 unsafe {
@@ -265,7 +265,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::LessThanEqual => CodegenValue::new(
                 unsafe {
@@ -277,7 +277,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                PekoType::simple_type("bool"),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::Modulus => self
                 .call_named_function("Runtime::Modulus", vec![int1.clone(), int2.clone()])
@@ -349,7 +349,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::NotEquals => CodegenValue::new(
                 unsafe {
@@ -361,7 +361,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::GreaterThan => CodegenValue::new(
                 unsafe {
@@ -373,7 +373,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::GreaterThanEqual => CodegenValue::new(
                 unsafe {
@@ -385,7 +385,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::LessThan => CodegenValue::new(
                 unsafe {
@@ -397,7 +397,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::LessThanEqual => CodegenValue::new(
                 unsafe {
@@ -409,7 +409,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                         c"".as_ptr(),
                     )
                 },
-                float2.value_type.clone(),
+                PekoType::simple_type("i1"),
             ),
             NumericalOperation::Modulus => self
                 .call_named_function("Runtime::Modulus", vec![float1.clone(), float2.clone()])
@@ -427,44 +427,36 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
         bool2: &PekoAST,
     ) -> Option<CodegenValue> {
         // Bring `HighLevelCodegen` into scope here only -- it is the single
-        // upward layer call from this trait, used to coerce the LHS / RHS
-        // values into `bool` form. Documented as an intentional crossing.
+        // upward layer call from this trait, used to dispatch the And/Or trait
+        // and to unbox a bool object to a raw i1. Documented as intentional.
         use crate::codegen::builders::high_level::HighLevelCodegen;
 
         let lhs = bool1.build_value(self);
 
-        let lhs_boxed = match self.box_value_to_type(&PekoType::simple_type("bool"), &lhs) {
-            Some(value) => value,
-            None => {
-                // If the LHS isn't directly coercible to bool but is a class,
-                // try the user-defined `&&` / `||` operator overload.
-                if self.get_class_by_type(&lhs.value_type).is_some() {
-                    let rhs = bool2.build_value(self);
-                    let operator = match operation {
-                        BooleanOperation::And => "&&",
-                        BooleanOperation::Or => "||",
-                    };
-                    return self.apply_operator(operator, &lhs, &rhs);
-                }
-                return None;
-            }
-        };
+        // An object operand routes through the And/Or trait (both operands are
+        // evaluated; no short-circuit). A raw i1 short-circuits in place.
+        if self.get_class_by_type(&lhs.value_type).is_some() {
+            let rhs = bool2.build_value(self);
+            let operator = match operation {
+                BooleanOperation::And => "&&",
+                BooleanOperation::Or => "||",
+            };
+            return self.apply_operator(operator, &lhs, &rhs);
+        }
 
+        let lhs_raw = self.to_raw_bool(&lhs);
         let lhs_block = self.current_basic_block.unwrap();
         let mut rhs_block = self.create_new_block(Some("rhs".to_string()));
         let end_block = self.create_new_block(None);
 
         match operation {
-            BooleanOperation::And => {
-                self.build_conditional_branch(&lhs_boxed, rhs_block, end_block)
-            }
-            BooleanOperation::Or => self.build_conditional_branch(&lhs_boxed, end_block, rhs_block),
+            BooleanOperation::And => self.build_conditional_branch(&lhs_raw, rhs_block, end_block),
+            BooleanOperation::Or => self.build_conditional_branch(&lhs_raw, end_block, rhs_block),
         };
 
         self.goto_block_end(rhs_block);
         let rhs = bool2.build_value(self);
-
-        let rhs_boxed = self.box_value_to_type(&PekoType::simple_type("bool"), &rhs)?;
+        let rhs_raw = self.to_raw_bool(&rhs);
 
         rhs_block = self.current_basic_block.unwrap();
 
@@ -477,13 +469,13 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
         unsafe {
             core::LLVMAddIncoming(
                 phi_node,
-                vec![lhs_boxed.llvm_value, rhs_boxed.llvm_value].as_mut_ptr(),
+                vec![lhs_raw.llvm_value, rhs_raw.llvm_value].as_mut_ptr(),
                 vec![lhs_block, rhs_block].as_mut_ptr(),
                 2,
             );
         }
 
-        Some(CodegenValue::new(phi_node, PekoType::simple_type("bool")))
+        Some(CodegenValue::new(phi_node, PekoType::simple_type("i1")))
     }
 
     fn build_boolean_operation(
@@ -554,7 +546,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                     c"".as_ptr(),
                 )
             },
-            PekoType::simple_type("bool"),
+            PekoType::simple_type("i1"),
         )
     }
 
@@ -622,7 +614,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
             unsafe {
                 core::LLVMBuildICmp(self.llvm_builder, predicate, lhs_ptr, rhs_ptr, c"".as_ptr())
             },
-            PekoType::simple_type("bool"),
+            PekoType::simple_type("i1"),
         )
     }
 }
