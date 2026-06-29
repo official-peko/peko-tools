@@ -813,7 +813,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "i32" | "i16" | "i128" | "i64" | "f32" | "f64" | "f16" | "bool" | "i1"
+            "i32" | "i16" | "i128" | "i64" | "f32" | "f64" | "f16" | "i1"
         )
     }
 
@@ -827,7 +827,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "i32" | "i16" | "i128" | "i64" | "char" | "bool" | "i1" | "i8"
+            "i32" | "i16" | "i128" | "i64" | "i1" | "i8"
         )
     }
 
@@ -838,18 +838,7 @@ impl PekoType {
     pub fn is_base_type(&self) -> bool {
         matches!(
             self.name(),
-            "i32"
-                | "i16"
-                | "i128"
-                | "i64"
-                | "char"
-                | "bool"
-                | "string"
-                | "cstr"
-                | "opaque"
-                | "void"
-                | "i1"
-                | "i8"
+            "i32" | "i16" | "i128" | "i64" | "cstr" | "opaque" | "void" | "i1" | "i8"
         ) || self.is_function()
     }
 
@@ -922,21 +911,8 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "i32"
-                | "i64"
-                | "i16"
-                | "i128"
-                | "f32"
-                | "f64"
-                | "f16"
-                | "char"
-                | "string"
-                | "cstr"
-                | "bool"
-                | "opaque"
-                | "void"
-                | "i1"
-                | "i8"
+            "i32" | "i64" | "i16" | "i128" | "f32" | "f64" | "f16" | "cstr" | "opaque" | "void"
+                | "i1" | "i8"
         )
     }
 

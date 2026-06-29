@@ -204,19 +204,23 @@ fn simple_type_has_no_extras() {
 }
 
 #[test]
-fn is_datatype_excludes_char() {
+fn is_datatype_covers_ffi_scalars_only() {
     assert!(PekoType::simple_type("i32").is_datatype());
     assert!(PekoType::simple_type("f32").is_datatype());
-    assert!(PekoType::simple_type("bool").is_datatype());
+    // bool, char, and string are object wrappers, not FFI scalars.
+    assert!(!PekoType::simple_type("bool").is_datatype());
     assert!(!PekoType::simple_type("char").is_datatype());
     assert!(!PekoType::simple_type("string").is_datatype());
 }
 
 #[test]
-fn is_integer_includes_char_and_bool() {
+fn is_integer_covers_ffi_integers_only() {
     assert!(PekoType::simple_type("i32").is_integer());
-    assert!(PekoType::simple_type("char").is_integer());
-    assert!(PekoType::simple_type("bool").is_integer());
+    assert!(PekoType::simple_type("i8").is_integer());
+    assert!(PekoType::simple_type("i1").is_integer());
+    // bool and char are object wrappers, not raw integers (i1 and i8 are).
+    assert!(!PekoType::simple_type("char").is_integer());
+    assert!(!PekoType::simple_type("bool").is_integer());
     assert!(!PekoType::simple_type("f32").is_integer());
 }
 
