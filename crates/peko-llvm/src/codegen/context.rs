@@ -773,6 +773,22 @@ impl
 
         let operator_str = operator.to_string();
 
+        // `&&` / `||` between bool and i1 (any mix) reduce both operands to raw
+        // i1 and combine in machine code, bypassing the And/Or trait.
+        if matches!(operator_str.as_str(), "&&" | "||")
+            && matches!(lhs.value_type.name(), "bool" | "i1")
+            && matches!(rhs.value_type.name(), "bool" | "i1")
+        {
+            let lhs_raw = self.to_raw_bool(&lhs);
+            let rhs_raw = self.to_raw_bool(&rhs);
+            let boolean_op = if operator_str == "&&" {
+                crate::codegen::data_structures::BooleanOperation::And
+            } else {
+                crate::codegen::data_structures::BooleanOperation::Or
+            };
+            return Some(self.build_boolean_operation(boolean_op, &lhs_raw, &rhs_raw));
+        }
+
         // If the LHS is an object, route the operator to its core trait method
         // (`+` -> `plus`, `==` -> `equals`, and so on). An operator with no core
         // trait keeps the legacy `[operator <op>]` member name.

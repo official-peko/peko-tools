@@ -2178,6 +2178,15 @@ impl
 
         let mut lhs = lhs.clone();
 
+        // `&&` / `||` between bool and i1 (in any mix) short-circuit on the raw
+        // i1 rather than routing through the And/Or trait, yielding i1.
+        let operator_is_logical = matches!(operator.to_string().as_str(), "&&" | "||");
+        let is_bool_like =
+            |t: &PekoType| t.name() == "bool" || t.name() == "i1";
+        if operator_is_logical && is_bool_like(&lhs_value_type) && is_bool_like(&rhs_value_type) {
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
+        }
+
         // Object types: route the operator to its core trait method (`+` ->
         // `plus`, `==` -> `equals`, and so on). An operator with no core trait
         // keeps the legacy `[operator <op>]` member name.

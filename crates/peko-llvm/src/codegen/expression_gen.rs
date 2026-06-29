@@ -3027,12 +3027,11 @@ impl PekoValueBuilder for UnaryExpressionAST {
 
                 // An object operand routes through the Not trait; a raw i1 is
                 // negated by comparing it against false.
-                if codegen_context.get_class_by_type(&negate.value_type).is_some() {
-                    if let Ok(value) =
+                if codegen_context.get_class_by_type(&negate.value_type).is_some()
+                    && let Ok(value) =
                         codegen_context.call_object_method(&negate, "not", Vec::new(), None)
-                    {
-                        return value;
-                    }
+                {
+                    return value;
                 }
 
                 let negate_raw = codegen_context.to_raw_bool(&negate);
