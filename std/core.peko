@@ -74,6 +74,24 @@
     fn less_than_equals(other: T) => bool;
 }
 
+// --- Logical traits --------------------------------------------------------
+
+/// `left && right` routes to `left.and(right)`. A raw i1 short-circuits in
+/// machine code; an object dispatches here and evaluates both operands.
+[public] trait And<T> {
+    fn and(other: T) => bool;
+}
+
+/// `left || right` routes to `left.or(right)`.
+[public] trait Or<T> {
+    fn or(other: T) => bool;
+}
+
+/// `!value` routes to `value.not()`.
+[public] trait Not {
+    fn not() => bool;
+}
+
 // --- Hashing ---------------------------------------------------------------
 
 /// A type that can produce a hash of itself. The hash is a `number` so it
@@ -179,7 +197,7 @@
 }
 
 /// The boxed boolean value type.
-[public] class bool impl Equals<bool>, NotEquals<bool>, Hash {
+[public] class bool impl Equals<bool>, NotEquals<bool>, And<bool>, Or<bool>, Not, Hash {
     raw: i1
 
     [public] fn equals(other: bool) => bool {
@@ -187,6 +205,15 @@
     }
     [public] fn not_equals(other: bool) => bool {
         return this.raw != other.raw
+    }
+    [public] fn and(other: bool) => bool {
+        return this.raw && other.raw
+    }
+    [public] fn or(other: bool) => bool {
+        return this.raw || other.raw
+    }
+    [public] fn not() => bool {
+        return !this.raw
     }
     [public] fn hash() => number {
         return new number(danger_cast<f64>(this.raw))

@@ -3167,15 +3167,41 @@ impl PekoValueSimulator for UnaryExpressionAST {
             "!" => {
                 let negate = self.get_operand().simulate(simulator_context);
 
+                // An object operand routes through the Not trait; a raw i1
+                // negates in place.
+                if simulator_context
+                    .get_class_by_type(&negate.get_type())
+                    .is_some()
+                {
+                    if let Ok(value) =
+                        simulator_context.call_object_method(&negate, "not", Vec::new(), None)
+                    {
+                        return value;
+                    }
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            self.operand.get_start().clone(),
+                            self.operand.get_end().clone(),
+                            format!(
+                                "the `!` operator requires a raw i1 or a type that implements `Not`, but `{}` does neither",
+                                negate.get_type(),
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    return simulator_context.create_error_value();
+                }
+
                 if !simulator_context
-                    .types_similar(&negate.get_type(), &types::PekoType::simple_type("bool"))
+                    .types_similar(&negate.get_type(), &types::PekoType::simple_type("i1"))
                 {
                     simulator_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
                             self.operand.get_start().clone(),
                             self.operand.get_end().clone(),
                             format!(
-                                "the `!` (logical not) operator requires a `bool`-compatible operand, but the operand has type `{}`",
+                                "the `!` (logical not) operator requires a bool or raw i1 operand, but the operand has type `{}`",
                                 negate.get_type(),
                             ),
                             diagnostics::DiagnosticType::Error,
