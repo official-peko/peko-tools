@@ -890,14 +890,14 @@ impl PekoType {
     /// Decreases this type's array depth by one, falling back to reference
     /// depth if no array depth remains.
     ///
-    /// Has a special case for `string` and `opaque` types: dereferencing one
-    /// of those yields a `char`. This matches the language semantics of
-    /// pointer-to-character types.
+    /// Has a special case for `opaque`: dereferencing a `void*` yields a raw
+    /// byte (`i8`). `string` is an object, so it is not dereferenced here;
+    /// indexing a string goes through the `Index` trait.
     pub fn decrease_pointer_depth(&mut self) {
         // Cache the rendered form to avoid two allocations per call.
         let stringified = self.to_string();
-        if stringified == "string" || stringified == "opaque" {
-            self.set_name("char");
+        if stringified == "opaque" {
+            self.set_name("i8");
         }
 
         if self.array_depth > 0 {
