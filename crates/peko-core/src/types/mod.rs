@@ -1157,6 +1157,30 @@ impl fmt::Display for PekoType {
 
 // ----- Private helpers ------------------------------------------------------
 
+/// Maps a binary operator to the core trait method it routes to when an
+/// operand is an object. An operator on raw FFI scalars lowers to machine
+/// arithmetic instead and never consults this map. Returns `None` for
+/// operators with no core trait (logical and bitwise operators), which keep
+/// their built-in handling.
+#[must_use]
+pub fn operator_trait_method(operator: &str) -> Option<&'static str> {
+    Some(match operator {
+        "+" => "plus",
+        "-" => "minus",
+        "*" => "multiply",
+        "/" => "divide",
+        "**" => "exp",
+        "%" => "modulo",
+        "==" => "equals",
+        "!=" => "not_equals",
+        ">" => "greater_than",
+        "<" => "less_than",
+        ">=" => "greater_than_equals",
+        "<=" => "less_than_equals",
+        _ => return None,
+    })
+}
+
 /// Maps a V2 FFI builtin spelling to the internal type name the analyzer and
 /// codegen already handle. The V2 surface names the integers `i1` through
 /// `i128`, the floats `f32` and `f64`, and the managed pointer `pointer<T>`.
