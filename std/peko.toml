@@ -9,3 +9,30 @@ categories = ["standard-library"]
 
 [lib]
 root = "lib.peko"
+
+# The garbage collector and runtime, compiled from C source at build time.
+# The compiler-facing ABI is declared in c/runtime/gc.peko.h and defined by
+# compiler_abi.c, which adapts the compiler-emitted peko_gc_* symbols onto the
+# internal pgc_* collector. The collector is a stop-the-world sliding
+# mark-compact (Lisp2) GC.
+[native]
+sources = [
+    "c/runtime/alloc.c",
+    "c/runtime/audit.c",
+    "c/runtime/compiler_abi.c",
+    "c/runtime/heap.c",
+    "c/runtime/mark.c",
+    "c/runtime/pgc.c",
+    "c/runtime/roots.c",
+    "c/runtime/rt.c",
+    "c/runtime/stackmap.c",
+    "c/runtime/threads.c",
+]
+include = ["c/runtime/include"]
+
+[native.flags]
+all = ["-O2", "-fno-strict-aliasing"]
+
+[native.link]
+linux = ["-lpthread", "-lm"]
+android = ["-llog"]
