@@ -1,12 +1,104 @@
-//! std::core: the root object model and the fundamental value types.
+//! std::core: the root object model, the operator and iteration traits, and
+//! the fundamental value types.
 //!
-//! Holds the root Object type, Option (value, None, Error), and the boxed
-//! value types number, string, bool, and char. The core traits arrive with
-//! the trait mechanism. Auto-imported and used bare.
-//!
-//! The boxed value types hold a raw FFI scalar. They are minimal wrappers for
-//! now: the compiler routes number, string, bool, and char literals into them
-//! once the boxing is wired.
+//! Operator overloading is done by implementing the core traits declared here
+//! (Plus, Equals, Hash, and so on); an operator on objects routes to the
+//! matching trait method, while an operator on a raw FFI scalar lowers to
+//! direct machine arithmetic. Auto-imported and used bare.
+
+// --- Operator traits -------------------------------------------------------
+//
+// Each arithmetic and comparison operator maps to one trait method. The traits
+// are generic over the right-hand operand type so a type can define how it
+// combines with another.
+
+/// `left + right` routes to `left.plus(right)`.
+[public] trait Plus<T> {
+    fn plus(other: T) => T;
+}
+
+/// `left - right` routes to `left.minus(right)`.
+[public] trait Minus<T> {
+    fn minus(other: T) => T;
+}
+
+/// `left * right` routes to `left.multiply(right)`.
+[public] trait Multiply<T> {
+    fn multiply(other: T) => T;
+}
+
+/// `left / right` routes to `left.divide(right)`.
+[public] trait Divide<T> {
+    fn divide(other: T) => T;
+}
+
+/// `left ** right` routes to `left.exp(right)`.
+[public] trait Exp<T> {
+    fn exp(other: T) => T;
+}
+
+/// `left % right` routes to `left.modulo(right)`.
+[public] trait Mod<T> {
+    fn modulo(other: T) => T;
+}
+
+// --- Comparison traits -----------------------------------------------------
+
+/// `left == right` routes to `left.equals(right)`.
+[public] trait Equals<T> {
+    fn equals(other: T) => bool;
+}
+
+/// `left != right` routes to `left.not_equals(right)`.
+[public] trait NotEquals<T> {
+    fn not_equals(other: T) => bool;
+}
+
+/// `left > right` routes to `left.greater_than(right)`.
+[public] trait GreaterThan<T> {
+    fn greater_than(other: T) => bool;
+}
+
+/// `left < right` routes to `left.less_than(right)`.
+[public] trait LessThan<T> {
+    fn less_than(other: T) => bool;
+}
+
+/// `left >= right` routes to `left.greater_than_equals(right)`.
+[public] trait GreaterThanEquals<T> {
+    fn greater_than_equals(other: T) => bool;
+}
+
+/// `left <= right` routes to `left.less_than_equals(right)`.
+[public] trait LessThanEquals<T> {
+    fn less_than_equals(other: T) => bool;
+}
+
+// --- Hashing ---------------------------------------------------------------
+
+/// A type that can produce a hash of itself. The hash is a `number` so it
+/// composes with the arithmetic traits a map uses to pick a bucket. The
+/// reference algorithm is djb2 over the value's bytes.
+[public] trait Hash {
+    fn hash() => number;
+}
+
+// --- Iteration -------------------------------------------------------------
+
+/// An iterator over values of type `T`. `next` advances and yields the next
+/// value, or `None` when the sequence is exhausted; `check` reports whether a
+/// further value is available without advancing.
+[public] trait Iter<T> {
+    fn next() => T?;
+    fn check() => bool;
+}
+
+// --- The fundamental value types -------------------------------------------
+//
+// These wrap a raw FFI scalar. They are declared before Object because Object
+// renders to a number and a string. The operator-trait conformances and their
+// method bodies arrive with literal boxing, when number, string, bool, and
+// char literals are routed into these objects.
 
 /// The boxed numeric value type. Wraps a raw machine scalar.
 [public] class number {
@@ -29,18 +121,35 @@
     length: i64
 }
 
-/// The root type every class inherits from.
-[public] class Object {
+// --- The root object -------------------------------------------------------
+
+/// The root type every class inherits from. It provides a string and numeric
+/// rendering, a mutation hook, and a default hash so any value is hashable.
+[public] class Object impl Hash {
     /// A human-readable rendering of the value.
     [public] fn to_string() => string {
         return "Object"
+    }
+
+    /// A numeric rendering of the value. The default is zero.
+    [public] fn to_number() => number {
+        return new number(constant<i64>(0))
     }
 
     /// Called whenever an attribute of the value is modified, by reassignment
     /// or by a [mutates] method. Overridable per class.
     [public] fn on_state_changed(name: string) {
     }
+
+    /// A default hash. A class with identity or content semantics overrides
+    /// this; the value types override it with a real djb2 hash. The default
+    /// will route through the string form once string implements Hash.
+    [public] fn hash() => number {
+        return new number(constant<i64>(0))
+    }
 }
+
+// --- Option ----------------------------------------------------------------
 
 /// An optional value with three states: a value, None, or Error.
 [public] class Option<T> {
