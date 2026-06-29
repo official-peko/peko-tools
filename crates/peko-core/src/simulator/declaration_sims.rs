@@ -1253,6 +1253,12 @@ impl PekoValueSimulator for ModuleCreationAST {
             .move_to_module(new_module_ref, false, false);
         simulator_context.current_scope = Some(Arc::clone(&new_module_scope));
 
+        // Header pass over the module body, then the body pass, so a
+        // declaration can reference another in the same module regardless of
+        // order.
+        for ast in &self.module_body.value {
+            ast.declare(simulator_context);
+        }
         for ast in &self.module_body.value {
             ast.simulate(simulator_context);
         }
@@ -1303,6 +1309,19 @@ impl PekoValueSimulator for ModuleCreationAST {
 /// in the current module so the name resolves as a type and `Enum::Variant`
 /// resolves to a value of that type.
 impl PekoValueSimulator for EnumDeclarationAST {
+    /// Header pass: register the enum name and variants so it resolves as a
+    /// type regardless of declaration order. Diagnostic-free; the dup-variant
+    /// check happens in `simulate`.
+    fn declare(&self, simulator_context: &mut PekoSimulatorContext) {
+        let mut variant_names: Vec<String> = Vec::new();
+        for variant in &self.variants {
+            if !variant_names.contains(&variant.value) {
+                variant_names.push(variant.value.clone());
+            }
+        }
+        simulator_context.register_enum(self.enum_name.value.clone(), variant_names);
+    }
+
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         let mut variant_names: Vec<String> = Vec::new();
 
@@ -1333,6 +1352,48 @@ impl PekoValueSimulator for EnumDeclarationAST {
 }
 
 impl PekoValueSimulator for TraitDeclarationAST {
+    /// Header pass: register the trait's slot layout so a class declared in the
+    /// same module can implement it regardless of order. Diagnostic-free; the
+    /// authoritative dup-method check happens in `simulate`.
+    fn declare(&self, simulator_context: &mut PekoSimulatorContext) {
+        let generics: Vec<String> = self
+            .generics
+            .iter()
+            .map(|generic| generic.value.clone())
+            .collect();
+
+        let mut slots: Vec<TraitMethodSlot> = Vec::new();
+        for method in &self.methods {
+            let method_name = method.function_name.value.clone();
+            if slots.iter().any(|slot| slot.name == method_name) {
+                continue;
+            }
+
+            let argument_types: Vec<types::PekoType> = method
+                .arguments
+                .values()
+                .map(|argument| argument.argument_type.clone())
+                .collect();
+            let return_type = method
+                .return_type
+                .clone()
+                .unwrap_or_else(|| types::PekoType::simple_type("void"));
+
+            slots.push(TraitMethodSlot {
+                name: method_name,
+                argument_types,
+                return_type,
+                has_default: method.function_body.is_some(),
+            });
+        }
+
+        simulator_context.register_trait(TraitDefinition {
+            name: self.trait_name.value.clone(),
+            generics,
+            methods: slots,
+        });
+    }
+
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         let generics: Vec<String> = self
             .generics
@@ -1393,6 +1454,125 @@ impl PekoValueSimulator for TraitDeclarationAST {
 /// Generic class declarations are tracked but not simulated until
 /// instantiated with concrete type parameters.
 impl PekoValueSimulator for ClassAST {
+    /// Header pass: register a class shell so other declarations can resolve
+    /// this name before its body is simulated. The shell carries the class
+    /// type, its own attributes, and its method signatures, all with raw
+    /// (unexpanded) types so a forward reference inside a signature is fine.
+    /// Inheritance merge, type expansion, body simulation, and conformance all
+    /// happen later in `simulate`, which overwrites this shell.
+    fn declare(&self, simulator_context: &mut PekoSimulatorContext) {
+        // A generic class registers as a generic, exactly as `simulate` does.
+        if !self.generics.is_empty() {
+            let mut self_reference = self.clone();
+            self_reference.generics.clear();
+
+            let current_module = simulator_context.module_context.current_module().clone();
+            let current_scope = current_module.read().unwrap().scope.clone();
+            let current_file = simulator_context.get_current_file();
+
+            simulator_context
+                .module_context
+                .current_module()
+                .write()
+                .unwrap()
+                .class_generics
+                .insert(
+                    self.class_name.value.clone(),
+                    Arc::new(RwLock::new(SimulatorClassGeneric::new(
+                        self.visibility.clone(),
+                        self.generics.clone(),
+                        self_reference,
+                        current_module,
+                        current_scope,
+                        current_file,
+                    ))),
+                );
+            return;
+        }
+
+        // Build the fully-qualified class type from the module chain.
+        let mut class_type = types::PekoType::from_string(
+            self.class_name.value.as_str(),
+            simulator_context.get_current_file(),
+        );
+        let mut next_module = simulator_context.module_context.current_module().clone();
+        loop {
+            class_type
+                .module_names_mut()
+                .insert(0, next_module.read().unwrap().name.clone());
+            let parent = next_module.read().unwrap().parent.clone();
+            if let Some(parent) = parent {
+                next_module = parent;
+            } else {
+                break;
+            }
+        }
+
+        // Own attributes, with their raw declared types.
+        let mut attributes = IndexMap::new();
+        for (attribute_name, attribute) in &self.attributes {
+            attributes.insert(
+                attribute_name.value.clone(),
+                SimulatorClassAttribute::new(
+                    attribute_name.start.clone(),
+                    attribute.visibility.clone(),
+                    attribute.docinfo.clone(),
+                    attribute.attribute_type.as_ref().clone(),
+                ),
+            );
+        }
+
+        // Method signatures, grouped by name into overload lists.
+        let mut methods: IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> = IndexMap::new();
+        for class_method in &self.methods {
+            let mut arguments = IndexMap::new();
+            for (argument_name, argument) in &class_method.get_info().arguments {
+                arguments.insert(
+                    argument_name.value.clone(),
+                    SimulatorArg::new(
+                        argument.start.clone(),
+                        argument.visibility.clone(),
+                        argument.argument_type.clone(),
+                        argument.default_value.is_some(),
+                    ),
+                );
+            }
+
+            let simulator_function = SimulatorFunction::new(
+                class_method.get_info().start.clone(),
+                class_method.get_info().visibility.clone(),
+                class_method.get_info().docinfo.clone(),
+                class_method.get_return_type(),
+                arguments,
+                class_method.get_info().varargs_type.clone(),
+                simulator_context.module_context.current_module().clone(),
+            );
+
+            methods
+                .entry(class_method.get_info().name.value.clone())
+                .or_default()
+                .push(Arc::new(RwLock::new(simulator_function)));
+        }
+
+        let shell = SimulatorClass::new(
+            self.start.clone(),
+            class_type,
+            None,
+            attributes,
+            SimulatorClassVirtualTable::new(methods),
+            Vec::new(),
+            simulator_context.module_context.current_module().clone(),
+        );
+
+        simulator_context
+            .module_context
+            .current_module()
+            .write()
+            .unwrap()
+            .classes
+            .insert(self.class_name.value.clone(), Arc::new(RwLock::new(shell)));
+    }
+
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         let mut new_class_scope = Scope::new(
             false,

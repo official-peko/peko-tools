@@ -372,6 +372,11 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
     let mut simulator =
         PekoSimulatorContext::new(PekoTarget::default(), file.clone(), end, work_dir);
     simulator.external_modules = external_modules;
+    // Header pass: register every declaration's name and signature so the body
+    // pass below can resolve forward references regardless of order.
+    for ast in &asts {
+        ast.declare(&mut simulator);
+    }
     for ast in &asts {
         ast.simulate(&mut simulator);
     }
