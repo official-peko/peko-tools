@@ -2340,19 +2340,26 @@ impl PekoValueSimulator for ObjectConstructionAST {
                     ));
             }
         } else {
-            // No declared constructor — use the implicit
-            // attribute-list constructor.
-            for (attribute_name, attribute) in &class_to_create.attributes {
+            // No declared constructor — use the implicit attribute-list
+            // constructor. The synthetic vtable slot is not a user attribute,
+            // so it takes no constructor argument.
+            let constructor_attributes: Vec<_> = class_to_create
+                .attributes
+                .iter()
+                .filter(|(name, _)| name.as_str() != "<main_virtual_table>")
+                .collect();
+
+            for (attribute_name, attribute) in &constructor_attributes {
                 function_call_info
                     .write()
                     .unwrap()
                     .signature_arguments
-                    .insert(attribute_name.clone(), attribute.attribute_type.clone());
+                    .insert((*attribute_name).clone(), attribute.attribute_type.clone());
             }
 
             // The implicit constructor needs exactly as many
             // arguments as there are attributes.
-            if argument_types.len() != class_to_create.attributes.len() {
+            if argument_types.len() != constructor_attributes.len() {
                 simulator_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -2371,8 +2378,7 @@ impl PekoValueSimulator for ObjectConstructionAST {
             // Positional implicit-constructor type-check.
             let post_stack = simulator_context.module_context.step_back();
             if keyword_types.is_empty() {
-                for (idx, ((_, attribute), attribute_value_type)) in class_to_create
-                    .attributes
+                for (idx, ((_, attribute), attribute_value_type)) in constructor_attributes
                     .iter()
                     .zip(&argument_types)
                     .enumerate()
@@ -2399,11 +2405,9 @@ impl PekoValueSimulator for ObjectConstructionAST {
             } else {
                 // Keyword implicit-constructor type-check.
                 let post_stack = simulator_context.module_context.step_back();
-                for (idx, (attribute_name, attribute)) in
-                    class_to_create.attributes.iter().enumerate()
-                {
-                    let value_to_set_type = if keyword_types.contains_key(attribute_name) {
-                        &keyword_types[attribute_name]
+                for (idx, (attribute_name, attribute)) in constructor_attributes.iter().enumerate() {
+                    let value_to_set_type = if keyword_types.contains_key(*attribute_name) {
+                        &keyword_types[*attribute_name]
                     } else {
                         &attribute.attribute_type
                     };
