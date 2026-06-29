@@ -101,12 +101,12 @@
 // routes through the trait method. Literal boxing (routing a `5` literal into
 // a number object) is wired separately.
 
-/// The boxed numeric value type. Wraps a raw machine scalar.
+/// The boxed numeric value type. Wraps a raw 64-bit float.
 [public] class number impl Plus<number>, Minus<number>, Multiply<number>,
     Divide<number>, Mod<number>, Equals<number>, NotEquals<number>,
     GreaterThan<number>, LessThan<number>, GreaterThanEquals<number>,
     LessThanEquals<number>, Hash {
-    raw: i64
+    raw: f64
 
     [public] fn plus(other: number) => number {
         return new number(this.raw + other.raw)
@@ -153,7 +153,7 @@
     }
     /// Zero is false, every other value is true.
     [public] fn to_bool() => bool? {
-        let zero: i64 = constant<i64>(0)
+        let zero: f64 = constant<f64>(0)
         return this.raw != zero
     }
 }
@@ -169,14 +169,14 @@
         return this.raw != other.raw
     }
     [public] fn hash() => number {
-        return new number(danger_cast<i64>(this.raw))
+        return new number(danger_cast<f64>(this.raw))
     }
 
     [public] fn to_bool() => bool? {
         return this
     }
     [public] fn to_number() => number? {
-        return new number(danger_cast<i64>(this.raw))
+        return new number(danger_cast<f64>(this.raw))
     }
 }
 
@@ -191,14 +191,14 @@
         return this.raw != other.raw
     }
     [public] fn hash() => number {
-        return new number(danger_cast<i64>(this.raw))
+        return new number(danger_cast<f64>(this.raw))
     }
 
     [public] fn to_char() => char? {
         return this
     }
     [public] fn to_number() => number? {
-        return new number(danger_cast<i64>(this.raw))
+        return new number(danger_cast<f64>(this.raw))
     }
 }
 
@@ -214,10 +214,10 @@
     }
     /// The number of bytes in the string.
     [public] fn size() => number {
-        return new number(this.length)
+        return new number(danger_cast<f64>(this.length))
     }
     [public] fn hash() => number {
-        return new number(this.length)
+        return new number(danger_cast<f64>(this.length))
     }
 }
 
@@ -257,7 +257,7 @@
     /// A default hash. A class with identity or content semantics overrides
     /// this; the value types override it with a value-based hash.
     [public] fn hash() => number {
-        return new number(constant<i64>(0))
+        return new number(constant<f64>(0))
     }
 }
 

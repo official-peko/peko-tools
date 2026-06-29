@@ -1286,6 +1286,28 @@ pub trait ExecutionContextAlgorithms<
     /// Looser than [`Self::types_equal`]: pointer-to-pointer casts, casts
     /// between built-in types, casts up or down a class hierarchy, and
     /// casts via user-defined `operator to_X` conversions all count.
+    /// If `type1` is a value-type wrapper -- a class whose only user attribute
+    /// is a single non-array, non-reference scalar named `raw` -- returns that
+    /// raw scalar type. An FFI scalar value auto-boxes into such a wrapper (for
+    /// example an `f64` into `number`). `string` is not one of these (it has
+    /// two fields).
+    fn value_wrapper_raw(&mut self, type1: &PekoType) -> Option<PekoType> {
+        let class = self.get_class_by_type(type1)?;
+        let mut user_attributes = class
+            .get_attributes()
+            .iter()
+            .filter(|(name, _)| name.as_str() != "<main_virtual_table>");
+        let (name, attribute) = user_attributes.next()?;
+        if user_attributes.next().is_some() || name != "raw" {
+            return None;
+        }
+        let raw_type = attribute.get_attribute_type();
+        if raw_type.array_depth > 0 || raw_type.reference_depth > 0 {
+            return None;
+        }
+        Some(raw_type.clone())
+    }
+
     fn types_similar(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
         // Error types "work" with any other type.
         if type1.is_error_type() || type2.is_error_type() {
@@ -1294,6 +1316,17 @@ pub trait ExecutionContextAlgorithms<
 
         // Equal types are trivially similar.
         if self.types_equal(type1, type2) {
+            return true;
+        }
+
+        // Auto-box: a raw FFI scalar value (type1) coerces up into its
+        // value-type wrapper (type2) when the wrapper's raw field accepts it.
+        // One-directional: only ffi-value to wrapper, never the reverse, so a
+        // wrapper is never silently treated as a raw scalar.
+        if self.get_class_by_type(type1).is_none()
+            && let Some(raw_type) = self.value_wrapper_raw(type2)
+            && self.types_similar(type1, &raw_type)
+        {
             return true;
         }
 
