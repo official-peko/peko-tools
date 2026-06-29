@@ -357,28 +357,28 @@ impl LlvmConstantBuilder for PekoCodegenContext {
     fn create_constant_int(&mut self, int_value: i32) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstInt(core::LLVMInt32Type(), int_value as u64, 1) },
-            PekoType::simple_type("int"),
+            PekoType::simple_type("i32"),
         )
     }
 
     fn create_constant_int64(&mut self, int_value: i32) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstInt(core::LLVMInt64Type(), int_value as u64, 1) },
-            PekoType::simple_type("int64"),
+            PekoType::simple_type("i64"),
         )
     }
 
     fn create_constant_float(&mut self, float_value: f32) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstReal(core::LLVMFloatType(), float_value as f64) },
-            PekoType::simple_type("float"),
+            PekoType::simple_type("f32"),
         )
     }
 
     fn create_constant_double(&mut self, double_value: f64) -> CodegenValue {
         CodegenValue::new(
             unsafe { core::LLVMConstReal(core::LLVMDoubleType(), double_value) },
-            PekoType::simple_type("double"),
+            PekoType::simple_type("f64"),
         )
     }
 
@@ -421,12 +421,12 @@ impl LlvmConstantBuilder for PekoCodegenContext {
         if default_type.is_builtin_type() {
             CodegenValue::new(
                 match default_type.to_string().as_str() {
-                    "int" => unsafe { core::LLVMConstNull(core::LLVMInt32Type()) },
-                    "int64" => unsafe { core::LLVMConstNull(core::LLVMInt64Type()) },
-                    "int128" => unsafe { core::LLVMConstNull(core::LLVMInt128Type()) },
-                    "int16" => unsafe { core::LLVMConstNull(core::LLVMInt16Type()) },
-                    "float" => unsafe { core::LLVMConstNull(core::LLVMFloatType()) },
-                    "double" => unsafe { core::LLVMConstNull(core::LLVMDoubleType()) },
+                    "i32" => unsafe { core::LLVMConstNull(core::LLVMInt32Type()) },
+                    "i64" => unsafe { core::LLVMConstNull(core::LLVMInt64Type()) },
+                    "i128" => unsafe { core::LLVMConstNull(core::LLVMInt128Type()) },
+                    "i16" => unsafe { core::LLVMConstNull(core::LLVMInt16Type()) },
+                    "f32" => unsafe { core::LLVMConstNull(core::LLVMFloatType()) },
+                    "f64" => unsafe { core::LLVMConstNull(core::LLVMDoubleType()) },
                     "char" => unsafe { core::LLVMConstNull(core::LLVMInt8Type()) },
                     "string" | "opaque" => unsafe {
                         core::LLVMConstPointerNull(core::LLVMPointerType(core::LLVMInt8Type(), 0))

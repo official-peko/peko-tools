@@ -1195,7 +1195,7 @@ impl PekoValueBuilder for ArrayAccessAST {
 
         // Plain pointer-array case: box the index to `int64` and emit a GEP.
         let access_boxed =
-            codegen_context.box_value_to_type(&PekoType::simple_type("int64"), &access);
+            codegen_context.box_value_to_type(&PekoType::simple_type("i64"), &access);
 
         if access_boxed.is_none() {
             codegen_context
@@ -1749,7 +1749,7 @@ impl PekoValueBuilder for RangeAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
         let range_start = self.range_from.build_value(codegen_context);
         let range_start_boxed =
-            codegen_context.box_value_to_type(&PekoType::simple_type("int"), &range_start);
+            codegen_context.box_value_to_type(&PekoType::simple_type("i32"), &range_start);
 
         if range_start_boxed.is_none() {
             codegen_context
@@ -1768,7 +1768,7 @@ impl PekoValueBuilder for RangeAST {
 
         let range_end = self.range_to.build_value(codegen_context);
         let range_end_boxed =
-            codegen_context.box_value_to_type(&PekoType::simple_type("int"), &range_end);
+            codegen_context.box_value_to_type(&PekoType::simple_type("i32"), &range_end);
 
         if range_end_boxed.is_none() {
             // Note: positions previously pointed to `range_from` here
@@ -1972,7 +1972,7 @@ impl PekoValueBuilder for FunctionCallAST {
 
                 if arguments.len() != 1
                     || !codegen_context
-                        .types_similar(&arguments[0].value_type, &PekoType::simple_type("int"))
+                        .types_similar(&arguments[0].value_type, &PekoType::simple_type("i32"))
                 {
                     codegen_context
                         .diagnostics
@@ -3110,7 +3110,7 @@ impl PekoValueBuilder for UnaryExpressionAST {
 
                 if value_type.array_depth == 0
                     && value_type.reference_depth == 0
-                    && value_type.name() != "Pointer"
+                    && value_type.name() != "pointer"
                 {
                     codegen_context
                         .diagnostics

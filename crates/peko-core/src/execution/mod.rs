@@ -922,7 +922,7 @@ pub trait ExecutionContextAlgorithms<
             return None;
         }
 
-        if type1.is_base_type() || type1.name() == "Pointer" {
+        if type1.is_base_type() || type1.name() == "pointer" {
             return Some(type1);
         }
 
@@ -1074,7 +1074,7 @@ pub trait ExecutionContextAlgorithms<
             return true;
         }
 
-        if peko_type.name() == "Pointer" && !peko_type.generics().is_empty() {
+        if peko_type.name() == "pointer" && !peko_type.generics().is_empty() {
             return self.type_exists(&peko_type.generics()[0]);
         }
 
@@ -1122,7 +1122,7 @@ pub trait ExecutionContextAlgorithms<
 
         match peko_type.name() {
             // Built-in types obviously exist.
-            "string" | "opaque" | "int" | "int16" | "int128" | "int64" | "float" | "double"
+            "string" | "opaque" | "i32" | "i16" | "i128" | "i64" | "f32" | "f64"
             | "f16" | "char" | "bool" | "void" | "cstr" | "i1" | "i8" => true,
             _ => {
                 // Check generic types again -- perhaps the expanded type name
@@ -1353,8 +1353,8 @@ pub trait ExecutionContextAlgorithms<
             return true;
         }
 
-        let type1_is_managed = type1.name() == "Pointer";
-        let type2_is_managed = type2.name() == "Pointer";
+        let type1_is_managed = type1.name() == "pointer";
+        let type2_is_managed = type2.name() == "pointer";
 
         // Pointers can be blindly cast to each other.
         if (type1_expanded.is_pointer() || type1_is_managed)
@@ -1369,11 +1369,11 @@ pub trait ExecutionContextAlgorithms<
         // with a bare class value, `opaque[]` with a class array, and so
         // on. The element type on the class side is what must be a class.
         let type1_is_untyped_pointer = type1_expanded.no_depth().to_string() == "opaque"
-            || (type1_expanded.name() == "Pointer"
+            || (type1_expanded.name() == "pointer"
                 && type1_expanded.generics().len() == 1
                 && type1_expanded.generics()[0].name() == "void");
         let type2_is_untyped_pointer = type2_expanded.no_depth().to_string() == "opaque"
-            || (type2_expanded.name() == "Pointer"
+            || (type2_expanded.name() == "pointer"
                 && type2_expanded.generics().len() == 1
                 && type2_expanded.generics()[0].name() == "void");
 

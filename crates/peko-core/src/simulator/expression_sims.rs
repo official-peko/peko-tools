@@ -309,7 +309,7 @@ impl PekoValueSimulator for RangeAST {
         let range_start = self.range_from.clone().simulate(simulator_context);
         if !simulator_context.types_similar(
             &range_start.get_type(),
-            &types::PekoType::simple_type("int"),
+            &types::PekoType::simple_type("i32"),
         ) {
             simulator_context
                 .diagnostics
@@ -327,7 +327,7 @@ impl PekoValueSimulator for RangeAST {
 
         let range_end = self.range_to.clone().simulate(simulator_context);
         if !simulator_context
-            .types_similar(&range_end.get_type(), &types::PekoType::simple_type("int"))
+            .types_similar(&range_end.get_type(), &types::PekoType::simple_type("i32"))
         {
             // Bug fix vs original: the original referenced
             // `self.range_from` for both endpoints' diagnostics, so a
@@ -438,12 +438,12 @@ impl PekoValueSimulator for VariableReferenceAST {
             // Built-in types have built-in default values.
             let default_value = if main_expected_type.is_builtin_type() {
                 match main_expected_type.to_string().as_str() {
-                    "int" => SimulatorValue::Value(types::PekoType::simple_type("int")),
-                    "int16" => SimulatorValue::Value(types::PekoType::simple_type("int16")),
-                    "int128" => SimulatorValue::Value(types::PekoType::simple_type("int128")),
-                    "int64" => SimulatorValue::Value(types::PekoType::simple_type("int64")),
-                    "float" => SimulatorValue::Value(types::PekoType::simple_type("float")),
-                    "double" => SimulatorValue::Value(types::PekoType::simple_type("double")),
+                    "i32" => SimulatorValue::Value(types::PekoType::simple_type("i32")),
+                    "i16" => SimulatorValue::Value(types::PekoType::simple_type("i16")),
+                    "i128" => SimulatorValue::Value(types::PekoType::simple_type("i128")),
+                    "i64" => SimulatorValue::Value(types::PekoType::simple_type("i64")),
+                    "f32" => SimulatorValue::Value(types::PekoType::simple_type("f32")),
+                    "f64" => SimulatorValue::Value(types::PekoType::simple_type("f64")),
                     "char" => SimulatorValue::Value(types::PekoType::simple_type("char")),
                     "string" => SimulatorValue::Value(types::PekoType::simple_type("string")),
                     _ => SimulatorValue::Value(types::PekoType::simple_type("bool")),
@@ -849,7 +849,7 @@ impl PekoValueSimulator for FunctionCallAST {
                     return simulator_context.create_error_value();
                 }
 
-                return SimulatorValue::Value(types::PekoType::simple_type("int64"));
+                return SimulatorValue::Value(types::PekoType::simple_type("i64"));
 
             // __rt_peko_alloc<T>(count) allocates `count` elements of
             // type `T` on the gc heap and returns a `Pointer<T>`. It
@@ -893,7 +893,7 @@ impl PekoValueSimulator for FunctionCallAST {
                 if arguments.len() != 1
                     || !simulator_context.types_similar(
                         &arguments[0].get_type(),
-                        &types::PekoType::simple_type("int"),
+                        &types::PekoType::simple_type("i32"),
                     )
                 {
                     simulator_context.diagnostics.report_diagnostic(
@@ -910,7 +910,7 @@ impl PekoValueSimulator for FunctionCallAST {
                 }
 
                 // Build the managed pointer type `Pointer<T>`.
-                let mut allocated_type = types::PekoType::simple_type("Pointer");
+                let mut allocated_type = types::PekoType::simple_type("pointer");
                 allocated_type
                     .generics_mut()
                     .push(self.function_generics[0].clone());
@@ -2929,7 +2929,7 @@ impl PekoValueSimulator for ObjectAccessAST {
                 // (the function pointer) and `context` (the
                 // captured-variables blob). Both are opaque.
                 if object.get_type().is_closure() {
-                    let mut context_type = types::PekoType::simple_type("Pointer");
+                    let mut context_type = types::PekoType::simple_type("pointer");
                     context_type
                         .generics_mut()
                         .push(types::PekoType::simple_type("void"));
@@ -3195,7 +3195,7 @@ impl PekoValueSimulator for UnaryExpressionAST {
 
                 if value_type.array_depth == 0
                     && value_type.reference_depth == 0
-                    && value_type.name() != "Pointer"
+                    && value_type.name() != "pointer"
                 {
                     simulator_context
                         .diagnostics
@@ -3240,7 +3240,7 @@ impl PekoValueSimulator for UnaryExpressionAST {
             "-" => {
                 // Negate via `operand * -1`, leveraging the operator
                 // overload for `*`.
-                let negative_value = SimulatorValue::Value(types::PekoType::simple_type("int"));
+                let negative_value = SimulatorValue::Value(types::PekoType::simple_type("i32"));
                 let value = self.operand.simulate(simulator_context);
 
                 let evaluated = simulator_context.apply_operator("*", &value, &negative_value);
@@ -3420,7 +3420,7 @@ impl PekoValueSimulator for ArrayAccessAST {
         }
 
         if !simulator_context
-            .types_similar(&access.get_type(), &types::PekoType::simple_type("int64"))
+            .types_similar(&access.get_type(), &types::PekoType::simple_type("i64"))
         {
             simulator_context
                 .diagnostics
