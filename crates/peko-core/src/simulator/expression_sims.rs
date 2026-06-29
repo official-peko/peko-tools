@@ -2512,6 +2512,39 @@ impl PekoValueSimulator for ObjectAccessAST {
                     }
                 };
 
+                // A method call on a trait-typed value resolves against the
+                // trait's slots: the result is the slot's return type.
+                if let Some(trait_definition) =
+                    simulator_context.get_trait(object.get_type().name())
+                {
+                    for (_, argument) in &function_call.arguments {
+                        argument.simulate(simulator_context);
+                    }
+
+                    if let Some(slot) = trait_definition
+                        .methods
+                        .iter()
+                        .find(|method| method.name == function_name)
+                    {
+                        return SimulatorValue::Value(slot.return_type.clone());
+                    }
+
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.access.get_start().clone(),
+                            self.access.get_end().clone(),
+                            format!(
+                                "trait `{}` has no method `{}`. Check the method name against the trait declaration",
+                                object.get_type(),
+                                function_name,
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    return simulator_context.create_error_value();
+                }
+
                 let function_call_info = Arc::new(RwLock::new(FunctionCall::new(
                     self.access.get_start().clone(),
                     self.access.get_end().clone(),
@@ -3450,6 +3483,34 @@ impl PekoValueSimulator for CastAST {
                 .expand_type(&self.cast_to)
                 .unwrap_or_else(|| self.cast_to.clone());
             return SimulatorValue::Value(expanded);
+        }
+
+        // Casting an object to a trait it implements is a safe upcast: the
+        // result is a trait object. Allowed when the value's class carries the
+        // trait; otherwise the escape hatch is `danger_cast<Trait>`.
+        if let Some(trait_definition) = simulator_context.get_trait(self.cast_to.name()) {
+            let carries_trait = simulator_context
+                .get_class_by_type(&value_type)
+                .map(|class| class.implements.contains(&trait_definition.name))
+                .unwrap_or(false);
+
+            if carries_trait {
+                return SimulatorValue::Value(self.cast_to.clone());
+            }
+
+            simulator_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.value.get_start().clone(),
+                    self.value.get_end().clone(),
+                    format!(
+                        "value of type `{}` does not statically implement trait `{}`, so it cannot be cast with `as`. Use `danger_cast<{}>(...)` to force it",
+                        value_type, self.cast_to, self.cast_to,
+                    ),
+                    diagnostics::DiagnosticType::Error,
+                    simulator_context.get_current_file(),
+                ));
+            return simulator_context.create_error_value();
         }
 
         let box_value = simulator_context.box_value_to_type(&self.cast_to, &value);

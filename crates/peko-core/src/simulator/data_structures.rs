@@ -255,6 +255,10 @@ pub struct SimulatorClass {
     /// The class's own virtual table (excluding inherited methods).
     pub main_virtual_table: SimulatorClassVirtualTable,
 
+    /// Names of the traits this class implements (via the `impl` clause).
+    /// A safe `value as Trait` cast is allowed when the trait is listed here.
+    pub implements: Vec<String>,
+
     /// Back-reference to the module the class was declared in.
     pub parent: Arc<RwLock<SimulatorModule>>,
 }

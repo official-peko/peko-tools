@@ -18,9 +18,11 @@
 //! Putting it at Layer 3 keeps the rule that lower layers never reach
 //! upward.
 
+use llvm_sys_180::core;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::types::PekoType;
 
+use crate::codegen::cstr;
 use crate::codegen::builders::llvm_arithmetic::LlvmArithmeticBuilder;
 use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_instructions::LlvmInstructionBuilder;
@@ -75,6 +77,24 @@ pub trait HighLevelCodegen {
     /// constructor invocation. Callers are responsible for calling the
     /// class's constructor on the returned object themselves.
     fn allocate_class(&mut self, class: &CodegenClass) -> Option<CodegenValue>;
+
+    /// Build a fat-pointer trait object `{ self, witness }` from `value` (an
+    /// object of a class that implements `trait_type`). `self` is the object
+    /// pointer; `witness` is the static witness table for (value's class,
+    /// trait_type). The returned value carries `trait_type`.
+    fn build_trait_object(&mut self, value: &CodegenValue, trait_type: &PekoType) -> CodegenValue;
+
+    /// Dispatch a method call on a trait-typed value (a fat pointer). Loads the
+    /// vtable index from the carried witness table for the method's slot, loads
+    /// the object's runtime vtable, indexes it, and calls the function pointer
+    /// with `self` and `arguments`. Resolution bottoms out at the object's own
+    /// vtable, so a child override is always reached.
+    fn call_trait_method(
+        &mut self,
+        object: &CodegenValue,
+        method_name: &str,
+        arguments: Vec<CodegenValue>,
+    ) -> CodegenValue;
 
     /// Store `value` into `slot`, emitting a GC write barrier when the
     /// store creates a managed-to-managed reference edge.
@@ -378,7 +398,9 @@ impl HighLevelCodegen for PekoCodegenContext {
                 .attributes
                 .iter()
                 .filter(|(name, attr)| {
-                    name.as_str() != "<main_virtual_table>" && self.is_managed(&attr.attribute_type)
+                    name.as_str() != "<main_virtual_table>"
+                        && (self.is_managed(&attr.attribute_type)
+                            || self.get_trait(attr.attribute_type.name()).is_some())
                 })
                 .count();
             self.declare_class_descriptor(
@@ -427,6 +449,176 @@ impl HighLevelCodegen for PekoCodegenContext {
         );
 
         Some(allocate_class_memory)
+    }
+
+    fn build_trait_object(&mut self, value: &CodegenValue, trait_type: &PekoType) -> CodegenValue {
+        let fat_type = self.get_llvm_type(trait_type).unwrap();
+
+        // Reference the static witness table for (value's class, trait). It was
+        // emitted when the class was codegen'd. If it is not present in this
+        // module (the class was declared elsewhere), declare it as an external
+        // i32 array; the linker resolves it to the owner's definition.
+        let class_mangled = value.value_type.to_mangled_string();
+        let trait_mangled = trait_type.to_mangled_string();
+        let global_name = cstr(format!("peko_witness_{class_mangled}__{trait_mangled}"));
+
+        let post_stack = self.module_context.step_back_generics();
+        let module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        self.module_context.step_forward(post_stack);
+
+        let witness_global = unsafe {
+            let existing = core::LLVMGetNamedGlobal(module, global_name.as_ptr());
+            if existing.is_null() {
+                let array_type = core::LLVMArrayType2(core::LLVMInt32Type(), 0);
+                let g = core::LLVMAddGlobal(module, array_type, global_name.as_ptr());
+                core::LLVMSetGlobalConstant(g, 1);
+                core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
+                g
+            } else {
+                existing
+            }
+        };
+
+        // Build the fat pointer value: insert self (word 0) and the witness
+        // pointer (word 1) into an undef struct of the trait's fat type.
+        let fat_value = unsafe {
+            let undef = core::LLVMGetUndef(fat_type);
+            let with_self = core::LLVMBuildInsertValue(
+                self.llvm_builder,
+                undef,
+                value.llvm_value,
+                0,
+                c"".as_ptr(),
+            );
+            core::LLVMBuildInsertValue(
+                self.llvm_builder,
+                with_self,
+                witness_global,
+                1,
+                c"".as_ptr(),
+            )
+        };
+
+        CodegenValue::new(fat_value, trait_type.clone())
+    }
+
+    fn call_trait_method(
+        &mut self,
+        object: &CodegenValue,
+        method_name: &str,
+        arguments: Vec<CodegenValue>,
+    ) -> CodegenValue {
+        let trait_definition = self.get_trait(object.value_type.name()).unwrap();
+        let slot_count = trait_definition.methods.len();
+        let (slot_index, slot) = trait_definition
+            .methods
+            .iter()
+            .enumerate()
+            .find(|(_, method)| method.name == method_name)
+            .map(|(index, method)| (index, method.clone()))
+            .unwrap();
+
+        let builder = self.llvm_builder;
+        unsafe {
+            let i32_type = core::LLVMInt32Type();
+            let raw_ptr_type = core::LLVMPointerType(core::LLVMInt8Type(), 0);
+            let managed_ptr_type = core::LLVMPointerType(core::LLVMInt8Type(), 1);
+
+            // Extract self (word 0) and the witness pointer (word 1) from the
+            // fat pointer.
+            let self_value =
+                core::LLVMBuildExtractValue(builder, object.llvm_value, 0, c"".as_ptr());
+            let witness_ptr =
+                core::LLVMBuildExtractValue(builder, object.llvm_value, 1, c"".as_ptr());
+
+            // witness[slot_index] -> the object's vtable index for this method.
+            let witness_array_type = core::LLVMArrayType2(i32_type, slot_count as u64);
+            let mut witness_indices = [
+                core::LLVMConstInt(i32_type, 0, 0),
+                core::LLVMConstInt(i32_type, slot_index as u64, 0),
+            ];
+            let witness_slot = core::LLVMBuildGEP2(
+                builder,
+                witness_array_type,
+                witness_ptr,
+                witness_indices.as_mut_ptr(),
+                2,
+                c"".as_ptr(),
+            );
+            let vtable_index =
+                core::LLVMBuildLoad2(builder, i32_type, witness_slot, c"".as_ptr());
+
+            // Load the object's runtime vtable pointer from its offset-0 slot.
+            let mut header_fields = [raw_ptr_type];
+            let header_type = core::LLVMStructType(header_fields.as_mut_ptr(), 1, 0);
+            let mut header_indices = [
+                core::LLVMConstInt(i32_type, 0, 0),
+                core::LLVMConstInt(i32_type, 0, 0),
+            ];
+            let vtable_field = core::LLVMBuildGEP2(
+                builder,
+                header_type,
+                self_value,
+                header_indices.as_mut_ptr(),
+                2,
+                c"".as_ptr(),
+            );
+            let vtable_ptr =
+                core::LLVMBuildLoad2(builder, raw_ptr_type, vtable_field, c"".as_ptr());
+
+            // vtable[vtable_index] -> the function pointer.
+            let mut method_indices = [vtable_index];
+            let method_slot = core::LLVMBuildGEP2(
+                builder,
+                raw_ptr_type,
+                vtable_ptr,
+                method_indices.as_mut_ptr(),
+                1,
+                c"".as_ptr(),
+            );
+            let function_pointer =
+                core::LLVMBuildLoad2(builder, raw_ptr_type, method_slot, c"".as_ptr());
+
+            // Build the function type (self plus the slot's argument types) and
+            // call through the loaded pointer.
+            let return_llvm = self
+                .get_llvm_type(&slot.return_type)
+                .unwrap_or_else(|| core::LLVMVoidType());
+            let mut param_types = vec![managed_ptr_type];
+            for argument_type in &slot.argument_types {
+                if let Some(llvm) = self.get_llvm_type(argument_type) {
+                    param_types.push(llvm);
+                }
+            }
+            let function_type = core::LLVMFunctionType(
+                return_llvm,
+                param_types.as_mut_ptr(),
+                param_types.len() as u32,
+                0,
+            );
+
+            let mut call_arguments = vec![self_value];
+            for argument in &arguments {
+                call_arguments.push(argument.llvm_value);
+            }
+            let result = core::LLVMBuildCall2(
+                builder,
+                function_type,
+                function_pointer,
+                call_arguments.as_mut_ptr(),
+                call_arguments.len() as u32,
+                c"".as_ptr(),
+            );
+
+            CodegenValue::new(result, slot.return_type.clone())
+        }
     }
 
     fn build_managed_store(&mut self, slot: &CodegenValue, value: &CodegenValue) {

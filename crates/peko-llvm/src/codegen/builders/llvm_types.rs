@@ -202,6 +202,29 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             return Some(base_llvm_type);
         }
 
+        // A trait-typed value is a fat pointer `{ self, witness }`: `self` is
+        // the managed (address-space-1) object pointer and the only traced
+        // word; `witness` is a raw (address-space-0) pointer to a static
+        // witness table. Extra depth wraps it in raw pointers.
+        if self.get_trait(fully_qualified_type.name()).is_some() {
+            let fat_type = unsafe {
+                core::LLVMStructType(
+                    vec![
+                        core::LLVMPointerType(core::LLVMInt8Type(), 1),
+                        core::LLVMPointerType(core::LLVMInt8Type(), 0),
+                    ]
+                    .as_mut_ptr(),
+                    2,
+                    0,
+                )
+            };
+            let mut base = fat_type;
+            for _ in 0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth) {
+                base = unsafe { core::LLVMPointerType(base, 0) };
+            }
+            return Some(base);
+        }
+
         let base_type_class = self.get_class_by_type(type1);
 
         // Resolve the type without pointer or reference depth, then wrap
@@ -397,6 +420,12 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             || type1.reference_depth > 0
         {
             return 8;
+        }
+
+        // A trait-typed value is a fat pointer: two machine words (self plus
+        // witness).
+        if self.get_trait(type1.name()).is_some() {
+            return 16;
         }
 
         if type1.is_closure() {

@@ -638,6 +638,21 @@ impl PekoValueBuilder for ObjectAccessAST {
                     }
                 };
 
+                // A method call on a trait-typed value dispatches through the
+                // fat pointer's witness table rather than a known class vtable.
+                if codegen_context
+                    .get_trait(object.value_type.name())
+                    .is_some()
+                {
+                    let mut arguments = Vec::new();
+                    for (_, argument) in &function_call.arguments {
+                        arguments.push(argument.build_value(codegen_context));
+                    }
+                    codegen_context.primary_object = None;
+                    codegen_context.accessed_state = None;
+                    return codegen_context.call_trait_method(&object, &function_name, arguments);
+                }
+
                 let class = match codegen_context.get_class_by_type(&object.value_type) {
                     Some(c) => c,
                     None => return codegen_context.create_error_value(),
@@ -1306,6 +1321,13 @@ impl PekoValueBuilder for CastAST {
         }
 
         let value = self.value.build_value(codegen_context);
+
+        // Casting an object to a trait builds a fat pointer { self, witness }.
+        // This covers both `value as Trait` (when the static type carries the
+        // trait) and `danger_cast<Trait>(value)`.
+        if codegen_context.get_trait(self.cast_to.name()).is_some() {
+            return codegen_context.build_trait_object(&value, &self.cast_to);
+        }
 
         // A forced `danger_cast<T>(value)` numerically converts or reinterprets
         // without a safety check.
