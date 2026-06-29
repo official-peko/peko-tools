@@ -441,13 +441,19 @@ impl PekoValueBuilder for ObjectConstructionAST {
             self.start.line,
         );
 
-        // Methodful class: call `constructor` and report on overload mismatch.
-        if get_codegen_class
+        // A class with a declared `constructor` is built by calling it; a class
+        // without one (including a value type or any methodful POD) is built by
+        // the implicit attribute-list constructor below.
+        let has_constructor = get_codegen_class
             .as_ref()
             .unwrap()
             .main_virtual_table
-            .get_method_count()
-            > 0
+            .methods
+            .contains_key("constructor");
+
+        // Declared-constructor class: call `constructor` and report on overload
+        // mismatch.
+        if has_constructor
             && codegen_context
                 .call_object_method(
                     &allocate_object,
@@ -475,16 +481,20 @@ impl PekoValueBuilder for ObjectConstructionAST {
                 ));
         }
 
-        // Methodless class (POD struct): the constructor is the implicit
-        // one-arg-per-attribute or keyword-args form.
-        if get_codegen_class
-            .as_ref()
-            .unwrap()
-            .main_virtual_table
-            .get_method_count()
-            == 0
-        {
-            if constructor_arguments.len() != get_codegen_class.as_ref().unwrap().attributes.len() {
+        // No declared constructor: the implicit one-arg-per-attribute or
+        // keyword-args form. The synthetic vtable slot is not a user attribute,
+        // so it takes no argument and is never written here.
+        if !has_constructor {
+            let constructor_attributes: Vec<_> = get_codegen_class
+                .as_ref()
+                .unwrap()
+                .attributes
+                .iter()
+                .filter(|(name, _)| name.as_str() != "<main_virtual_table>")
+                .map(|(name, attribute)| (name.clone(), attribute.clone()))
+                .collect();
+
+            if constructor_arguments.len() != constructor_attributes.len() {
                 codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -502,10 +512,7 @@ impl PekoValueBuilder for ObjectConstructionAST {
 
             if constructor_keyword_arguments.is_empty() {
                 // Positional form.
-                for (idx, ((attribute_name, attribute), attribute_value)) in get_codegen_class
-                    .as_ref()
-                    .unwrap()
-                    .attributes
+                for (idx, ((attribute_name, attribute), attribute_value)) in constructor_attributes
                     .iter()
                     .zip(&constructor_arguments)
                     .enumerate()
@@ -532,13 +539,7 @@ impl PekoValueBuilder for ObjectConstructionAST {
                 }
             } else {
                 // Keyword form: missing keys take the attribute's zero value.
-                for (idx, (attribute_name, attribute)) in get_codegen_class
-                    .as_ref()
-                    .unwrap()
-                    .attributes
-                    .iter()
-                    .enumerate()
-                {
+                for (idx, (attribute_name, attribute)) in constructor_attributes.iter().enumerate() {
                     let value_to_set = if constructor_keyword_arguments.contains_key(attribute_name)
                     {
                         constructor_keyword_arguments[attribute_name].clone()
