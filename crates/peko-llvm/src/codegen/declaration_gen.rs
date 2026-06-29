@@ -1829,7 +1829,12 @@ impl PekoValueBuilder for ClassAST {
             if attribute_name == "<main_virtual_table>" {
                 continue;
             }
-            if codegen_context.is_managed(attribute_type) {
+            // A trait-typed field is a fat pointer whose first word (`self`) is
+            // a managed reference; that word sits at the field's base offset.
+            // The witness word that follows is static and not traced.
+            let traced = codegen_context.is_managed(attribute_type)
+                || codegen_context.get_trait(attribute_type.name()).is_some();
+            if traced {
                 managed_offsets.push(unsafe {
                     llvm_sys_180::target::LLVMOffsetOfElement(
                         datalayout,

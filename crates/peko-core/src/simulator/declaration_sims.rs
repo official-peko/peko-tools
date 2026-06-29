@@ -1739,6 +1739,7 @@ impl PekoValueSimulator for ClassAST {
             parent_class.clone(),
             class_attributes.clone(),
             SimulatorClassVirtualTable::new(virtual_table_methods.clone()),
+            Vec::new(),
             simulator_context.module_context.current_module().clone(),
         );
         simulator_context
@@ -2443,6 +2444,18 @@ impl PekoValueSimulator for ClassAST {
                 }
             }
         }
+
+        // Persist the implemented trait names on the class so a safe
+        // `value as Trait` cast can check that the static type carries it.
+        simulator_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .classes[&self.class_name.value]
+            .write()
+            .unwrap()
+            .implements = implemented_traits;
 
         // Collect the first-constructor arguments (or attribute list
         // for the implicit constructor) for IDE signature help.
