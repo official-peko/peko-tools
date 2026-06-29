@@ -1153,8 +1153,21 @@ pub fn operator_trait_method(operator: &str) -> Option<&'static str> {
         "<" => "less_than",
         ">=" => "greater_than_equals",
         "<=" => "less_than_equals",
+        "&&" => "and",
+        "||" => "or",
         _ => return None,
     })
+}
+
+/// Maps a unary operator to the core trait method it routes to when the
+/// operand is an object. `!` is the only one with a core trait; `&` (address-of)
+/// and `-`/`*` keep their built-in handling.
+#[must_use]
+pub fn unary_operator_trait_method(operator: &str) -> Option<&'static str> {
+    match operator {
+        "!" => Some("not"),
+        _ => None,
+    }
 }
 
 /// Returns `true` if a token type can introduce or continue a type name.
