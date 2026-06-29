@@ -67,6 +67,9 @@ pub struct FunctionDeclarationAST {
     pub docinfo: Option<DocInfo>,
     pub function_name: PositionedValue<String>,
     pub generic_types: Vec<PositionedValue<String>>,
+    /// Trait/inheritance bounds per generic parameter (`T: impl Trait, from
+    /// Class`), keyed by the parameter name.
+    pub generic_bounds: IndexMap<String, Vec<types::TypeRestraint>>,
     pub arguments: IndexMap<PositionedValue<String>, DeclarationArgumentData>,
     pub return_type: Option<types::PekoType>,
     pub function_body: Option<PositionedValue<Vec<PekoAST>>>,
@@ -128,6 +131,9 @@ pub struct ClassAST {
     pub attributes: IndexMap<PositionedValue<String>, ClassAttributeData>,
     pub methods: Vec<ClassMethod>,
     pub generics: Vec<PositionedValue<String>>,
+    /// Trait/inheritance bounds per generic parameter (`T: impl Trait, from
+    /// Class`), keyed by the parameter name.
+    pub generic_bounds: IndexMap<String, Vec<types::TypeRestraint>>,
 }
 
 impl Spanned for ClassAST {
