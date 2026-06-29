@@ -1449,6 +1449,53 @@ impl PekoParser {
 
     /// Parses a function declaration: `fn name<G>(args) => Ret { body }` or
     /// `fn name<G>(args) => Ret;` for an external function.
+    /// Parses the optional bound list on a generic parameter:
+    /// `: impl Trait, from Class, impl Other`. The leading `:` is consumed
+    /// here. Each `impl`/`from` clause becomes a [`TypeRestraint`]. A comma is
+    /// part of the bound list only when the token after it is another `impl`
+    /// or `from`; otherwise the comma separates generic parameters and is left
+    /// for the caller.
+    fn parse_generic_bounds(&mut self) -> Vec<types::TypeRestraint> {
+        let mut restraints = Vec::new();
+
+        if !self.tokens.current_token().equals(":") {
+            return restraints;
+        }
+        self.tokens.increase_index(); // eat ':'
+
+        loop {
+            match self.tokens.current_token().get_type() {
+                lexer::TokenType::Impl => {
+                    self.tokens.increase_index();
+                    restraints.push(types::TypeRestraint::Impl(types::PekoType::from_tokens(self)));
+                }
+                lexer::TokenType::From => {
+                    self.tokens.increase_index();
+                    restraints.push(types::TypeRestraint::From(types::PekoType::from_tokens(self)));
+                }
+                _ => {
+                    self.report_diagnostic(
+                        "expected `impl Trait` or `from Class` in a generic parameter bound",
+                    );
+                    break;
+                }
+            }
+
+            if self.tokens.current_token().equals(",")
+                && matches!(
+                    self.tokens.get_token_forward(1).get_type(),
+                    lexer::TokenType::Impl | lexer::TokenType::From
+                )
+            {
+                self.tokens.increase_index(); // eat ',' between bounds
+            } else {
+                break;
+            }
+        }
+
+        restraints
+    }
+
     pub fn parse_function_declaration(&mut self) -> FunctionDeclarationAST {
         let starting_position = self.get_current_position();
         self.tokens.increase_index();
@@ -1459,6 +1506,8 @@ impl PekoParser {
 
         // Optional generic parameter list.
         let mut function_generics: Vec<PositionedValue<String>> = Vec::new();
+        let mut function_generic_bounds: IndexMap<String, Vec<types::TypeRestraint>> =
+            IndexMap::new();
         if self.tokens.current_token().equals("<") {
             self.tokens.increase_index();
 
@@ -1466,9 +1515,15 @@ impl PekoParser {
                 && !self.tokens.current_token().equals(">")
                 && !self.tokens.current_token().equals("(")
             {
-                function_generics.push(PositionedValue::from_token(self.tokens.current_token()));
+                let generic_name = PositionedValue::from_token(self.tokens.current_token());
                 self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
                 self.tokens.increase_index();
+
+                let bounds = self.parse_generic_bounds();
+                if !bounds.is_empty() {
+                    function_generic_bounds.insert(generic_name.value.clone(), bounds);
+                }
+                function_generics.push(generic_name);
 
                 if self.tokens.current_token().equals(",") {
                     self.tokens.increase_index();
@@ -1503,6 +1558,7 @@ impl PekoParser {
             None,
             function_name,
             function_generics,
+            function_generic_bounds,
             function_arguments,
             return_type,
             function_body,
@@ -1564,6 +1620,7 @@ impl PekoParser {
 
         // Optional generic parameter list.
         let mut generics: Vec<PositionedValue<String>> = Vec::new();
+        let mut generic_bounds: IndexMap<String, Vec<types::TypeRestraint>> = IndexMap::new();
         if self.tokens.current_token().equals("<") {
             self.tokens.increase_index();
 
@@ -1571,9 +1628,15 @@ impl PekoParser {
                 && !self.tokens.current_token().equals(">")
                 && !self.tokens.current_token().equals("{")
             {
-                generics.push(PositionedValue::from_token(self.tokens.current_token()));
+                let generic_name = PositionedValue::from_token(self.tokens.current_token());
                 self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
                 self.tokens.increase_index();
+
+                let bounds = self.parse_generic_bounds();
+                if !bounds.is_empty() {
+                    generic_bounds.insert(generic_name.value.clone(), bounds);
+                }
+                generics.push(generic_name);
 
                 if self.tokens.current_token().equals(",") {
                     self.tokens.increase_index();
@@ -1935,6 +1998,7 @@ impl PekoParser {
             attributes,
             methods,
             generics,
+            generic_bounds,
         )
     }
 
@@ -1963,6 +2027,10 @@ impl PekoParser {
                 generics.push(PositionedValue::from_token(self.tokens.current_token()));
                 self.expect_token_type(&lexer::TokenType::Identifier, "generic parameter name");
                 self.tokens.increase_index();
+
+                // Bounds on a trait's own generic parameters parse but are not
+                // yet consumed.
+                let _ = self.parse_generic_bounds();
 
                 if self.tokens.current_token().equals(",") {
                     self.tokens.increase_index();
