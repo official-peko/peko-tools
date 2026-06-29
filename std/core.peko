@@ -83,6 +83,20 @@
     fn hash() => number;
 }
 
+// --- Indexing --------------------------------------------------------------
+
+/// `value[index]` (read) routes to `value.index(index)`, producing an element
+/// of type `R`.
+[public] trait Index<I, R> {
+    fn index(index: I) => R;
+}
+
+/// `value[index] = ...` (write) routes to `value.index_ref(index)`, producing
+/// a reference to the element slot of type `R`.
+[public] trait IndexRef<I, R> {
+    fn index_ref(index: I) => &R;
+}
+
 // --- Iteration -------------------------------------------------------------
 
 /// An iterator over values of type `T`. `next` advances and yields the next
@@ -143,6 +157,12 @@
         return this.raw <= other.raw
     }
 
+    /// The raw machine float behind this number. Used at FFI boundaries and
+    /// wherever a raw scalar is needed.
+    [public] fn to_raw() => f64 {
+        return this.raw
+    }
+
     /// A number hashes to itself.
     [public] fn hash() => number {
         return this
@@ -172,6 +192,11 @@
         return new number(danger_cast<f64>(this.raw))
     }
 
+    /// The raw machine i1 behind this bool. Conditions unbox through this.
+    [public] fn to_raw() => i1 {
+        return this.raw
+    }
+
     [public] fn to_bool() => bool? {
         return this
     }
@@ -194,6 +219,11 @@
         return new number(danger_cast<f64>(this.raw))
     }
 
+    /// The raw machine i8 behind this char.
+    [public] fn to_raw() => i8 {
+        return this.raw
+    }
+
     [public] fn to_char() => char? {
         return this
     }
@@ -205,12 +235,16 @@
 /// The boxed string value type. A GC-managed byte buffer with a length. The
 /// content hash and concatenation bodies arrive with the byte-iteration
 /// helpers; for now a string hashes by length.
-[public] class string impl Hash {
+[public] class string impl Hash, Index<number, char> {
     data: pointer<i8>
     length: i64
 
     [public] fn to_string() => string {
         return this
+    }
+    /// The raw GC byte buffer behind this string.
+    [public] fn to_raw() => pointer<i8> {
+        return this.data
     }
     /// The number of bytes in the string.
     [public] fn size() => number {
@@ -218,6 +252,12 @@
     }
     [public] fn hash() => number {
         return new number(danger_cast<f64>(this.length))
+    }
+
+    /// The character at byte index `i`.
+    [public] fn index(i: number) => char {
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        return new char(this.data[offset])
     }
 }
 
