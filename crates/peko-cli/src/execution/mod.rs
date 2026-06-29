@@ -187,8 +187,12 @@ pub fn compile(
     load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
 
-    // Codegen every top-level AST.
-    for ast in asts {
+    // Codegen every top-level AST: header pass then body pass, so a class can
+    // reference another declared later.
+    for ast in &asts {
+        PekoValueBuilder::declare(ast, &mut codegen_context);
+    }
+    for ast in &asts {
         ast.build_value(&mut codegen_context);
     }
 
@@ -257,6 +261,9 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
     let mut simulator =
         PekoSimulatorContext::new(PekoTarget::default(), file.clone(), end, work_dir.clone());
     for ast in &asts {
+        PekoValueSimulator::declare(ast, &mut simulator);
+    }
+    for ast in &asts {
         ast.simulate(&mut simulator);
     }
     simulator.propagate_mutates_fixpoint();
@@ -282,6 +289,9 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
             false,
             codegen_dir.clone(),
         );
+        for ast in asts_for_codegen {
+            PekoValueBuilder::declare(ast, &mut codegen_context);
+        }
         for ast in asts_for_codegen {
             ast.build_value(&mut codegen_context);
         }
@@ -375,7 +385,7 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
     // Header pass: register every declaration's name and signature so the body
     // pass below can resolve forward references regardless of order.
     for ast in &asts {
-        ast.declare(&mut simulator);
+        PekoValueSimulator::declare(ast, &mut simulator);
     }
     for ast in &asts {
         ast.simulate(&mut simulator);
