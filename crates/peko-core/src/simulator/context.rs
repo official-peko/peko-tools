@@ -586,6 +586,31 @@ impl PekoSimulatorContext {
             };
         }
 
+        // Import traits. Traits are stored by value (like enums) and resolved
+        // through the module's trait map, so only the map entry is copied; they
+        // carry no scope symbol.
+        for (trait_name, trait_definition) in from.read().unwrap().traits.clone() {
+            if !unpacked_symbols.is_empty()
+                && !unpack_all
+                && !current_symbols
+                    .contains(&PositionedValue::create_no_position(trait_name.clone()))
+            {
+                continue;
+            }
+            if !current_symbols.is_empty()
+                && let Some((index, _)) = current_symbols.iter().find_position(|symbol_name| {
+                    symbol_name == &&PositionedValue::create_no_position(trait_name.clone())
+                })
+            {
+                current_symbols.remove(index);
+            }
+
+            to.write()
+                .unwrap()
+                .traits
+                .insert(trait_name.clone(), trait_definition);
+        }
+
         // Import generic-class declarations.
         for (class_name, class) in from.read().unwrap().class_generics.clone() {
             if !unpacked_symbols.is_empty()
