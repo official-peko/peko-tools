@@ -168,26 +168,23 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
             vtable_element = unsafe {
                 core::LLVMBuildLoad2(
                     self.llvm_builder,
-                    // The vtable pointer is a managed pointer (address
-                    // space 1), so load it as such.
-                    core::LLVMPointerType(object_class.main_virtual_table.llvm_type, 1),
+                    // The vtable pointer is a raw (address-space-0) pointer to
+                    // the static vtable.
+                    core::LLVMPointerType(object_class.main_virtual_table.llvm_type, 0),
                     vtable_element,
                     c"".as_ptr(),
                 )
             };
 
-            // The loaded value is the managed vtable pointer itself.
-            return CodegenValue::new(
-                vtable_element,
-                managed_pointer_type(PekoType::simple_type("void")),
-            );
+            // The loaded value is the raw vtable pointer itself.
+            return CodegenValue::new(vtable_element, PekoType::simple_type("opaque"));
         }
 
         // The GEP result is a managed interior pointer to the vtable slot,
-        // which holds a Pointer<void>.
+        // which holds a raw pointer to the static vtable.
         CodegenValue::new(
             vtable_element,
-            managed_pointer_type(managed_pointer_type(PekoType::simple_type("void"))),
+            managed_pointer_type(PekoType::simple_type("opaque")),
         )
     }
 

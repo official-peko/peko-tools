@@ -28,9 +28,7 @@ use crate::codegen::builders::llvm_memory::LlvmMemoryBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::builders::modules::ModuleManager;
 use crate::codegen::context::PekoCodegenContext;
-use crate::codegen::data_structures::{
-    CodegenClass, CodegenValue, is_managed_pointer, managed_pointer_type,
-};
+use crate::codegen::data_structures::{CodegenClass, CodegenValue, is_managed_pointer};
 
 /// High-level codegen orchestrators that span lower layers.
 pub trait HighLevelCodegen {
@@ -364,49 +362,13 @@ impl HighLevelCodegen for PekoCodegenContext {
     }
 
     fn allocate_class(&mut self, class: &CodegenClass) -> Option<CodegenValue> {
-        // Allocate the vtable. The vtable is a managed object too, but it
-        // holds only function pointers, which the collector must not
-        // trace. So it gets an empty descriptor (zero traced offsets):
-        // the collector can move it but will not follow its contents.
-        let vtable_size = 8 * class.main_virtual_table.get_method_count();
-        let vtable_descriptor = self.emit_type_descriptor("vtable", 0, Vec::new());
-        let allocate_class_vtable = self.allocate_managed_object(
-            &vtable_descriptor,
-            vtable_size,
-            &managed_pointer_type(PekoType::simple_type("void")),
-        )?;
-
-        // Wire each method into its assigned vtable slot.
-        let uuid = self.get_owning_module_uuid();
-        for (_, functions) in &class.main_virtual_table.methods {
-            for function in functions {
-                let (function_type, virtual_table_index, function_value) = {
-                    let function = function.read().unwrap();
-                    (
-                        function.get_type(),
-                        function.virtual_table_index,
-                        function.function_value[&uuid].clone(),
-                    )
-                };
-
-                let function_element = self.get_vtable_method(
-                    &allocate_class_vtable,
-                    class.main_virtual_table.llvm_type,
-                    &function_type,
-                    virtual_table_index,
-                    false,
-                );
-
-                self.build_store(&function_element, &function_value);
-            }
-        }
-
         // Allocate the class instance. The runtime prepends the object
         // header and writes the class descriptor pointer into it, so the
         // collector can trace this object's managed fields. The descriptor
         // is looked up for the current module: the owning module holds the
         // definition, importing modules hold a declaration of the same
-        // symbol.
+        // symbol. The vtable slot is excluded from the traced offsets: it
+        // points at a static vtable, not at GC-managed memory.
         let object_size = self.get_type_size(&class.class_type, true);
         let descriptor_uuid = self.get_owning_module_uuid();
         let class_descriptor = if let Some(desc) = class.get_descriptor(&descriptor_uuid) {
@@ -415,7 +377,9 @@ impl HighLevelCodegen for PekoCodegenContext {
             let managed_offset_count = class
                 .attributes
                 .iter()
-                .filter(|(_, attr)| self.is_managed(&attr.attribute_type))
+                .filter(|(name, attr)| {
+                    name.as_str() != "<main_virtual_table>" && self.is_managed(&attr.attribute_type)
+                })
                 .count();
             self.declare_class_descriptor(
                 &class.class_type.to_mangled_string(),
@@ -430,16 +394,36 @@ impl HighLevelCodegen for PekoCodegenContext {
             return Some(allocate_class_memory);
         }
 
-        // Store the vtable pointer into the class object's vtable slot.
+        // Emit (or reuse) the class's static vtable and store a pointer to it
+        // into the object's vtable slot. The vtable is static data shared by
+        // every instance; the slot is a raw (address-space-0) pointer the
+        // collector does not trace.
+        let uuid = self.get_owning_module_uuid();
+        let mut method_pointers = Vec::new();
+        for (_, functions) in &class.main_virtual_table.methods {
+            for function in functions {
+                let function = function.read().unwrap();
+                method_pointers.push((
+                    function.virtual_table_index,
+                    function.function_value[&uuid].llvm_value,
+                ));
+            }
+        }
+        let static_vtable = self.emit_class_vtable(
+            &class.class_type.to_mangled_string(),
+            class.main_virtual_table.llvm_type,
+            method_pointers,
+        );
+
         let virtual_table_class_element = self
             .get_object_vtable(&allocate_class_memory, false)
             .llvm_value;
         self.build_store(
             &CodegenValue::new(
                 virtual_table_class_element,
-                managed_pointer_type(PekoType::simple_type("void")),
+                PekoType::simple_type("opaque"),
             ),
-            &allocate_class_vtable,
+            &static_vtable,
         );
 
         Some(allocate_class_memory)

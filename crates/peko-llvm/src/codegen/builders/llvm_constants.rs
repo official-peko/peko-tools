@@ -10,7 +10,7 @@
 //! current module for global placement.
 
 use llvm_sys_180::core;
-use llvm_sys_180::prelude::LLVMValueRef;
+use llvm_sys_180::prelude::{LLVMTypeRef, LLVMValueRef};
 use peko_core::types::PekoType;
 
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
@@ -131,6 +131,23 @@ pub trait LlvmConstantBuilder {
     ) -> CodegenValue;
 
     fn emit_empty_cstr_global(&mut self) -> LLVMValueRef;
+
+    /// Emit a class's virtual table as a private constant global and return a
+    /// pointer to it (a raw address-space-0 pointer typed `opaque`).
+    ///
+    /// The vtable is static, shared by every instance of the class, and never
+    /// GC-allocated or traced: it holds only function pointers. `method_pointers`
+    /// pairs each method's `virtual_table_index` with the LLVM value of the
+    /// function (as resolved in the current module). The functions are placed in
+    /// a `{ ptr, ptr, ... }` constant at their slot index, matching the layout
+    /// `vtable_struct_type` describes. The global is reused if a vtable with the
+    /// same name already exists in this module.
+    fn emit_class_vtable(
+        &mut self,
+        mangled_name: &str,
+        vtable_struct_type: LLVMTypeRef,
+        method_pointers: Vec<(usize, LLVMValueRef)>,
+    ) -> CodegenValue;
 }
 
 impl LlvmConstantBuilder for PekoCodegenContext {
@@ -599,6 +616,60 @@ impl LlvmConstantBuilder for PekoCodegenContext {
                 core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
                 g
             }
+        };
+
+        CodegenValue::new(global, PekoType::simple_type("opaque"))
+    }
+
+    fn emit_class_vtable(
+        &mut self,
+        mangled_name: &str,
+        vtable_struct_type: LLVMTypeRef,
+        method_pointers: Vec<(usize, LLVMValueRef)>,
+    ) -> CodegenValue {
+        let post_stack = self.module_context.step_back_generics();
+        let module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        self.module_context.step_forward(post_stack);
+
+        let global_name = cstr(format!("peko_vtable_{mangled_name}"));
+
+        // Reuse an existing vtable global in this module rather than emitting a
+        // duplicate that LLVM would auto-rename.
+        let existing = unsafe { core::LLVMGetNamedGlobal(module, global_name.as_ptr()) };
+        if !existing.is_null() {
+            return CodegenValue::new(existing, PekoType::simple_type("opaque"));
+        }
+
+        // Place each function pointer at its virtual-table slot index. A
+        // function pointer is a constant, so the whole struct is a constant.
+        let slot_count = method_pointers
+            .iter()
+            .map(|(index, _)| index + 1)
+            .max()
+            .unwrap_or(0);
+        let null_pointer = unsafe { core::LLVMConstPointerNull(core::LLVMPointerType(core::LLVMInt8Type(), 0)) };
+        let mut slots = vec![null_pointer; slot_count];
+        for (index, function_value) in method_pointers {
+            slots[index] = function_value;
+        }
+
+        let vtable_const = unsafe {
+            core::LLVMConstNamedStruct(vtable_struct_type, slots.as_mut_ptr(), slots.len() as u32)
+        };
+
+        let global = unsafe {
+            let g = core::LLVMAddGlobal(module, vtable_struct_type, global_name.as_ptr());
+            core::LLVMSetInitializer(g, vtable_const);
+            core::LLVMSetGlobalConstant(g, 1);
+            core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMPrivateLinkage);
+            g
         };
 
         CodegenValue::new(global, PekoType::simple_type("opaque"))
