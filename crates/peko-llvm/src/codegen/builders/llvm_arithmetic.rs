@@ -433,9 +433,12 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
 
         let lhs = bool1.build_value(self);
 
-        // An object operand routes through the And/Or trait (both operands are
-        // evaluated; no short-circuit). A raw i1 short-circuits in place.
-        if self.get_class_by_type(&lhs.value_type).is_some() {
+        // bool and i1 always short-circuit on the raw i1, bypassing the And/Or
+        // trait. Only a non-bool object operand routes through the trait (both
+        // operands evaluated; no short-circuit).
+        let lhs_is_bool_like =
+            lhs.value_type.name() == "bool" || lhs.value_type.name() == "i1";
+        if !lhs_is_bool_like && self.get_class_by_type(&lhs.value_type).is_some() {
             let rhs = bool2.build_value(self);
             let operator = match operation {
                 BooleanOperation::And => "&&",
