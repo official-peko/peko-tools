@@ -1121,9 +1121,10 @@ pub trait ExecutionContextAlgorithms<
         };
 
         match peko_type.name() {
-            // Built-in types obviously exist.
-            "string" | "opaque" | "i32" | "i16" | "i128" | "i64" | "f32" | "f64"
-            | "f16" | "char" | "bool" | "void" | "cstr" | "i1" | "i8" => true,
+            // Built-in FFI scalars obviously exist. bool, char, and string are
+            // object wrappers and resolve through the class fallthrough below.
+            "opaque" | "i32" | "i16" | "i128" | "i64" | "f32" | "f64" | "f16" | "void" | "cstr"
+            | "i1" | "i8" => true,
             _ => {
                 // Check generic types again -- perhaps the expanded type name
                 // exists as a generic type.
@@ -1341,14 +1342,13 @@ pub trait ExecutionContextAlgorithms<
         let type1_expanded = type1_expanded.unwrap();
         let type2_expanded = type2_expanded.unwrap();
 
-        // Non-optional types can be casted to options.
+        // A value coerces into an Option of a compatible inner type. The value
+        // is the source (type1) and the Option's inner type is the target, so
+        // the similarity is checked value-to-inner -- the same direction as the
+        // surrounding coercion, which matters for the one-directional auto-box.
         if type2_expanded.name() == "Option"
-                && type2_expanded.generics().len() == 1
-                // Check if the inner type of the optional is similar to other type.
-                && self.types_similar(
-                    &type2_expanded.generics()[0],
-                    &type1_expanded,
-                )
+            && type2_expanded.generics().len() == 1
+            && self.types_similar(&type1_expanded, &type2_expanded.generics()[0])
         {
             return true;
         }

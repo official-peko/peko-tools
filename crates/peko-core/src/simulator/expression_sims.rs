@@ -3184,7 +3184,7 @@ impl PekoValueSimulator for UnaryExpressionAST {
                     );
                 }
 
-                SimulatorValue::Value(types::PekoType::simple_type("bool"))
+                SimulatorValue::Value(types::PekoType::simple_type("i1"))
             }
             "*" => {
                 // Dereference a pointer. Mirrors `ptr[0]` indexing but

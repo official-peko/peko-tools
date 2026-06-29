@@ -2167,13 +2167,13 @@ impl
         let lhs_value_type = lhs_value_type.unwrap();
         let rhs_value_type = rhs_value_type.unwrap();
 
-        // Closure-to-closure: any operator returns bool (closures are
-        // first-class and the language permits comparisons).
+        // Closure-to-closure: any operator returns the raw boolean (closures
+        // are first-class and the language permits comparisons).
         if lhs_value_type.is_closure()
             && rhs_value_type.is_closure()
             && self.types_equal(&lhs_value_type, &rhs_value_type)
         {
-            return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
         }
 
         let mut lhs = lhs.clone();
@@ -2220,8 +2220,10 @@ impl
                 // Arithmetic operators yield the lhs type.
                 "+" | "-" | "*" | "/" | "%" | "^" => lhs_value_type.clone(),
 
-                // Everything else (comparison, boolean) yields bool.
-                _ => types::PekoType::simple_type("bool"),
+                // Comparison and boolean operators on raw scalars yield the raw
+                // boolean i1. It auto-boxes to the bool object where one is
+                // expected; conditions branch on it directly.
+                _ => types::PekoType::simple_type("i1"),
             };
 
             return Some(SimulatorValue::Value(operation_type));
@@ -2232,7 +2234,7 @@ impl
             && rhs_value_type.is_string_type()
             && matches!(operator.to_string().as_str(), "==" | "!=")
         {
-            return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
         }
 
         // Reference-like equality / inequality.
@@ -2256,7 +2258,7 @@ impl
                 && rhs_is_reference_like
                 && self.types_similar(&lhs_value_type, &rhs_value_type)
             {
-                return Some(SimulatorValue::Value(types::PekoType::simple_type("bool")));
+                return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
             }
         }
 
