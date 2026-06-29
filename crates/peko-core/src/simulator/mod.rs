@@ -56,6 +56,13 @@ pub trait PekoValueSimulator {
         &self,
         simulator_context: &mut context::PekoSimulatorContext,
     ) -> value::SimulatorValue;
+
+    /// Header pass: register this declaration's name and signature so a later
+    /// body pass can resolve forward references regardless of declaration
+    /// order. Only type- and function-introducing declarations override this;
+    /// everything else is a no-op. A `declare` must not emit diagnostics --
+    /// `simulate` is the authoritative pass and overwrites the shell.
+    fn declare(&self, _simulator_context: &mut context::PekoSimulatorContext) {}
 }
 
 /// Top-level dispatcher: routes a [`PekoAST`] to the appropriate
@@ -141,5 +148,17 @@ impl PekoValueSimulator for PekoAST {
             Enum,
             ModuleCreation,
         )
+    }
+
+    /// Routes the header pass to the contained AST. Only declarations that
+    /// introduce a name override `declare`; the rest keep the trait default.
+    fn declare(&self, simulator_context: &mut context::PekoSimulatorContext) {
+        match self {
+            PekoAST::Class(ast) => ast.declare(simulator_context),
+            PekoAST::Trait(ast) => ast.declare(simulator_context),
+            PekoAST::Enum(ast) => ast.declare(simulator_context),
+            PekoAST::FunctionDeclaration(ast) => ast.declare(simulator_context),
+            _ => {}
+        }
     }
 }

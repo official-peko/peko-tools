@@ -1418,6 +1418,13 @@ impl PekoValueSimulator for ImportStatementAST {
                 }
             }
 
+            // Header pass over the imported module, then the body pass, so a
+            // declaration in the module can reference another regardless of
+            // order (for example a value type whose method returns a type
+            // declared later in the same file).
+            for ast in &asts {
+                ast.declare(simulator_context);
+            }
             for ast in &asts {
                 ast.simulate(simulator_context);
             }
