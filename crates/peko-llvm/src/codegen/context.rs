@@ -773,14 +773,14 @@ impl
 
         let operator_str = operator.to_string();
 
-        // If the LHS is a class, try the user-defined operator overload.
+        // If the LHS is an object, route the operator to its core trait method
+        // (`+` -> `plus`, `==` -> `equals`, and so on). An operator with no core
+        // trait keeps the legacy `[operator <op>]` member name.
         if self.get_class_by_type(&lhs.value_type).is_some() {
-            let call_overload = self.call_object_method(
-                &lhs,
-                format!("[operator {}]", operator_str),
-                vec![rhs.clone()],
-                None,
-            );
+            let method_name = peko_core::types::operator_trait_method(&operator_str)
+                .map_or_else(|| format!("[operator {operator_str}]"), str::to_string);
+            let call_overload =
+                self.call_object_method(&lhs, method_name, vec![rhs.clone()], None);
 
             if let Ok(value) = call_overload {
                 return Some(value);
