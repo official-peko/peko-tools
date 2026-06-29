@@ -129,14 +129,14 @@ impl HighLevelCodegen for PekoCodegenContext {
             // inner type.
             let neither_is_opaque = value.value_type.name() != "opaque"
                 && inner.name() != "opaque"
-                && !(value.value_type.name() == "Pointer"
+                && !(value.value_type.name() == "pointer"
                     && value
                         .value_type
                         .generics()
                         .first()
                         .map(|t| t.name() == "void")
                         .unwrap_or(false))
-                && !(inner.name() == "Pointer"
+                && !(inner.name() == "pointer"
                     && inner
                         .generics()
                         .first()
@@ -205,7 +205,7 @@ impl HighLevelCodegen for PekoCodegenContext {
         // Class -> opaque: as1 -> as0 via addrspacecast.
         // Class -> Pointer<void>: both as1, relabel only.
         let expected_is_opaque = expected_type.name() == "opaque";
-        let expected_is_managed_void = expected_type.name() == "Pointer"
+        let expected_is_managed_void = expected_type.name() == "pointer"
             && expected_type
                 .generics()
                 .first()
@@ -233,7 +233,7 @@ impl HighLevelCodegen for PekoCodegenContext {
         // opaque -> class: as0 -> as1 via addrspacecast.
         // Pointer<void> -> class: both as1, relabel only.
         let value_is_opaque = value.value_type.name() == "opaque";
-        let value_is_managed_void = value.value_type.name() == "Pointer"
+        let value_is_managed_void = value.value_type.name() == "pointer"
             && value
                 .value_type
                 .generics()
@@ -310,8 +310,8 @@ impl HighLevelCodegen for PekoCodegenContext {
         {
             let runtime_casting_function_name = match expected_type.to_string().as_str() {
                 "bool" => "Runtime::StringToBool",
-                "float" | "double" => "Runtime::StringToFloat",
-                "int" | "int16" | "int128" | "int64" => "Runtime::StringToInt",
+                "f32" | "f64" => "Runtime::StringToFloat",
+                "i32" | "i16" | "i128" | "i64" => "Runtime::StringToInt",
                 "char" => "Runtime::StringToChar",
                 _ => panic!("error should not be reached"),
             };
@@ -323,7 +323,7 @@ impl HighLevelCodegen for PekoCodegenContext {
 
             // The runtime parsers return the narrow types (`int`, `float`);
             // widen to the requested width when needed.
-            if expected_type.to_string() == "int64" || expected_type.to_string() == "double" {
+            if expected_type.to_string() == "i64" || expected_type.to_string() == "f64" {
                 return Some(self.typecast_number_value(&casted_value, expected_type));
             }
 
@@ -345,8 +345,8 @@ impl HighLevelCodegen for PekoCodegenContext {
         {
             let runtime_casting_function_name = match value.value_type.to_string().as_str() {
                 "bool" => "Runtime::BoolToString",
-                "float" | "double" => "Runtime::FloatToString",
-                "int" | "int16" | "int128" | "int64" => "Runtime::IntToString",
+                "f32" | "f64" => "Runtime::FloatToString",
+                "i32" | "i16" | "i128" | "i64" => "Runtime::IntToString",
                 "char" => "Runtime::CharToString",
                 _ => panic!("error should not be reached"),
             };

@@ -169,7 +169,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // Pointer<T>: a managed pointer (address space 1) to a value of
         // type T. Pointer<void> is the managed opaque pointer and lowers
         // to an i8 pointer in address space 1.
-        if fully_qualified_type.name() == "Pointer"
+        if fully_qualified_type.name() == "pointer"
             && fully_qualified_type.array_depth == 0
             && fully_qualified_type.reference_depth == 0
         {
@@ -238,12 +238,12 @@ impl LlvmTypeBuilder for PekoCodegenContext {
                     // `opaque`.
                     "string" => core::LLVMPointerType(core::LLVMInt8Type(), 1),
                     "cstr" | "opaque" => core::LLVMPointerType(core::LLVMInt8Type(), 0),
-                    "int" => core::LLVMInt32Type(),
-                    "int16" => core::LLVMInt16Type(),
-                    "int128" => core::LLVMInt128Type(),
-                    "int64" => core::LLVMInt64Type(),
-                    "float" => core::LLVMFloatType(),
-                    "double" => core::LLVMDoubleType(),
+                    "i32" => core::LLVMInt32Type(),
+                    "i16" => core::LLVMInt16Type(),
+                    "i128" => core::LLVMInt128Type(),
+                    "i64" => core::LLVMInt64Type(),
+                    "f32" => core::LLVMFloatType(),
+                    "f64" => core::LLVMDoubleType(),
                     "f16" => core::LLVMHalfType(),
                     "char" => core::LLVMInt8Type(),
                     "bool" => core::LLVMInt1Type(),
@@ -293,7 +293,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // are managed. `string` MUST be included here (it lowers to
         // addrspace(1)) so that string-typed fields are traced and relocated by
         // the collector (matching is_managed_pointer, which already lists it).
-        type1.name() == "Pointer"
+        type1.name() == "pointer"
             || type1.name() == "string"
             || type1.is_closure()
             || self.get_class_by_type(type1).is_some()

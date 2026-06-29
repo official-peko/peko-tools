@@ -147,7 +147,7 @@ impl PekoType {
                 is_const: false,
                 info: PekoTypeInfo {
                     module_names,
-                    name: canonical_builtin_name(type_name),
+                    name: type_name,
                     generics: generic_types,
                 },
             }
@@ -213,7 +213,7 @@ impl PekoType {
                 is_const: false,
                 info: PekoTypeInfo {
                     module_names: Vec::new(),
-                    name: canonical_builtin_name(String::from(type_name)),
+                    name: String::from(type_name),
                     generics: Vec::new(),
                 },
             },
@@ -398,8 +398,8 @@ impl PekoType {
     /// ```
     /// use peko_core::types::PekoType;
     ///
-    /// let t = PekoType::from_string("int[]", "<inline>");
-    /// assert_eq!(t.name(), "int");
+    /// let t = PekoType::from_string("i32[]", "<inline>");
+    /// assert_eq!(t.name(), "i32");
     /// assert_eq!(t.array_depth, 1);
     /// ```
     pub fn from_string(string: &str, current_file: impl AsRef<Path>) -> PekoType {
@@ -813,7 +813,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "int" | "int16" | "int128" | "int64" | "float" | "double" | "f16" | "bool" | "i1"
+            "i32" | "i16" | "i128" | "i64" | "f32" | "f64" | "f16" | "bool" | "i1"
         )
     }
 
@@ -827,7 +827,7 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "int" | "int16" | "int128" | "int64" | "char" | "bool" | "i1" | "i8"
+            "i32" | "i16" | "i128" | "i64" | "char" | "bool" | "i1" | "i8"
         )
     }
 
@@ -838,10 +838,10 @@ impl PekoType {
     pub fn is_base_type(&self) -> bool {
         matches!(
             self.name(),
-            "int"
-                | "int16"
-                | "int128"
-                | "int64"
+            "i32"
+                | "i16"
+                | "i128"
+                | "i64"
                 | "char"
                 | "bool"
                 | "string"
@@ -861,7 +861,7 @@ impl PekoType {
             return false;
         }
 
-        matches!(self.name(), "float" | "double" | "f16")
+        matches!(self.name(), "f32" | "f64" | "f16")
     }
 
     /// Returns the element type one level "inside" an array or reference.
@@ -904,7 +904,7 @@ impl PekoType {
             self.array_depth -= 1;
         } else if self.reference_depth > 0 {
             self.reference_depth -= 1;
-        } else if self.name() == "Pointer" && !self.generics().is_empty() {
+        } else if self.name() == "pointer" && !self.generics().is_empty() {
             *self = self.generics()[0].clone();
         }
     }
@@ -922,12 +922,12 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "int"
-                | "int64"
-                | "int16"
-                | "int128"
-                | "float"
-                | "double"
+            "i32"
+                | "i64"
+                | "i16"
+                | "i128"
+                | "f32"
+                | "f64"
                 | "f16"
                 | "char"
                 | "string"
@@ -983,7 +983,7 @@ impl PekoType {
             || self.name() == "opaque"
             || self.name() == "string"
             || self.name() == "cstr"
-            || self.name() == "Pointer"
+            || self.name() == "pointer"
             || self.reference_depth > 0
     }
 
@@ -1179,30 +1179,6 @@ pub fn operator_trait_method(operator: &str) -> Option<&'static str> {
         "<=" => "less_than_equals",
         _ => return None,
     })
-}
-
-/// Maps a V2 FFI builtin spelling to the internal type name the analyzer and
-/// codegen already handle. The V2 surface names the integers `i1` through
-/// `i128`, the floats `f32` and `f64`, and the managed pointer `pointer<T>`.
-/// `i1` and `i8` map to `bool` and `char` (their matching widths). Each lowers
-/// to the same representation as the matching internal name, so downstream type
-/// checks and codegen need no separate cases. The half float `f16` keeps its
-/// own name and is recognized directly. Names without a V2 alias, including
-/// user types and `cstr`, `opaque`, `char`, `bool`, `void`, and `string`, pass
-/// through unchanged.
-fn canonical_builtin_name(name: String) -> String {
-    match name.as_str() {
-        // `i1` and `i8` are distinct FFI scalars: `bool` and `char` are their
-        // boxed object wrappers, defined in std::core.
-        "i16" => String::from("int16"),
-        "i32" => String::from("int"),
-        "i64" => String::from("int64"),
-        "i128" => String::from("int128"),
-        "f32" => String::from("float"),
-        "f64" => String::from("double"),
-        "pointer" => String::from("Pointer"),
-        _ => name,
-    }
 }
 
 /// Returns `true` if a token type can introduce or continue a type name.

@@ -39,7 +39,7 @@ use crate::codegen::symbol::SymbolName;
 pub fn managed_pointer_type(inner: PekoType) -> PekoType {
     PekoType::new(
         Vec::new(),
-        "Pointer".to_string(),
+        "pointer".to_string(),
         vec![inner],
         0,
         0,
@@ -58,7 +58,7 @@ pub fn is_managed_pointer(ty: &PekoType) -> bool {
     // `Pointer<char>`: it is indexable and participates in the managed-pointer
     // coercion/indexing paths exactly like `Pointer<T>`. `cstr` is the raw
     // (address space 0) counterpart and is deliberately NOT managed here.
-    (ty.name() == "Pointer" || ty.name() == "string")
+    (ty.name() == "pointer" || ty.name() == "string")
         && ty.array_depth == 0
         && ty.reference_depth == 0
 }

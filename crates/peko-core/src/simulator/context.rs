@@ -2246,10 +2246,10 @@ impl
         // classes), so unrelated reference types do not compare.
         if matches!(operator.to_string().as_str(), "==" | "!=") {
             let lhs_is_reference_like = lhs_value_type.is_pointer()
-                || lhs_value_type.name() == "Pointer"
+                || lhs_value_type.name() == "pointer"
                 || self.get_class_by_type(&lhs_value_type).is_some();
             let rhs_is_reference_like = rhs_value_type.is_pointer()
-                || rhs_value_type.name() == "Pointer"
+                || rhs_value_type.name() == "pointer"
                 || self.get_class_by_type(&rhs_value_type).is_some();
 
             if lhs_is_reference_like

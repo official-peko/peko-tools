@@ -75,7 +75,7 @@ fn test_block_parsing() {
 #[test]
 fn test_argument_parsing() {
     let mut parser = create_parser_with_source(
-        "(arg1, arg2, 123, 456) endtest (arg1=123, arg2=456) <string, int>(123, 456) <int>()",
+        "(arg1, arg2, 123, 456) endtest (arg1=123, arg2=456) <string, i32>(123, 456) <i32>()",
     );
 
     let (_, argument_list1, _) = parser.parse_arguments();
@@ -92,11 +92,11 @@ fn test_argument_parsing() {
     assert_eq!(argument_list3.len(), 2);
 
     assert_eq!(generic_types[0].to_string(), "string");
-    assert_eq!(generic_types[1].to_string(), "int");
+    assert_eq!(generic_types[1].to_string(), "i32");
 
     let (generic_types, _, _) = parser.parse_arguments();
     assert_eq!(generic_types.len(), 1);
-    assert_eq!(generic_types[0].to_string(), "int");
+    assert_eq!(generic_types[0].to_string(), "i32");
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
 }
@@ -104,8 +104,8 @@ fn test_argument_parsing() {
 #[test]
 fn test_function_header_parsing() {
     let mut parser = create_parser_with_source(
-        "(arg1: string, arg2: int, arg3: Array<int> = default, Args<string> => varargs) \
-         endtest () => Array<int>",
+        "(arg1: string, arg2: i32, arg3: Array<i32> = default, Args<string> => varargs) \
+         endtest () => Array<i32>",
     );
 
     let (arguments, _, var_args_type, var_args_name) = parser.parse_function_header(true);
@@ -122,11 +122,11 @@ fn test_function_header_parsing() {
     );
     assert_eq!(
         arguments.get_index(1).unwrap().1.argument_type.to_string(),
-        "int"
+        "i32"
     );
     assert_eq!(
         arguments.get_index(2).unwrap().1.argument_type.to_string(),
-        "Array<int>"
+        "Array<i32>"
     );
 
     assert!(arguments.get_index(2).unwrap().1.default_value.is_some());
@@ -143,7 +143,7 @@ fn test_function_header_parsing() {
     let (_, return_type, _, _) = parser.parse_function_header(true);
 
     assert!(return_type.is_some());
-    assert_eq!(return_type.unwrap().to_string(), "Array<int>");
+    assert_eq!(return_type.unwrap().to_string(), "Array<i32>");
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
 }
@@ -232,7 +232,7 @@ fn test_variable_declaration_parsing() {
     // Inferred (`let x = v`), typed (`let x: T = v`), and the let-less typed
     // form (`x: T = v`).
     let mut parser =
-        create_parser_with_source("let a = value; let b: string = value; c: int = value");
+        create_parser_with_source("let a = value; let b: string = value; c: i32 = value");
 
     let declaration1 = parser.parse_variable_declaration();
     assert_eq!(declaration1.name.value, "a");
@@ -250,7 +250,7 @@ fn test_variable_declaration_parsing() {
 
     let declaration3 = parser.parse_variable_declaration();
     assert_eq!(declaration3.name.value, "c");
-    assert_eq!(declaration3.variable_type.unwrap().to_string(), "int");
+    assert_eq!(declaration3.variable_type.unwrap().to_string(), "i32");
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
 }
@@ -265,7 +265,7 @@ fn test_cast_forms_parsing() {
     match parser.parse_expression() {
         PekoAST::Cast(cast) => {
             assert_eq!(cast.kind, CastKind::Checked);
-            assert_eq!(cast.cast_to.to_string(), "int64");
+            assert_eq!(cast.cast_to.to_string(), "i64");
         }
         _ => panic!("expected `x as i64` to parse as a checked cast"),
     }
@@ -273,7 +273,7 @@ fn test_cast_forms_parsing() {
     match parser.parse_expression() {
         PekoAST::Cast(cast) => {
             assert_eq!(cast.kind, CastKind::Forced);
-            assert_eq!(cast.cast_to.to_string(), "int");
+            assert_eq!(cast.cast_to.to_string(), "i32");
         }
         _ => panic!("expected `danger_cast<i32>(y)` to parse as a forced cast"),
     }
@@ -281,7 +281,7 @@ fn test_cast_forms_parsing() {
     match parser.parse_expression() {
         PekoAST::Cast(cast) => {
             assert_eq!(cast.kind, CastKind::Constant);
-            assert_eq!(cast.cast_to.to_string(), "double");
+            assert_eq!(cast.cast_to.to_string(), "f64");
         }
         _ => panic!("expected `constant<f64>(1.3)` to parse as a constant"),
     }
@@ -292,7 +292,7 @@ fn test_cast_forms_parsing() {
 #[test]
 fn test_new_object_construction_parsing() {
     let mut parser =
-        create_parser_with_source("new Box(5) new Sorter<int, string>(a, b)");
+        create_parser_with_source("new Box(5) new Sorter<i32, string>(a, b)");
 
     match parser.parse_expression() {
         PekoAST::ObjectConstruction(construction) => {
@@ -307,11 +307,11 @@ fn test_new_object_construction_parsing() {
         PekoAST::ObjectConstruction(construction) => {
             assert_eq!(construction.class_name.value, "Sorter");
             assert_eq!(construction.object_generics.len(), 2);
-            assert_eq!(construction.object_generics[0].to_string(), "int");
+            assert_eq!(construction.object_generics[0].to_string(), "i32");
             assert_eq!(construction.object_generics[1].to_string(), "string");
             assert_eq!(construction.arguments.len(), 2);
         }
-        _ => panic!("expected `new Sorter<int, string>(a, b)` to parse as an object construction"),
+        _ => panic!("expected `new Sorter<i32, string>(a, b)` to parse as an object construction"),
     }
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
@@ -319,11 +319,11 @@ fn test_new_object_construction_parsing() {
 
 #[test]
 fn test_let_variable_declaration_parsing() {
-    let mut parser = create_parser_with_source("let x: int = value; let y = value");
+    let mut parser = create_parser_with_source("let x: i32 = value; let y = value");
 
     let typed = parser.parse_variable_declaration();
     assert_eq!(typed.name.value, "x");
-    assert_eq!(typed.variable_type.unwrap().to_string(), "int");
+    assert_eq!(typed.variable_type.unwrap().to_string(), "i32");
 
     assert_eq!(parser.tokens.current_token().get_value(), ";");
     parser.tokens.increase_index();
@@ -372,13 +372,13 @@ fn test_class_declaration_parsing() {
     let mut parser = create_parser_with_source(
         r#"class ClassName {
     [state] attr1: string;
-    attr2: int;
+    attr2: i32;
 
-    constructor(arg1: string, arg2: int, arg3: Array<int> = default) {}
+    constructor(arg1: string, arg2: i32, arg3: Array<i32> = default) {}
 
     fn method1() {}
 
-    [operator op](arg1: int) => string {}
+    [operator op](arg1: i32) => string {}
 }
 
 class GenericClass<T, T2> from BaseClass {
@@ -414,7 +414,7 @@ class GenericClass<T, T2> from BaseClass {
             .1
             .attribute_type
             .to_string(),
-        "int"
+        "i32"
     );
 
     assert_eq!(class1.methods.len(), 3);
@@ -446,7 +446,7 @@ class GenericClass<T, T2> from BaseClass {
                     .1
                     .argument_type
                     .to_string(),
-                "int"
+                "i32"
             );
             assert_eq!(
                 method_info
@@ -456,7 +456,7 @@ class GenericClass<T, T2> from BaseClass {
                     .1
                     .argument_type
                     .to_string(),
-                "Array<int>"
+                "Array<i32>"
             );
 
             assert!(
@@ -512,7 +512,7 @@ fn test_identifier_parsing() {
     let mut parser = create_parser_with_source(
         "array[idx] endtest \
          function(value1, value2) endtest \
-         generic_function<int, string>(value1, value2) endtest \
+         generic_function<i32, string>(value1, value2) endtest \
          object.attr endtest \
          object.method() endtest \
          object.attr = value endtest \
@@ -997,7 +997,7 @@ fn test_xml_parsing() {
 #[test]
 fn test_expression_parsing() {
     let mut parser = create_parser_with_source(
-        "1+2-3; 1-2*3; 3*(2-1); 4 == 2+3*2 == false; (1+2 == 3); -1+2; ('2' as int)*3",
+        "1+2-3; 1-2*3; 3*(2-1); 4 == 2+3*2 == false; (1+2 == 3); -1+2; ('2' as i32)*3",
     );
 
     // 1+2-3  ->  (1+2) - 3
@@ -1175,7 +1175,7 @@ fn test_expression_parsing() {
         _ => panic!("error parsing binary expression"),
     }
 
-    // ('2' as int)*3
+    // ('2' as i32)*3
     let type_cast_expression = match parser.parse_expression() {
         PekoAST::BinaryExpression(binary) => binary,
         _ => panic!("error parsing expression"),
@@ -1186,7 +1186,7 @@ fn test_expression_parsing() {
 
     match type_cast_expression.get_lhs() {
         PekoAST::Cast(cast_expression) => {
-            assert_eq!(cast_expression.cast_to.to_string(), "int");
+            assert_eq!(cast_expression.cast_to.to_string(), "i32");
 
             match cast_expression.value.as_ref() {
                 PekoAST::Char(char_ast) => assert_eq!(char_ast.value.value, '2'),
