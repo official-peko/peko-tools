@@ -167,6 +167,21 @@ impl HighLevelCodegen for PekoCodegenContext {
             }
         }
 
+        // Auto-box: a raw FFI scalar value coerces up into its value-type
+        // wrapper. Allocate the wrapper, convert the scalar to the wrapper's
+        // raw field type, and store it. One-directional: only ffi-value to
+        // wrapper.
+        if self.get_class_by_type(&value.value_type).is_none()
+            && let Some(raw_type) = self.value_wrapper_raw(expected_type)
+            && self.types_similar(&value.value_type, &raw_type)
+        {
+            let class = self.get_class_by_type(expected_type)?;
+            let boxed = self.allocate_class(&class)?;
+            let raw_value = self.typecast_number_value(value, &raw_type);
+            self.set_object_attribute(&boxed, "raw", &raw_value);
+            return Some(boxed);
+        }
+
         // Types must be related; otherwise no path exists.
         if !self.types_similar(&value.value_type, expected_type) {
             return None;
