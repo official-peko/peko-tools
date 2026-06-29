@@ -15,7 +15,7 @@ use peko_core::asts::declarations::{
 use peko_core::asts::{PekoAST, PlaceholderAST};
 use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
-use peko_core::execution::data_structures::ExecutionModule;
+use peko_core::execution::data_structures::{ExecutionModule, TraitDefinition, TraitMethodSlot};
 use peko_core::types::PekoType;
 
 use crate::codegen::PekoValueBuilder;
@@ -1191,8 +1191,46 @@ impl PekoValueBuilder for EnumDeclarationAST {
 
 impl PekoValueBuilder for TraitDeclarationAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
-        // Trait declarations emit no code on their own. Witness tables and
-        // TypeInfo are emitted per implementing class.
+        // A trait emits no code on its own, but codegen registers its slot
+        // layout so each implementing class can emit a witness table that maps
+        // the trait's slots to the class's vtable indices.
+        let generics: Vec<String> = self
+            .generics
+            .iter()
+            .map(|generic| generic.value.clone())
+            .collect();
+
+        let mut slots: Vec<TraitMethodSlot> = Vec::new();
+        for method in &self.methods {
+            let method_name = method.function_name.value.clone();
+            if slots.iter().any(|slot| slot.name == method_name) {
+                continue;
+            }
+
+            let argument_types: Vec<PekoType> = method
+                .arguments
+                .values()
+                .map(|argument| argument.argument_type.clone())
+                .collect();
+            let return_type = method
+                .return_type
+                .clone()
+                .unwrap_or_else(|| PekoType::simple_type("void"));
+
+            slots.push(TraitMethodSlot {
+                name: method_name,
+                argument_types,
+                return_type,
+                has_default: method.function_body.is_some(),
+            });
+        }
+
+        codegen_context.register_trait(TraitDefinition {
+            name: self.trait_name.value.clone(),
+            generics,
+            methods: slots,
+        });
+
         codegen_context.create_error_value()
     }
 }
@@ -1836,6 +1874,41 @@ impl PekoValueBuilder for ClassAST {
                 &class_type.to_mangled_string(),
                 main_virtual_table_struct_type,
                 method_pointers,
+            );
+        }
+
+        // Emit a witness table per implemented trait: an [N x i32] array
+        // mapping each trait slot to this class's vtable index for that method.
+        // Trait dispatch loads witness[k] and indexes the object's runtime
+        // vtable, so a child override is always reached. A slot the class does
+        // not provide (a kept default) gets index -1.
+        for implemented in &self.implements {
+            let trait_name = implemented.name().to_string();
+            let Some(trait_definition) = codegen_context.get_trait(&trait_name) else {
+                continue;
+            };
+
+            let vtable_methods = stored_class
+                .read()
+                .unwrap()
+                .main_virtual_table
+                .methods
+                .clone();
+
+            let mut slot_indices = Vec::new();
+            for slot in &trait_definition.methods {
+                let index = vtable_methods
+                    .get(&slot.name)
+                    .and_then(|overloads| overloads.first())
+                    .map(|function| function.read().unwrap().virtual_table_index as i32)
+                    .unwrap_or(-1);
+                slot_indices.push(index);
+            }
+
+            codegen_context.emit_witness_table(
+                &class_type.to_mangled_string(),
+                &implemented.to_mangled_string(),
+                slot_indices,
             );
         }
 

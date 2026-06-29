@@ -148,6 +148,21 @@ pub trait LlvmConstantBuilder {
         vtable_struct_type: LLVMTypeRef,
         method_pointers: Vec<(usize, LLVMValueRef)>,
     ) -> CodegenValue;
+
+    /// Emit a per-(class, trait) witness table as a private constant global and
+    /// return a pointer to it (a raw address-space-0 pointer typed `opaque`).
+    ///
+    /// The witness is an `[N x i32]` array: entry `k` is the class's vtable
+    /// index for the trait's slot `k`. Trait dispatch loads `witness[k]` and
+    /// indexes the object's runtime vtable with it, so a child override is
+    /// always reached. The table is static data, never traced. Reused by name
+    /// if it already exists in this module.
+    fn emit_witness_table(
+        &mut self,
+        class_mangled: &str,
+        trait_mangled: &str,
+        slot_indices: Vec<i32>,
+    ) -> CodegenValue;
 }
 
 impl LlvmConstantBuilder for PekoCodegenContext {
@@ -667,6 +682,51 @@ impl LlvmConstantBuilder for PekoCodegenContext {
         let global = unsafe {
             let g = core::LLVMAddGlobal(module, vtable_struct_type, global_name.as_ptr());
             core::LLVMSetInitializer(g, vtable_const);
+            core::LLVMSetGlobalConstant(g, 1);
+            core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMPrivateLinkage);
+            g
+        };
+
+        CodegenValue::new(global, PekoType::simple_type("opaque"))
+    }
+
+    fn emit_witness_table(
+        &mut self,
+        class_mangled: &str,
+        trait_mangled: &str,
+        slot_indices: Vec<i32>,
+    ) -> CodegenValue {
+        let i32_type = unsafe { core::LLVMInt32Type() };
+
+        let post_stack = self.module_context.step_back_generics();
+        let module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        self.module_context.step_forward(post_stack);
+
+        let global_name = cstr(format!("peko_witness_{class_mangled}__{trait_mangled}"));
+        let existing = unsafe { core::LLVMGetNamedGlobal(module, global_name.as_ptr()) };
+        if !existing.is_null() {
+            return CodegenValue::new(existing, PekoType::simple_type("opaque"));
+        }
+
+        let mut index_consts = slot_indices
+            .iter()
+            .map(|index| unsafe { core::LLVMConstInt(i32_type, *index as u64, 1) })
+            .collect::<Vec<_>>();
+        let witness_array = unsafe {
+            core::LLVMConstArray2(i32_type, index_consts.as_mut_ptr(), index_consts.len() as u64)
+        };
+        let array_type = unsafe { core::LLVMArrayType2(i32_type, slot_indices.len() as u64) };
+
+        let global = unsafe {
+            let g = core::LLVMAddGlobal(module, array_type, global_name.as_ptr());
+            core::LLVMSetInitializer(g, witness_array);
             core::LLVMSetGlobalConstant(g, 1);
             core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMPrivateLinkage);
             g
