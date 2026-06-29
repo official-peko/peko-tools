@@ -1265,9 +1265,10 @@ impl PekoValueBuilder for ClassAST {
             codegen_context.create_named_struct(format!("{}::<<main_virtual_table>>", class_type));
 
         // Only add the vtable slot when the class actually has methods
-        // or inherits from a class that does. The vtable is a managed
-        // pointer (Pointer<void>), so the GC traces it like any other
-        // managed attribute and can relocate the vtable allocation.
+        // or inherits from a class that does. The vtable is static data: the
+        // slot is a raw (address-space-0) pointer to the static vtable, and
+        // the collector does not trace it. The descriptor emission excludes
+        // this slot from the traced offsets.
         if !self.methods.is_empty() || self.derives_from.len() == 1 {
             class_attributes.insert(
                 "<main_virtual_table>".to_string(),
@@ -1275,7 +1276,7 @@ impl PekoValueBuilder for ClassAST {
                     VisibilityData::open_visibility(),
                     managed_pointer_type(PekoType::simple_type("void")),
                     0,
-                    codegen_context.managed_pointer_type_of(main_virtual_table_struct_type),
+                    codegen_context.pointer_type_of(main_virtual_table_struct_type),
                 ),
             );
         }
@@ -1776,13 +1777,20 @@ impl PekoValueBuilder for ClassAST {
                 .unwrap()
                 .attributes
                 .iter()
-                .map(|(_, attr)| (attr.attribute_type.clone(), attr.struct_index))
+                .map(|(name, attr)| {
+                    (name.clone(), attr.attribute_type.clone(), attr.struct_index)
+                })
                 .collect_vec();
             (info, datalayout)
         };
 
         let mut managed_offsets = Vec::new();
-        for (attribute_type, struct_index) in &attribute_info {
+        for (attribute_name, attribute_type, struct_index) in &attribute_info {
+            // The vtable slot holds a raw pointer to static data, not a
+            // managed reference, so it is never traced.
+            if attribute_name == "<main_virtual_table>" {
+                continue;
+            }
             if codegen_context.is_managed(attribute_type) {
                 managed_offsets.push(unsafe {
                     llvm_sys_180::target::LLVMOffsetOfElement(
@@ -1802,7 +1810,34 @@ impl PekoValueBuilder for ClassAST {
             .write()
             .unwrap()
             .type_descriptor
-            .insert(owning_uuid, descriptor);
+            .insert(owning_uuid.clone(), descriptor);
+
+        // Emit the class's static vtable: one constant per class holding the
+        // method function pointers in virtual-table-slot order. The vtable is
+        // static data shared by every instance, never GC-allocated or traced.
+        // Allocation reuses this same global by name.
+        let vtable_methods = stored_class
+            .read()
+            .unwrap()
+            .main_virtual_table
+            .methods
+            .clone();
+        if !vtable_methods.is_empty() {
+            let mut method_pointers = Vec::new();
+            for (_, functions) in &vtable_methods {
+                for function in functions {
+                    let function = function.read().unwrap();
+                    if let Some(value) = function.function_value.get(&owning_uuid) {
+                        method_pointers.push((function.virtual_table_index, value.llvm_value));
+                    }
+                }
+            }
+            codegen_context.emit_class_vtable(
+                &class_type.to_mangled_string(),
+                main_virtual_table_struct_type,
+                method_pointers,
+            );
+        }
 
         // --- Generate method bodies ---
 
