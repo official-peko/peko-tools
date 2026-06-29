@@ -55,6 +55,13 @@ pub(crate) fn cstr(s: impl AsRef<str>) -> CString {
 pub trait PekoValueBuilder {
     /// Emit IR for `self` and return the resulting value.
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue;
+
+    /// Header pass: create a declaration's LLVM type shell (a named struct for
+    /// a class, created once) and register it so a class built earlier can
+    /// resolve a class declared later. Only declarations override this; the
+    /// rest are no-ops. `build_value` reuses the shell's types rather than
+    /// recreating them.
+    fn declare(&self, _codegen_context: &mut PekoCodegenContext) {}
 }
 
 /// Dispatch a `PekoAST` to the appropriate `PekoValueBuilder` impl.
@@ -120,5 +127,13 @@ impl PekoValueBuilder for PekoAST {
                 Range,
             ]
         )
+    }
+
+    /// Routes the header pass to the contained AST. Only class declarations
+    /// create a type shell; everything else keeps the trait default.
+    fn declare(&self, codegen_context: &mut PekoCodegenContext) {
+        if let PekoAST::Class(ast) = self {
+            ast.declare(codegen_context);
+        }
     }
 }

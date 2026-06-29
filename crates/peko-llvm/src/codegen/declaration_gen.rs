@@ -1236,6 +1236,89 @@ impl PekoValueBuilder for TraitDeclarationAST {
 }
 
 impl PekoValueBuilder for ClassAST {
+    /// Header pass: create this class's LLVM struct types once and register a
+    /// shell so a class built earlier in the body pass can resolve a class
+    /// declared later. `build_value` reuses these struct types instead of
+    /// creating new ones, so a forward reference points at the same struct.
+    fn declare(&self, codegen_context: &mut PekoCodegenContext) {
+        // Generic classes register as generics, exactly as build_value does.
+        if !self.generics.is_empty() {
+            let mut self_reference = self.clone();
+            self_reference.generics.clear();
+
+            let current_module = codegen_context.module_context.current_module().clone();
+            let current_file = codegen_context.get_current_file().to_path_buf();
+            codegen_context
+                .module_context
+                .current_module()
+                .write()
+                .unwrap()
+                .get_class_generics_mut()
+                .insert(
+                    self.class_name.value.clone(),
+                    Arc::new(RwLock::new(CodegenClassGeneric::new(
+                        self.visibility.clone(),
+                        self.generics.clone(),
+                        self_reference,
+                        current_module,
+                        current_file,
+                        None,
+                    ))),
+                );
+            return;
+        }
+
+        // Idempotent: do not recreate a struct that already exists.
+        if codegen_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_classes()
+            .contains_key(&self.class_name.value)
+        {
+            return;
+        }
+
+        let mut class_type = PekoType::from_string(
+            self.class_name.value.as_str(),
+            codegen_context.get_current_file(),
+        );
+        let mut next_module = codegen_context.module_context.current_module().clone();
+        loop {
+            class_type
+                .module_names_mut()
+                .insert(0, next_module.read().unwrap().get_name().to_owned());
+            let parent = next_module.read().unwrap().get_parent().cloned();
+            match parent {
+                Some(p) => next_module = p,
+                None => break,
+            }
+        }
+
+        let vtable_struct_type =
+            codegen_context.create_named_struct(format!("{}::<<main_virtual_table>>", class_type));
+        let class_struct_type = codegen_context.create_named_struct(class_type.to_string());
+
+        let shell = CodegenClass::new(
+            class_type.clone(),
+            None,
+            IndexMap::new(),
+            CodegenVirtualTable::new(IndexMap::new(), 0, vtable_struct_type),
+            class_struct_type,
+            codegen_context.module_context.current_module().clone(),
+            None,
+            HashMap::new(),
+        );
+        codegen_context
+            .module_context
+            .current_module()
+            .write()
+            .unwrap()
+            .get_classes_mut()
+            .insert(self.class_name.value.clone(), Arc::new(RwLock::new(shell)));
+    }
+
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
         // Generic class declarations are tracked, not emitted.
         if !self.generics.is_empty() {
@@ -1299,8 +1382,23 @@ impl PekoValueBuilder for ClassAST {
         let mut class_attributes = IndexMap::new();
         let mut parent_class = None;
 
-        let main_virtual_table_struct_type =
-            codegen_context.create_named_struct(format!("{}::<<main_virtual_table>>", class_type));
+        // Reuse the struct types created by the header pass (`declare`) so a
+        // forward reference resolved earlier points at the same struct. Falls
+        // back to creating them when running without a header pass.
+        let declared_shell = codegen_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_classes()
+            .get(&self.class_name.value)
+            .cloned();
+
+        let main_virtual_table_struct_type = match &declared_shell {
+            Some(shell) => shell.read().unwrap().main_virtual_table.llvm_type,
+            None => codegen_context
+                .create_named_struct(format!("{}::<<main_virtual_table>>", class_type)),
+        };
 
         // Only add the vtable slot when the class actually has methods
         // or inherits from a class that does. The vtable is static data: the
@@ -1366,8 +1464,13 @@ impl PekoValueBuilder for ClassAST {
         }
 
         // Pre-add the class to the context so methods can reference the
-        // class type during their own codegen (self-reference).
-        let class_struct_type = codegen_context.create_named_struct(class_type.to_string());
+        // class type during their own codegen (self-reference). Reuse the
+        // struct type created by the header pass so a forward reference
+        // resolved earlier points at the same struct.
+        let class_struct_type = match &declared_shell {
+            Some(shell) => shell.read().unwrap().struct_type,
+            None => codegen_context.create_named_struct(class_type.to_string()),
+        };
         let class = CodegenClass::new(
             class_type.clone(),
             parent_class.clone(),
@@ -2271,7 +2374,11 @@ impl PekoValueBuilder for ModuleCreationAST {
             .module_context
             .move_to_module(new_module_ref, false, false);
 
-        // Codegen the module body inside the new module's scope.
+        // Codegen the module body inside the new module's scope: header pass
+        // then body pass, so a class can reference another declared later.
+        for ast in &self.module_body.value {
+            ast.declare(codegen_context);
+        }
         for ast in &self.module_body.value {
             ast.build_value(codegen_context);
         }
