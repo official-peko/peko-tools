@@ -22,11 +22,13 @@ impl PekoValueBuilder for BooleanAST {
 
 impl PekoValueBuilder for NumberAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
-        if self.integer {
-            codegen_context.create_constant_int(self.value.value as i32)
-        } else {
-            codegen_context.create_constant_double(self.value.value)
-        }
+        // A number literal is the boxed `number` value type wrapping a raw
+        // f64. Build the raw double and box it; raw machine integers come from
+        // FFI and `constant<T>(...)`, not bare literals.
+        let raw = codegen_context.create_constant_double(self.value.value);
+        codegen_context
+            .box_value_to_type(&PekoType::simple_type("number"), &raw)
+            .unwrap_or_else(|| codegen_context.create_error_value())
     }
 }
 

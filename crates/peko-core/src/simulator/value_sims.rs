@@ -30,15 +30,12 @@ impl PekoValueSimulator for BooleanAST {
     }
 }
 
-/// Numbers simulate as `int` or `double` depending on whether the
-/// literal had a fractional component.
+/// Number literals simulate as the boxed `number` value type. Raw machine
+/// integers and floats come from FFI values and `constant<T>(...)`, not bare
+/// literals.
 impl PekoValueSimulator for NumberAST {
     fn simulate(&self, _simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
-        if self.integer {
-            SimulatorValue::Value(types::PekoType::simple_type("int"))
-        } else {
-            SimulatorValue::Value(types::PekoType::simple_type("double"))
-        }
+        SimulatorValue::Value(types::PekoType::simple_type("number"))
     }
 }
 
