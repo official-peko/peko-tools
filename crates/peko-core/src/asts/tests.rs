@@ -140,11 +140,11 @@ fn visibility_renders_flags_in_declaration_order() {
     // Set every rendered modifier flag and lock the exact rendering. The
     // internal `scoped` placement flag has no rendered name, so it stays false.
     let v = VisibilityData::new(
-        true, true, true, true, true, true, true, true, true, true, true, false,
+        true, true, true, true, true, true, true, true, true, true, true, false, true, true,
     );
     assert_eq!(
         v.to_string(),
-        "[private public constant external notrack variadic blockexit hidden state mutates gcsafe]"
+        "[private public constant external notrack variadic blockexit hidden state mutates gcsafe static serial]"
     );
 }
 

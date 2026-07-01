@@ -1,0 +1,690 @@
+//! std::fs: filesystem access.
+//!
+//! Open files for cursor-based reading and writing, query path metadata, read
+//! or write whole files in one call, walk directories, and read or write lines
+//! through buffered helpers. The platform layer is the C in c/fs/fs.c, exposed
+//! through c/fs/fs.peko.h. Used through the std::fs prefix.
+
+import c::fs::fs as c_fs;
+import { * } from core;
+import { * } from collections;
+import runtime;
+
+// ---------------------------------------------------------------------------
+// --- Open modes and seek origins ---
+// ---------------------------------------------------------------------------
+
+/// How to open a file. ReadWrite opens for both reading and writing.
+[public] enum OpenMode {
+    Read,
+    Write,
+    Append,
+    Binary,
+    ReadWrite
+}
+
+/// Where a seek offset is measured from.
+[public] enum SeekFrom {
+    Start,
+    Current,
+    End
+}
+
+/// The C mode bitmask for an OpenMode.
+[private] fn mode_flags(mode: OpenMode) => i32 {
+    if mode == OpenMode::Read {
+        return constant<i32>(1)
+    }
+    if mode == OpenMode::Write {
+        return constant<i32>(2)
+    }
+    if mode == OpenMode::Append {
+        return constant<i32>(4)
+    }
+    if mode == OpenMode::Binary {
+        return constant<i32>(8)
+    }
+    return constant<i32>(16)
+}
+
+/// The C origin code for a SeekFrom.
+[private] fn seek_origin(origin: SeekFrom) => i32 {
+    if origin == SeekFrom::Start {
+        return constant<i32>(0)
+    }
+    if origin == SeekFrom::Current {
+        return constant<i32>(1)
+    }
+    return constant<i32>(2)
+}
+
+// ---------------------------------------------------------------------------
+// --- Free helpers ---
+// These are defined before the classes that call them so the references
+// resolve in source order.
+// ---------------------------------------------------------------------------
+
+/// True when `path` exists.
+[public] fn exists(path: string) => bool {
+    return c_fs::fs_exists(path.to_raw())
+}
+
+/// True when `path` is a directory.
+[public] fn is_directory(path: string) => bool {
+    return c_fs::fs_is_directory(path.to_raw())
+}
+
+/// Creates the directory at `path`. False on failure.
+[public] fn make_dir(path: string) => bool {
+    return c_fs::fs_mkdir(path.to_raw())
+}
+
+/// Creates an empty file at `path`. False on failure.
+[public] fn create(path: string) => bool {
+    return c_fs::fs_helper_write_file(path.to_raw(), "".to_raw())
+}
+
+/// The whole file at `path` as a string. None when it cannot be read.
+[public] fn read_file(path: string) => string? {
+    let buffer: pointer<i8> = c_fs::fs_helper_read_file(path.to_raw())
+    if buffer == null {
+        return None
+    }
+    return runtime::managed_string(buffer)
+}
+
+/// Writes `text` to `path`, replacing existing contents. False on failure.
+[public] fn write_file(path: string, text: string) => bool {
+    return c_fs::fs_helper_write_file(path.to_raw(), text.to_raw())
+}
+
+/// Appends `text` to `path`. False on failure.
+[public] fn append_file(path: string, text: string) => bool {
+    return c_fs::fs_helper_append_file(path.to_raw(), text.to_raw())
+}
+
+/// Removes the file at `path`. False on failure.
+[public] fn remove(path: string) => bool {
+    return c_fs::fs_remove(path.to_raw())
+}
+
+/// Copies the file at `src` to `dst`. False on failure.
+[public] fn copy(src: string, dst: string) => bool {
+    return c_fs::fs_helper_copy(src.to_raw(), dst.to_raw())
+}
+
+/// Moves the file at `src` to `dst`. False on failure.
+[public] fn move(src: string, dst: string) => bool {
+    return c_fs::fs_helper_move(src.to_raw(), dst.to_raw())
+}
+
+/// Joins a directory and a child name with a single separator.
+[private] fn join_path(dir: string, name: string) => string {
+    let length: number = dir.size()
+    let one: number = 1
+    if length > 0 {
+        if dir[length - one] == '/' {
+            return `${dir}${name}`
+        }
+    }
+    return `${dir}/${name}`
+}
+
+/// The final path segment of `path` (the part after the last separator).
+[private] fn base_name(path: string) => string {
+    let length: number = path.size()
+    let zero: number = 0
+    let one: number = 1
+    let start: number = zero
+
+    let index: number = zero
+    while index < length {
+        if path[index] == '/' {
+            start = index + one
+        }
+        index = index + one
+    }
+
+    return path.substring(start, length)
+}
+
+/// The names of the direct entries of the directory at `path`, excluding the
+/// `.` and `..` links. Empty when `path` is not a readable directory.
+[public] fn list_dir(path: string) => Array<string> {
+    let result: Array<string> = new Array<string>()
+    let dir: opaque = c_fs::fs_dir_open(path.to_raw())
+    if dir == null {
+        return result
+    }
+
+    while true {
+        let name: cstr = c_fs::fs_dir_next(dir)
+        if name == null {
+            break
+        }
+        result.push(runtime::create_managed(name))
+    }
+
+    c_fs::fs_dir_close(dir)
+    return result
+}
+
+/// Removes `path` and, when it is a directory, all of its descendants first.
+[private] fn recursive_remove(path: string) {
+    if is_directory(path) {
+        let names: Array<string> = list_dir(path)
+        for name in names {
+            recursive_remove(join_path(path, name))
+        }
+    }
+    remove(path)
+}
+
+/// Appends every descendant path of `dir` to `out`. `max_depth` limits the
+/// recursion; a negative value means unlimited. `depth` is the current level.
+[private] fn walk_into(dir: string, max_depth: number, depth: number, out: Array<string>) {
+    let zero: number = 0
+    let one: number = 1
+    if max_depth >= zero {
+        if depth > max_depth {
+            return
+        }
+    }
+
+    let names: Array<string> = list_dir(dir)
+    for name in names {
+        let child: string = join_path(dir, name)
+        out.push(child)
+        if is_directory(child) {
+            walk_into(child, max_depth, depth + one, out)
+        }
+    }
+}
+
+/// Every descendant path of the directory at `path`. `max_depth` limits the
+/// recursion depth; pass a negative value for unlimited depth.
+[public] fn walk(path: string, max_depth: number) => Array<string> {
+    let out: Array<string> = new Array<string>()
+    let zero: number = 0
+    walk_into(path, max_depth, zero, out)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// --- Buffer ---
+// ---------------------------------------------------------------------------
+
+/// A binary-safe byte buffer. Tracks its length explicitly so embedded NUL
+/// bytes are preserved.
+[public] class Buffer {
+    [private] data: pointer<i8>
+    [private] length: i64
+
+    /// Wraps a managed byte buffer and its length. FileHandle reads produce
+    /// these; direct construction is for advanced use.
+    constructor(data: pointer<i8>, length: i64) {
+        this.data = data
+        this.length = length
+    }
+
+    /// The number of bytes held.
+    [public] fn len() => number {
+        return new number(danger_cast<f64>(this.length))
+    }
+
+    /// True when the buffer holds no bytes.
+    [public] fn is_empty() => bool {
+        let zero: i64 = constant<i64>(0)
+        return this.length == zero
+    }
+
+    /// The raw managed byte buffer. The length must be tracked separately.
+    [public] fn as_raw() => pointer<i8> {
+        return this.data
+    }
+
+    /// The buffer contents as a string of exactly its byte length.
+    [public] fn to_string() => string {
+        return new string(this.data, this.length)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- FileHandle ---
+// ---------------------------------------------------------------------------
+
+/// A live file handle with cursor-based read and write operations. Obtain one
+/// from File::open rather than constructing it directly.
+[public] class FileHandle {
+    [private] handle: opaque
+    [private] is_live: bool
+
+    /// Wraps an open OS handle. File::open is the supported way to make one.
+    constructor(handle: opaque) {
+        this.handle = handle
+        this.is_live = true
+    }
+
+    /// True while this handle is open.
+    [public] fn is_open() => bool {
+        return this.is_live
+    }
+
+    /// Reads up to `n` bytes from the cursor as a string. None at end of file
+    /// or on error.
+    [public] fn read_to_string(n: number) => string? {
+        if !this.is_live {
+            return None
+        }
+        let count: i32 = danger_cast<i32>(n.to_raw())
+        let buffer: pointer<i8> = c_fs::fs_read_string(this.handle, count)
+        if buffer == null {
+            return None
+        }
+        return runtime::managed_string(buffer)
+    }
+
+    /// Reads the rest of the file from the cursor as a string. None on error.
+    [public] fn read_all_to_string() => string? {
+        if !this.is_live {
+            return None
+        }
+        let buffer: pointer<i8> = c_fs::fs_read_all_string(this.handle)
+        if buffer == null {
+            return None
+        }
+        return runtime::managed_string(buffer)
+    }
+
+    /// Reads up to `n` bytes from the cursor as a Buffer. None at end of file.
+    [public] fn read(n: number) => Buffer? {
+        if !this.is_live {
+            return None
+        }
+        let count: i32 = danger_cast<i32>(n.to_raw())
+        let buffer: pointer<i8> = runtime::allocate<i8>(count)
+        let got: i32 = c_fs::fs_read_into(this.handle, buffer, count)
+        let zero: i32 = constant<i32>(0)
+        if got <= zero {
+            return None
+        }
+        return new Buffer(buffer, danger_cast<i64>(got))
+    }
+
+    /// Reads the rest of the file from the cursor as a Buffer. None on error.
+    [public] fn read_all() => Buffer? {
+        if !this.is_live {
+            return None
+        }
+        let remaining: i64 = c_fs::fs_remaining(this.handle)
+        let zero64: i64 = constant<i64>(0)
+        if remaining < zero64 {
+            return None
+        }
+        let count: i32 = danger_cast<i32>(remaining)
+        let buffer: pointer<i8> = runtime::allocate<i8>(count)
+        let got: i32 = c_fs::fs_read_into(this.handle, buffer, count)
+        let zero: i32 = constant<i32>(0)
+        if got <= zero {
+            return None
+        }
+        return new Buffer(buffer, danger_cast<i64>(got))
+    }
+
+    /// Writes `text` at the cursor. Returns the byte count, or None on error.
+    [public] fn write_string(text: string) => number? {
+        if !this.is_live {
+            return None
+        }
+        let result: i32 = c_fs::fs_write_string(this.handle, text.to_raw())
+        let zero: i32 = constant<i32>(0)
+        if result < zero {
+            return None
+        }
+        return new number(danger_cast<f64>(result))
+    }
+
+    /// Writes `data` at the cursor. Returns the byte count, or None on error.
+    [public] fn write(data: Buffer) => number? {
+        if !this.is_live {
+            return None
+        }
+        let n: i32 = danger_cast<i32>(data.len().to_raw())
+        let result: i32 = c_fs::fs_write_from(this.handle, data.as_raw(), n)
+        let zero: i32 = constant<i32>(0)
+        if result < zero {
+            return None
+        }
+        return new number(danger_cast<f64>(result))
+    }
+
+    /// Moves the cursor to `offset` bytes from `origin`. True on success.
+    [public] fn seek(offset: number, origin: SeekFrom) => bool {
+        if !this.is_live {
+            return false
+        }
+        let off: i64 = danger_cast<i64>(offset.to_raw())
+        let result: i32 = c_fs::fs_seek(this.handle, off, seek_origin(origin))
+        let zero: i32 = constant<i32>(0)
+        return result == zero
+    }
+
+    /// The cursor's current byte offset, or None on error.
+    [public] fn tell() => number? {
+        if !this.is_live {
+            return None
+        }
+        let pos: i64 = c_fs::fs_tell(this.handle)
+        let zero: i64 = constant<i64>(0)
+        if pos < zero {
+            return None
+        }
+        return new number(danger_cast<f64>(pos))
+    }
+
+    /// Flushes buffered writes to the OS. True on success.
+    [public] fn flush() => bool {
+        if !this.is_live {
+            return false
+        }
+        let zero: i32 = constant<i32>(0)
+        return c_fs::fs_flush(this.handle) == zero
+    }
+
+    /// Closes the handle. Later operations return None or false.
+    [mutates] fn close() {
+        if this.is_live {
+            c_fs::fs_close_handle(this.handle)
+            this.is_live = false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- File ---
+// ---------------------------------------------------------------------------
+
+/// A file path and its metadata. Holds no OS resources; call open to read or
+/// write its contents.
+[public] class File {
+    [private] file_path: string
+
+    /// A File for `path`.
+    constructor(path: string) {
+        this.file_path = path
+    }
+
+    /// The path this File points to.
+    [public] fn path() => string {
+        return this.file_path
+    }
+
+    /// The final path segment, such as `notes.txt` for `/tmp/notes.txt`.
+    [public] fn name() => string {
+        return base_name(this.file_path)
+    }
+
+    /// The extension after the last dot in the name, or an empty string when
+    /// the name has no dot.
+    [public] fn extension() => string {
+        let name: string = base_name(this.file_path)
+        let length: number = name.size()
+        let zero: number = 0
+        let one: number = 1
+        let dot: number = zero - one
+
+        let index: number = zero
+        while index < length {
+            if name[index] == '.' {
+                dot = index
+            }
+            index = index + one
+        }
+
+        if dot < zero {
+            return ""
+        }
+
+        return name.substring(dot + one, length)
+    }
+
+    /// True when this path exists.
+    [public] fn exists() => bool {
+        return c_fs::fs_exists(this.file_path.to_raw())
+    }
+
+    /// True when this path is a directory.
+    [public] fn is_dir() => bool {
+        return c_fs::fs_is_directory(this.file_path.to_raw())
+    }
+
+    /// True when this path is a regular file.
+    [public] fn is_file() => bool {
+        return c_fs::fs_is_regular(this.file_path.to_raw())
+    }
+
+    /// True when this path is a symbolic link.
+    [public] fn is_link() => bool {
+        return c_fs::fs_is_link(this.file_path.to_raw())
+    }
+
+    /// The file mode bits, or None when the path does not exist.
+    [public] fn mode() => number? {
+        let raw: i32 = c_fs::fs_get_mode(this.file_path.to_raw())
+        let zero: i32 = constant<i32>(0)
+        if raw < zero {
+            return None
+        }
+        return new number(danger_cast<f64>(raw))
+    }
+
+    /// Changes the file mode bits. True on success.
+    [public] fn set_mode(mode: number) => bool {
+        let bits: i32 = danger_cast<i32>(mode.to_raw())
+        return c_fs::fs_chmod(this.file_path.to_raw(), bits)
+    }
+
+    /// Opens this file with `mode`. None when it cannot be opened.
+    [public] fn open(mode: OpenMode) => FileHandle? {
+        let handle: opaque = c_fs::fs_open_handle(this.file_path.to_raw(), mode_flags(mode))
+        if handle == null {
+            return None
+        }
+        return new FileHandle(handle)
+    }
+
+    /// Deletes this file, or this directory and all of its descendants.
+    [public] fn delete() {
+        recursive_remove(this.file_path)
+    }
+
+    /// True when the on-disk contents differ from `snapshot`.
+    [public] fn content_changed(snapshot: string) => bool {
+        let length: i32 = danger_cast<i32>(snapshot.size().to_raw())
+        return c_fs::fs_content_changed(this.file_path.to_raw(), snapshot.to_raw(), length)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Directory ---
+// ---------------------------------------------------------------------------
+
+/// A directory path with listing and traversal operations.
+[public] class Directory {
+    [private] dir_path: string
+
+    /// A Directory for `path`.
+    constructor(path: string) {
+        this.dir_path = path
+    }
+
+    /// The path this Directory points to.
+    [public] fn path() => string {
+        return this.dir_path
+    }
+
+    /// The number of direct children.
+    [public] fn child_count() => number {
+        return list_dir(this.dir_path).size()
+    }
+
+    /// The direct children as File objects.
+    [public] fn children() => Array<File> {
+        let result: Array<File> = new Array<File>()
+        let names: Array<string> = list_dir(this.dir_path)
+        for name in names {
+            result.push(new File(join_path(this.dir_path, name)))
+        }
+        return result
+    }
+
+    /// Every descendant path. `max_depth` limits the depth; a negative value
+    /// means unlimited.
+    [public] fn walk(max_depth: number) => Array<string> {
+        return walk(this.dir_path, max_depth)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Whole-file binary helper ---
+// ---------------------------------------------------------------------------
+
+/// The whole file at `path` as a Buffer. None when it cannot be read.
+[public] fn read_bytes(path: string) => Buffer? {
+    let f: File = new File(path)
+    let handle: FileHandle = f.open(OpenMode::Read)? else {
+        return None
+    }
+    let result: Buffer? = handle.read_all()
+    handle.close()
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// --- Buffered reader and writer ---
+// ---------------------------------------------------------------------------
+
+/// A buffered reader that reads ahead in chunks and yields whole lines.
+[public] class BufReader {
+    [private] handle: FileHandle
+    [private] chunk_size: number
+    [private] buf: string
+    [private] buf_pos: number
+    [private] buf_len: number
+
+    /// Wraps `handle` with the default chunk size of 8192 bytes.
+    constructor(handle: FileHandle) {
+        this.handle = handle
+        this.chunk_size = 8192
+        this.buf = ""
+        this.buf_pos = 0
+        this.buf_len = 0
+    }
+
+    /// Wraps `handle` with an explicit read-ahead chunk size.
+    constructor(handle: FileHandle, chunk_size: number) {
+        this.handle = handle
+        this.chunk_size = chunk_size
+        this.buf = ""
+        this.buf_pos = 0
+        this.buf_len = 0
+    }
+
+    /// The next line, without the newline. None at end of file. Carriage
+    /// returns are stripped so both line ending styles read the same.
+    [mutates] fn read_line() => string? {
+        let line: StringBuilder = new StringBuilder()
+        let zero: number = 0
+        let one: number = 1
+
+        while true {
+            if this.buf_pos >= this.buf_len {
+                this.buf = this.handle.read_to_string(this.chunk_size)? else {
+                    if line.size() > zero {
+                        return line.build()
+                    }
+                    return None
+                }
+                this.buf_pos = zero
+                this.buf_len = this.buf.size()
+            }
+
+            let c: char = this.buf[this.buf_pos]
+            this.buf_pos = this.buf_pos + one
+
+            if c == '\n' {
+                return line.build()
+            }
+            if c != '\r' {
+                line.append_char(c)
+            }
+        }
+
+        return None
+    }
+
+    /// The rest of the file as a string.
+    [public] fn read_all() => string? {
+        return this.handle.read_all_to_string()
+    }
+}
+
+/// A buffered writer that accumulates writes and flushes in chunks.
+[public] class BufWriter {
+    [private] handle: FileHandle
+    [private] chunk_size: number
+    [private] buf: StringBuilder
+
+    /// Wraps `handle` with the default chunk size of 8192 bytes.
+    constructor(handle: FileHandle) {
+        this.handle = handle
+        this.chunk_size = 8192
+        this.buf = new StringBuilder()
+    }
+
+    /// Wraps `handle` with an explicit flush chunk size.
+    constructor(handle: FileHandle, chunk_size: number) {
+        this.handle = handle
+        this.chunk_size = chunk_size
+        this.buf = new StringBuilder()
+    }
+
+    /// Appends `text` to the buffer, flushing when it reaches the chunk size.
+    [mutates] fn write(text: string) => bool {
+        this.buf.append(text)
+        if this.buf.size() >= this.chunk_size {
+            return this.flush()
+        }
+        return true
+    }
+
+    /// Appends `text` and a newline to the buffer.
+    [mutates] fn write_line(text: string) => bool {
+        this.buf.append(text)
+        this.buf.append_char('\n')
+        if this.buf.size() >= this.chunk_size {
+            return this.flush()
+        }
+        return true
+    }
+
+    /// Writes all buffered data to the handle. True on success.
+    [mutates] fn flush() => bool {
+        let zero: number = 0
+        if this.buf.size() == zero {
+            return true
+        }
+        let written: number? = this.handle.write_string(this.buf.build())
+        if !written.is_value() {
+            return false
+        }
+        this.buf = new StringBuilder()
+        return this.handle.flush()
+    }
+
+    /// Flushes and closes the underlying handle.
+    [mutates] fn close() {
+        this.flush()
+        this.handle.close()
+    }
+}

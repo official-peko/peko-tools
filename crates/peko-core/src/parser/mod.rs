@@ -213,6 +213,15 @@ pub struct PekoParser {
     /// Path of the source file being parsed. Used to tag every emitted
     /// diagnostic and position.
     pub file: PathBuf,
+
+    /// Top-level declarations generated as a side effect of parsing (the
+    /// per-enum serialization helper functions). `parse` drains these before
+    /// reading the next real declaration, so they are emitted as siblings.
+    pending: std::collections::VecDeque<PekoAST>,
+
+    /// Recursion depth of `parse`. The pending queue is drained only at the top
+    /// level (depth 0), never in the middle of an expression or block.
+    parse_depth: usize,
 }
 
 type FunctionArgumentsInfo = (
@@ -238,6 +247,8 @@ impl PekoParser {
             state: Vec::new(),
             diagnostics: diagnostics::DiagnosticList::new(),
             file: file.as_ref().to_path_buf(),
+            pending: std::collections::VecDeque::new(),
+            parse_depth: 0,
         }
     }
 
@@ -245,6 +256,14 @@ impl PekoParser {
     #[must_use]
     pub fn get_diagnostics(&self) -> &diagnostics::DiagnosticList {
         &self.diagnostics
+    }
+
+    /// True while `parse` still has generated top-level declarations to emit
+    /// (the per-enum serialization helpers). A top-level parse loop continues
+    /// until both the tokens and this queue are exhausted.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     // ----- Error-reporting helpers -----------------------------------------
@@ -635,6 +654,8 @@ impl PekoParser {
         let mut state = false;
         let mut mutates = false;
         let mut gcsafe = false;
+        let mut is_static = false;
+        let mut is_serial = false;
 
         while !self.tokens.finished() && !self.tokens.current_token().equals("]") {
             match self.tokens.current_token().get_type() {
@@ -654,6 +675,8 @@ impl PekoParser {
                 lexer::TokenType::State => state = true,
                 lexer::TokenType::Mutates => mutates = true,
                 lexer::TokenType::GCSafe => gcsafe = true,
+                lexer::TokenType::Static => is_static = true,
+                lexer::TokenType::Serial => is_serial = true,
                 _ => {}
             }
             self.tokens.increase_index();
@@ -665,7 +688,7 @@ impl PekoParser {
 
         VisibilityData::new(
             private, public, constant, external, notrack, variadic, blockexit, hidden, state,
-            mutates, gcsafe, false,
+            mutates, gcsafe, false, is_static, is_serial,
         )
     }
 
@@ -732,13 +755,11 @@ impl PekoParser {
         }
     }
 
-    /// Rewrites every `%` in interpolation text as `%~`.
-    ///
-    /// Interpolated string text and XML inner text run their text chunks
-    /// through this so a literal percent sign reaches the final
-    /// representation as `%~`.
+    /// Returns interpolation text unchanged. Interpolation assembles its text
+    /// chunks verbatim through a StringBuilder, so a literal percent sign needs
+    /// no escaping.
     fn escape_interpolation_percents(text: &str) -> String {
-        text.replace('%', "%~")
+        text.to_string()
     }
 
     /// Parses a string literal's contents up to one of the given delimiters.
@@ -927,15 +948,29 @@ impl PekoParser {
         (function_generics, arguments, ending_position)
     }
 
-    /// Parses an object instantiation: `new Class(args)` or
-    /// `new Class<T1, T2>(args)`. The cursor starts on `new`.
+    /// Parses an object instantiation: `new Class(args)`,
+    /// `new Class<T1, T2>(args)`, or a module-qualified
+    /// `new module::Class(args)`. The cursor starts on `new`.
     fn parse_new_expression(&mut self) -> PekoAST {
         let starting_position = self.get_current_position();
         self.tokens.increase_index();
 
-        let class_name = PositionedValue::from_token(self.tokens.current_token());
+        // Read the class name, allowing a module path before it
+        // (`module::Class`). The segments are joined with `::` so the type
+        // resolver routes through the named module.
+        let mut class_name = PositionedValue::from_token(self.tokens.current_token());
         self.expect_token_type(&lexer::TokenType::Identifier, "class name");
         self.tokens.increase_index();
+
+        while self.tokens.current_token().equals("::") {
+            self.tokens.increase_index();
+            let segment = self.tokens.current_token().clone();
+            self.expect_token_type(&lexer::TokenType::Identifier, "class name");
+            self.tokens.increase_index();
+            class_name.value.push_str("::");
+            class_name.value.push_str(segment.get_value());
+            class_name.end = segment.get_end().clone();
+        }
 
         let (object_generics, arguments, ending_position) = self.parse_arguments();
 
@@ -1179,7 +1214,7 @@ impl PekoParser {
         ))
     }
 
-    /// Parses a string literal, plain (`"…"`) or interpolated (`` `...${expr}...` ``).
+    /// Parses a string literal, plain (`"..."`) or interpolated (`` `...${expr}...` ``).
     fn parse_string(&mut self) -> StringAST {
         let starting_position = self.get_current_position();
 
@@ -1391,6 +1426,42 @@ impl PekoParser {
     }
 
     /// Parses a variable declaration: `name := value` or `name: Type = value`.
+    /// Parses `let (a, b) = value`: a destructuring declaration that binds each
+    /// name to a positional element of the value.
+    pub fn parse_destructure(&mut self) -> DestructureAST {
+        let starting_position = self.get_current_position();
+
+        // The `let` and the opening `(`.
+        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Let) {
+            self.tokens.increase_index();
+        }
+        if self.expect_token_value("(", "destructuring pattern") {
+            self.tokens.increase_index();
+        }
+
+        let mut names = Vec::new();
+        while !self.tokens.current_token().equals(")") && !self.tokens.finished() {
+            names.push(PositionedValue::from_token(self.tokens.current_token()));
+            self.expect_token_type(&lexer::TokenType::Identifier, "destructuring name");
+            self.tokens.increase_index();
+            if self.tokens.current_token().equals(",") {
+                self.tokens.increase_index();
+            }
+        }
+
+        if self.expect_token_value(")", "destructuring pattern") {
+            self.tokens.increase_index();
+        }
+        if self.expect_token_value("=", "destructuring pattern") {
+            self.tokens.increase_index();
+        }
+
+        let value = self.parse();
+        let ending_position = self.get_current_position();
+
+        DestructureAST::new(starting_position, ending_position, names, Box::new(value))
+    }
+
     pub fn parse_variable_declaration(&mut self) -> NewVariableAST {
         let starting_position = self.get_current_position();
 
@@ -1609,6 +1680,133 @@ impl PekoParser {
         )
     }
 
+    /// Derives Serialize and Deserialize for a `[serial]` class.
+    ///
+    /// Generates a `serialize` method that walks the attributes into a
+    /// Serializer, and a static `deserialize` method that reads them back from a
+    /// Deserializer and constructs the class. The generated methods are produced
+    /// as source and parsed, then injected into the class along with the
+    /// Serialize and Deserialize trait implementations.
+    ///
+    /// Each attribute is handled by its declared type: an optional (`T?`) is
+    /// omitted when None and read as None when the key is absent; an `Array<T>`
+    /// is written and read element by element; any other type is written with
+    /// its own `serialize` and read with its own static `deserialize`, so nested
+    /// serial classes and the scalar types compose.
+    fn derive_serialization(&mut self, class: &mut ClassAST) {
+        let class_name = class.class_name.value.clone();
+
+        let mut serialize_body = String::from("        serializer.begin_object()\n");
+        let mut deserialize_body = String::new();
+        let mut constructor_arguments: Vec<String> = Vec::new();
+
+        for (attribute_name, attribute) in &class.attributes {
+            let name = attribute_name.value.clone();
+            let attribute_type = attribute.attribute_type.as_ref();
+            constructor_arguments.push(name.clone());
+
+            if let Some(inner) = attribute_type.optional_get_inner_type() {
+                // Optional: omit the key when None; absent key reads as None.
+                let inner_type = inner.to_string();
+                serialize_body.push_str(&format!(
+                    "        if this.{name}.is_value() {{\n            serializer.field(\"{name}\")\n            this.{name}.unwrap().serialize(serializer)\n        }}\n",
+                ));
+                deserialize_body.push_str(&format!(
+                    "        let {name}: {inner_type}? = None\n        if deserializer.enter_field(\"{name}\") {{\n            {name} = {inner_type}::deserialize(deserializer)\n            deserializer.exit_field()\n        }}\n",
+                ));
+            } else if attribute_type.name() == "Array" && attribute_type.generics().len() == 1 {
+                // Array: write and read element by element.
+                let element_type = attribute_type.generics()[0].to_string();
+                serialize_body.push_str(&format!(
+                    "        serializer.field(\"{name}\")\n        serializer.begin_array()\n        for element_{name} in this.{name} {{\n            element_{name}.serialize(serializer)\n        }}\n        serializer.end_array()\n",
+                ));
+                deserialize_body.push_str(&format!(
+                    "        if !deserializer.enter_field(\"{name}\") {{ return Error(\"{name}\") }}\n        let {name}: Array<{element_type}> = new Array<{element_type}>()\n        let count_{name}: number = deserializer.length()? else {{ return Error(\"{name}\") }}\n        let index_{name}: number = 0\n        while index_{name} < count_{name} {{\n            if deserializer.enter_index(index_{name}) {{\n                let item_{name}: {element_type} = {element_type}::deserialize(deserializer)?\n                {name}.push(item_{name})\n                deserializer.exit_index()\n            }}\n            index_{name} = index_{name} + 1\n        }}\n        deserializer.exit_field()\n",
+                ));
+            } else {
+                // Scalar, nested serial class, enum, or any other type. A
+                // scalar or class dispatches its own serialize and static
+                // deserialize. An enum type has neither, so the compiler
+                // intercepts `this.f.serialize(...)` and `E::deserialize(...)`
+                // and routes them to the enum's generated helper functions.
+                let field_type = attribute_type.to_string();
+                serialize_body.push_str(&format!(
+                    "        serializer.field(\"{name}\")\n        this.{name}.serialize(serializer)\n",
+                ));
+                deserialize_body.push_str(&format!(
+                    "        if !deserializer.enter_field(\"{name}\") {{ return Error(\"{name}\") }}\n        let {name}: {field_type} = {field_type}::deserialize(deserializer)?\n        deserializer.exit_field()\n",
+                ));
+            }
+        }
+
+        serialize_body.push_str("        serializer.end_object()\n");
+        deserialize_body.push_str(&format!(
+            "        return new {class_name}({})\n",
+            constructor_arguments.join(", "),
+        ));
+
+        let generated = format!(
+            "class SerialDerived {{\n    [public] fn serialize(serializer: Serializer) {{\n{serialize_body}    }}\n\n    [public static] fn deserialize(deserializer: Deserializer) => Self? {{\n{deserialize_body}    }}\n}}\n",
+        );
+
+        let mut sub_parser =
+            PekoParser::new(lexer::TokenList::from_source(&generated, &self.file), &self.file);
+        let generated_class = sub_parser.parse_class_declaration();
+
+        for method in generated_class.methods {
+            class.methods.push(method);
+        }
+
+        class
+            .implements
+            .push(types::PekoType::simple_type("Serialize"));
+        class
+            .implements
+            .push(types::PekoType::simple_type("Deserialize"));
+    }
+
+    /// Generates the serialization helper functions for an enum and queues them
+    /// as sibling top-level declarations.
+    ///
+    /// `serialize_enum_<E>(value, serializer)` writes the value's variant name;
+    /// `deserialize_enum_<E>(deserializer) => E?` reads a variant name back, or
+    /// returns an Error for an unknown one. The `[serial]` derive and the
+    /// compiler's enum-dispatch interception call these, so an enum can be a
+    /// serial field even when it is imported from another module.
+    fn derive_enum_serialization(&mut self, enum_declaration: &EnumDeclarationAST) {
+        let enum_type = enum_declaration.enum_name.value.clone();
+
+        let mut switch_arms = String::new();
+        let mut match_arms = String::new();
+        for variant in &enum_declaration.variants {
+            let variant = variant.value.clone();
+            switch_arms.push_str(&format!(
+                "        {enum_type}::{variant} => {{ serializer.put_string(\"{variant}\") }}\n",
+            ));
+            match_arms.push_str(&format!(
+                "    if text.equals(\"{variant}\") {{ return {enum_type}::{variant} }}\n",
+            ));
+        }
+
+        // The helpers name core types (Serializer, Deserializer, Option,
+        // string). A module that declares an enum may not import core, so the
+        // block imports it. The import is idempotent, so a module that already
+        // has core is unaffected.
+        let generated = format!(
+            "import {{ * }} from std::core;\n\n[public] fn serialize_enum_{enum_type}(value: {enum_type}, serializer: Serializer) {{\n    switch value {{\n{switch_arms}    }}\n}}\n\n[public] fn deserialize_enum_{enum_type}(deserializer: Deserializer) => {enum_type}? {{\n    let text: string = deserializer.get_identifier()? else {{ return Error(\"{enum_type}\") }}\n{match_arms}    return Error(\"{enum_type}\")\n}}\n",
+        );
+
+        let mut sub_parser =
+            PekoParser::new(lexer::TokenList::from_source(&generated, &self.file), &self.file);
+        while !sub_parser.tokens.finished() {
+            if sub_parser.tokens.current_token().equals(";") {
+                sub_parser.tokens.increase_index();
+                continue;
+            }
+            self.pending.push_back(sub_parser.parse());
+        }
+    }
+
     /// Parses a class declaration: `class Name<G> from Parent { attrs; methods }`.
     pub fn parse_class_declaration(&mut self) -> ClassAST {
         let starting_position = self.get_current_position();
@@ -1683,6 +1881,17 @@ impl PekoParser {
             }
         }
 
+        // A class with no explicit parent implicitly inherits the root
+        // std::core `Object`. This makes every value an `Object`, so its
+        // methods are available everywhere and every erased `T` is an
+        // `Object*`. `Object` is the root and takes no parent of its own.
+        if derives_from.is_empty() && class_name.value != "Object" {
+            let mut object_parent = types::PekoType::simple_type("Object");
+            object_parent.start_position = class_name.start.clone();
+            object_parent.end_position = class_name.end.clone();
+            derives_from.push(object_parent);
+        }
+
         // Optional `impl Trait1, Trait2, ...` clause declaring the traits the
         // class conforms to.
         let mut implements = Vec::new();
@@ -1738,6 +1947,10 @@ impl PekoParser {
             }
 
             let visibility = visibility.unwrap_or_else(VisibilityData::open_visibility);
+
+            // The `[static]` modifier marks a type-level method with no implicit
+            // `this`, called as `Type::method(args)`.
+            let is_static = visibility.is_static;
 
             match self.tokens.current_token().get_type() {
                 // Attribute declaration: `name: Type`.
@@ -1897,22 +2110,23 @@ impl PekoParser {
                 lexer::TokenType::FunctionDeclarator => {
                     let mut method = self.parse_function_declaration();
                     method.class_order = method_index;
-                    methods.push(ClassMethod::Method(
-                        ClassMethodInfo::new(
-                            method.start.clone(),
-                            method.end.clone(),
-                            visibility,
-                            docinfo,
-                            method.arguments,
-                            method
-                                .function_body
-                                .unwrap_or_else(|| PositionedValue::create_no_position(Vec::new())),
-                            method.varargs_type,
-                            method.varargs_name,
-                            method.function_name,
-                        ),
-                        method.return_type,
-                    ));
+                    let mut method_info = ClassMethodInfo::new(
+                        method.start.clone(),
+                        method.end.clone(),
+                        visibility,
+                        docinfo,
+                        method.arguments,
+                        method
+                            .function_body
+                            .unwrap_or_else(|| PositionedValue::create_no_position(Vec::new())),
+                        method.varargs_type,
+                        method.varargs_name,
+                        method.function_name,
+                    );
+                    method_info.generic_types = method.generic_types;
+                    method_info.generic_bounds = method.generic_bounds;
+                    method_info.is_static = is_static;
+                    methods.push(ClassMethod::Method(method_info, method.return_type));
 
                     method_index += 1;
                 }
@@ -2057,15 +2271,29 @@ impl PekoParser {
                 continue;
             }
 
+            // A trait slot may carry a `[...]` modifier block and doc-info. The
+            // only slot modifier is `[static]`, which marks a type-level method
+            // with no implicit `this`; an implementer supplies a matching
+            // `[static]` method.
+            let mut visibility: Option<VisibilityData> = None;
             let mut docinfo: Option<DocInfo> = None;
-            while self.tokens.current_token().equals("///") {
-                docinfo = Some(self.parse_doc_info());
+            while (self.tokens.current_token().equals("[") && visibility.is_none())
+                || (self.tokens.current_token().equals("///") && docinfo.is_none())
+            {
+                if self.tokens.current_token().equals("[") {
+                    visibility = Some(self.parse_visibility());
+                } else {
+                    docinfo = Some(self.parse_doc_info());
+                }
             }
+
+            let is_static = visibility.is_some_and(|modifiers| modifiers.is_static);
 
             match self.tokens.current_token().get_type() {
                 lexer::TokenType::FunctionDeclarator => {
                     let mut method = self.parse_function_declaration();
                     method.docinfo = docinfo;
+                    method.is_static = is_static;
                     methods.push(method);
                 }
 
@@ -2408,10 +2636,13 @@ impl PekoParser {
                     let ending_position = self.tokens.current_token().get_end().clone();
                     self.tokens.increase_index();
 
+                    let else_body = self.parse_optional_unwrap_else();
+
                     identifier_reference = PekoAST::Unwrap(UnwrapAST::new(
                         starting_position.clone(),
                         ending_position,
                         Box::new(identifier_reference),
+                        else_body,
                     ));
                 }
 
@@ -2467,6 +2698,17 @@ impl PekoParser {
     }
 
     /// Parses an `if` / `else if` / `else` chain.
+    /// Parses an optional `else { ... }` fallback right after a `?`. The else
+    /// must immediately follow the `?`; a None or Error then runs this block
+    /// for a fallback value instead of propagating or halting.
+    fn parse_optional_unwrap_else(&mut self) -> Option<PositionedValue<Vec<PekoAST>>> {
+        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Else) {
+            self.tokens.increase_index();
+            return Some(self.parse_block("optional fallback body"));
+        }
+        None
+    }
+
     pub fn parse_if_statement(&mut self) -> IfStatementAST {
         let starting_position = self.get_current_position();
 
@@ -2500,6 +2742,9 @@ impl PekoParser {
 
                 lexer::TokenType::LBrace => {
                     else_body = Some(self.parse_block("else body"));
+                    // An else block ends the if-chain. A statement that follows
+                    // (such as a new `if`) is not part of this if.
+                    break;
                 }
 
                 _ => break,
@@ -2535,16 +2780,54 @@ impl PekoParser {
 
         self.tokens.increase_index();
 
-        let iterator_identifier = PositionedValue::from_token(self.tokens.current_token());
-        self.expect_token_type(&lexer::TokenType::Identifier, "for loop item id");
-        self.tokens.increase_index();
+        // `for (a, b) in ...` destructures each element. The loop binds a
+        // synthetic variable and the body destructures it into the names.
+        let mut destructure_names = Vec::new();
+        let is_destructure = self.tokens.current_token().equals("(");
+        let iterator_identifier = if is_destructure {
+            let pattern_start = self.get_current_position();
+            self.tokens.increase_index();
+            while !self.tokens.current_token().equals(")") && !self.tokens.finished() {
+                destructure_names.push(PositionedValue::from_token(self.tokens.current_token()));
+                self.expect_token_type(&lexer::TokenType::Identifier, "destructuring name");
+                self.tokens.increase_index();
+                if self.tokens.current_token().equals(",") {
+                    self.tokens.increase_index();
+                }
+            }
+            if self.expect_token_value(")", "destructuring pattern") {
+                self.tokens.increase_index();
+            }
+            PositionedValue {
+                value: format!("__for_pair_{}_{}", pattern_start.line, pattern_start.column),
+                start: pattern_start,
+                end: self.get_current_position(),
+            }
+        } else {
+            let identifier = PositionedValue::from_token(self.tokens.current_token());
+            self.expect_token_type(&lexer::TokenType::Identifier, "for loop item id");
+            self.tokens.increase_index();
+            identifier
+        };
 
         if self.expect_token_type(&lexer::TokenType::In, "for loop") {
             self.tokens.increase_index();
         }
 
         let iterator = self.parse();
-        let loop_body = self.parse_block("for loop body");
+        let mut loop_body = self.parse_block("for loop body");
+
+        if is_destructure {
+            let reference =
+                PekoAST::VariableReference(VariableReferenceAST::new(iterator_identifier.clone()));
+            let destructure = DestructureAST::new(
+                iterator_identifier.start.clone(),
+                iterator_identifier.end.clone(),
+                destructure_names,
+                Box::new(reference),
+            );
+            loop_body.value.insert(0, PekoAST::Destructure(destructure));
+        }
 
         ForLoopAST::new(
             starting_position,
@@ -2577,7 +2860,11 @@ impl PekoParser {
         let mut ending_position = self.tokens.current_token().get_end().clone();
         self.tokens.increase_index();
 
-        let return_value = if self.tokens.current_token().equals(";") {
+        // A bare `return` ends at a `;` or at the end of its block (`}`); only
+        // a return with a value has an expression to parse.
+        let return_value = if self.tokens.current_token().equals(";")
+            || self.tokens.current_token().equals("}")
+        {
             None
         } else {
             let return_value = self.parse();
@@ -3265,7 +3552,10 @@ impl PekoParser {
             }
 
             match self.tokens.current_token().get_type() {
-                // Operand.
+                // Operand. Every value-producing form secondary_parse handles is
+                // a valid operand, including builtins and expressions (`constant`,
+                // `new`, `danger_cast`, a closure, an `if`), so they compose in a
+                // binary expression such as `x == constant<i64>(0)`.
                 lexer::TokenType::Identifier
                 | lexer::TokenType::Character
                 | lexer::TokenType::DoubleString
@@ -3273,7 +3563,12 @@ impl PekoParser {
                 | lexer::TokenType::Null
                 | lexer::TokenType::Number
                 | lexer::TokenType::False
-                | lexer::TokenType::True => {
+                | lexer::TokenType::True
+                | lexer::TokenType::Constant
+                | lexer::TokenType::New
+                | lexer::TokenType::DangerCast
+                | lexer::TokenType::Closure
+                | lexer::TokenType::If => {
                     // Two operands in a row terminate the expression -- the
                     // second one belongs to whatever follows.
                     if previous_was_value {
@@ -3390,7 +3685,9 @@ impl PekoParser {
 
                 // Close paren (flush until matching open paren).
                 lexer::TokenType::RParen => {
-                    previous_was_value = false;
+                    // A closed group is a value. A value token that follows it
+                    // then belongs to the next statement, not this expression.
+                    previous_was_value = true;
 
                     if parentheses_to_close == 0 && count_parentheses {
                         break;
@@ -3445,11 +3742,14 @@ impl PekoParser {
                     };
 
                     // If the just-closed parens were preceded by a unary
-                    // operator (e.g. `-(a+b)`), apply it now.
+                    // operator (e.g. `-(a+b)`), apply it now. An open paren left
+                    // on the stack carries the Unary state too, so exclude it:
+                    // it encloses this group rather than operating on it.
                     if parens_state == ExpressionOperatorType::Unary
-                        && operator_stack
-                            .last()
-                            .is_some_and(|op| op.operator_type == ExpressionOperatorType::Unary)
+                        && operator_stack.last().is_some_and(|op| {
+                            op.operator_type == ExpressionOperatorType::Unary
+                                && op.operator.value != "("
+                        })
                         && !operand_stack.is_empty()
                     {
                         let operator = operator_stack.pop().unwrap();
@@ -3516,10 +3816,12 @@ impl PekoParser {
 
                     let base = operand_stack.pop().unwrap();
                     let start = base.get_start().clone();
+                    let else_body = self.parse_optional_unwrap_else();
                     operand_stack.push(PekoAST::Unwrap(UnwrapAST::new(
                         start,
                         ending_position,
                         Box::new(base),
+                        else_body,
                     )));
                     previous_was_value = true;
                 }
@@ -3570,6 +3872,21 @@ impl PekoParser {
     /// Top-level entry point: parses one statement, declaration, or
     /// expression from the current cursor position.
     pub fn parse(&mut self) -> PekoAST {
+        // At the top level, emit any queued generated declarations (per-enum
+        // serialization helpers) before reading the next real one.
+        if self.parse_depth == 0
+            && let Some(generated) = self.pending.pop_front()
+        {
+            return generated;
+        }
+
+        self.parse_depth += 1;
+        let result = self.parse_inner();
+        self.parse_depth -= 1;
+        result
+    }
+
+    fn parse_inner(&mut self) -> PekoAST {
         // Eat any leading semicolons and comments.
         while !self.tokens.finished()
             && (self.tokens.current_token().equals(";") || self.tokens.current_token().is_comment())
@@ -3602,6 +3919,11 @@ impl PekoParser {
                 if let Some(v) = visibility {
                     class_declaration.visibility = v;
                 }
+                // A `[serial]` class gets compiler-derived Serialize and
+                // Deserialize implementations over its attributes.
+                if class_declaration.visibility.is_serial {
+                    self.derive_serialization(&mut class_declaration);
+                }
                 PekoAST::Class(class_declaration)
             }
 
@@ -3620,6 +3942,10 @@ impl PekoParser {
                 if let Some(v) = visibility {
                     enum_declaration.visibility = v;
                 }
+                // Emit the enum's serialization helper functions as siblings, so
+                // an enum-typed field of a `[serial]` class (even an imported
+                // enum) can be (de)serialized as its variant identifier string.
+                self.derive_enum_serialization(&enum_declaration);
                 PekoAST::Enum(enum_declaration)
             }
 
@@ -3633,6 +3959,10 @@ impl PekoParser {
             }
 
             lexer::TokenType::Let => {
+                // `let (a, b) = value` destructures a positional value.
+                if self.tokens.get_token_forward(1).equals("(") {
+                    return PekoAST::Destructure(self.parse_destructure());
+                }
                 let mut variable_declaration = self.parse_variable_declaration();
                 variable_declaration.docinfo = docinfo;
                 if let Some(v) = visibility {

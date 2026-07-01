@@ -298,7 +298,7 @@ const ANDROID_MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="utf-8" stand
     <uses-permission android:name="android.permission.SET_RELEASE_APP"/>
     <uses-permission android:name="android.permission.INTERNET"/>
     <application android:usesCleartextTraffic="true"
-                 android:hasCode="false"
+                 android:hasCode="true"
                  tools:replace="android:icon,android:theme,android:allowBackup,label"
                  android:icon="@mipmap/icon">
         <activity android:configChanges="keyboardHidden|orientation"

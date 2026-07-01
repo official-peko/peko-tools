@@ -1,0 +1,71 @@
+[package]
+name = "std"
+version = "0.1.0"
+description = "The Pekoscript standard library."
+license = "MIT"
+authors = ["Preston Brown"]
+keywords = ["std", "core", "collections"]
+categories = ["standard-library"]
+
+[lib]
+root = "lib.peko"
+
+# The garbage collector and runtime, compiled from C source at build time.
+# The compiler-facing ABI is declared in c/runtime/gc.peko.h and defined by
+# compiler_abi.c, which adapts the compiler-emitted peko_gc_* symbols onto the
+# internal pgc_* collector. The collector is a stop-the-world sliding
+# mark-compact (Lisp2) GC.
+[native]
+sources = [
+    "c/runtime/alloc.c",
+    "c/runtime/audit.c",
+    "c/runtime/compiler_abi.c",
+    "c/runtime/dispatch.c",
+    "c/runtime/heap.c",
+    "c/runtime/mark.c",
+    "c/runtime/pgc.c",
+    "c/runtime/roots.c",
+    "c/runtime/rt.c",
+    "c/runtime/stackmap.c",
+    "c/runtime/threads.c",
+    "c/core/conversions.c",
+    "c/core/hash.c",
+    "c/io/console.c",
+    "c/random/random.c",
+    "c/fs/fs.c",
+    "c/crypto/crypto.c",
+    "c/crypto/legacy.c",
+    "c/threads/threads.c",
+    "c/sockets/peko_sockets.c",
+    "c/sockets/peko_sockets_tls.c",
+    "c/sockets/peko_websocket.c",
+    "c/webview/webview.cc",
+    "c/webview/webview_bridge.c",
+    "c/webview/webview_ios.m",
+    "c/webview/webview_android.c",
+]
+include = ["c/runtime/include", "c/io", "c/random", "c/fs", "c/crypto/vendor", "c/threads", "c/sockets", "c/sockets/inc"]
+
+[native.flags]
+all = ["-O2", "-fno-strict-aliasing"]
+
+# Prebuilt static libraries, one set per platform and architecture. libsodium
+# backs std::crypto and BearSSL backs the TLS transport in std::sockets. The
+# vendored headers compile against them.
+[native.libs]
+macos-arm = ["c/crypto/vendor/macos/arm/libsodium.a", "c/sockets/vendor/macos/arm/libbearssl.a"]
+macos-x86_64 = ["c/crypto/vendor/macos/x86_64/libsodium.a", "c/sockets/vendor/macos/x86_64/libbearssl.a"]
+linux-arm = ["c/crypto/vendor/linux/arm/libsodium.a", "c/sockets/vendor/linux/arm/libbearssl.a"]
+linux-x86_64 = ["c/crypto/vendor/linux/x86_64/libsodium.a", "c/sockets/vendor/linux/x86_64/libbearssl.a"]
+ios-arm = ["c/crypto/vendor/ios/arm/libsodium.a", "c/sockets/vendor/ios/arm/libbearssl.a"]
+ios-x86_64 = ["c/crypto/vendor/ios/x86_64/libsodium.a", "c/sockets/vendor/ios/x86_64/libbearssl.a"]
+android = ["c/crypto/vendor/android/libsodium.a", "c/sockets/vendor/android/libbearssl.a"]
+windows = ["c/crypto/vendor/windows/libsodium.lib", "c/sockets/vendor/windows/bearssl.lib"]
+
+# The desktop webview links the platform WebView frameworks at the final link.
+# macOS adds Cocoa for the AppKit window (WebKit, Foundation, and libc++ come
+# from the toolchain already). Linux adds the WebKitGTK development libraries.
+[native.link]
+linux = ["-lpthread", "-lm", "-lwebkit2gtk-4.1", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
+android = ["-llog"]
+macos = ["-framework", "Cocoa"]

@@ -5,7 +5,7 @@
 //!
 //! AST nodes are split across four submodules by syntactic role:
 //!
-//! * [`values`] -- literals (numbers, strings, characters, booleans, …)
+//! * [`values`] -- literals (numbers, strings, characters, booleans, ...)
 //! * [`expressions`] -- anything that produces a value at runtime
 //! * [`statements`] -- anything that performs an action but doesn't produce
 //!   a value
@@ -89,6 +89,7 @@ pub enum PekoAST {
 
     // Declaration ASTs
     NewVariable(declarations::NewVariableAST),
+    Destructure(declarations::DestructureAST),
     FunctionDeclaration(declarations::FunctionDeclarationAST),
     Closure(declarations::ClosureAST),
     Class(declarations::ClassAST),
@@ -145,6 +146,7 @@ impl Spanned for PekoAST {
 
             // Declarations
             Self::NewVariable(ast) => ast.get_start(),
+            Self::Destructure(ast) => ast.get_start(),
             Self::FunctionDeclaration(ast) => ast.get_start(),
             Self::Closure(ast) => ast.get_start(),
             Self::Class(ast) => ast.get_start(),
@@ -201,6 +203,7 @@ impl Spanned for PekoAST {
 
             // Declarations
             Self::NewVariable(ast) => ast.get_end(),
+            Self::Destructure(ast) => ast.get_end(),
             Self::FunctionDeclaration(ast) => ast.get_end(),
             Self::Closure(ast) => ast.get_end(),
             Self::Class(ast) => ast.get_end(),

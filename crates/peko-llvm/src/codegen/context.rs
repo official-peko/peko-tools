@@ -7,6 +7,7 @@
 //! the layer table and per-trait documentation.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -17,16 +18,46 @@ use llvm_sys_180::prelude::{
 use peko_core::ExternalModuleInfo;
 use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::{ExecutionContextAlgorithms, ExecutionModuleContext};
-use peko_core::types::PekoType;
+use peko_core::types::{PekoType, TypeRestraint};
 
 use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::cstr;
 use crate::codegen::data_structures::{
-    BooleanOperation, CodegenArg, CodegenClass, CodegenClassAttribute, CodegenClassGeneric,
-    CodegenFunction, CodegenFunctionGeneric, CodegenModule, CodegenValue, CodegenVariable,
-    CodegenVirtualTable, NumericalOperation,
+    BooleanOperation, CodegenArg, CodegenClass, CodegenClassAttribute, CodegenFunction,
+    CodegenModule, CodegenValue, CodegenVariable, CodegenVirtualTable, NumericalOperation,
 };
+
+/// The symbol an erased generic compiles under: the bare name followed by the
+/// generic typenames in angle brackets. The typenames are fixed for a given
+/// declaration, so every concrete instantiation resolves to this one name and
+/// the body is compiled once.
+pub fn erased_generic_symbol(base: &str, typenames: &[String]) -> String {
+    format!("{base}<{}>", typenames.join(", "))
+}
+
+/// A substitution mapping each generic typename to a bare `Generic` carrier.
+/// Used to lower an erased class's member types outside the class's own generic
+/// context, for example when declaring its methods into an importing module:
+/// each parameter lowers to a thin managed pointer regardless of its bounds.
+pub fn class_carrier_substitution(
+    typenames: &[peko_core::asts::data_structures::PositionedValue<String>],
+) -> HashMap<String, PekoType> {
+    typenames
+        .iter()
+        .map(|name| {
+            (
+                name.value.clone(),
+                PekoType::generic_type(name.value.clone(), Vec::new()),
+            )
+        })
+        .collect()
+}
+
+// Generic substitution and inference live in peko_core so the codegen and the
+// simulator resolve erased generics identically. Re-exported here so existing
+// `crate::codegen::context::substitute_generic_params` references keep working.
+pub use peko_core::types::{infer_generic_bindings, substitute_generic_params, substitute_self};
 
 #[derive(Clone)]
 pub struct PekoCodegenContext {
@@ -46,6 +77,52 @@ pub struct PekoCodegenContext {
     pub target: peko_core::target::PekoTarget,
     pub creating_required: bool,
 
+    /// Per-class method function declarations created by the header pass
+    /// (`ClassAST::declare`), keyed by the class's fully qualified type string,
+    /// in the class's source method order. The body pass reuses these instead
+    /// of re-creating the LLVM functions, so a class dispatched from another
+    /// class's body before its own body is built still resolves.
+    pub class_function_values: HashMap<String, Vec<CodegenFunction>>,
+
+    /// True while the header pass is materializing a class's layout, method
+    /// signatures, and static data. Method bodies are skipped in this pass and
+    /// emitted later by the body pass.
+    pub building_class_signatures: bool,
+
+    /// Generic class instantiations whose signatures were built during the
+    /// signature pass and whose method bodies are still pending. A signature
+    /// pass that instantiates a generic (a method returning `Option<bool>`)
+    /// only lays out the instantiation, since the classes it dispatches on may
+    /// not be laid out yet. The bodies are emitted once every class is laid
+    /// out, by draining this queue after the body pass.
+    ///
+    /// Each entry records the module that owned the instantiation's method
+    /// declarations (the module being signature-built when the instantiation
+    /// fired). The body pass keys method functions by that owning module, so
+    /// the drain restores it before emitting, even when an unrelated nested
+    /// import is the one that triggers the drain.
+    pub pending_generic_class_bodies:
+        Vec<(CodegenClass, Vec<PekoType>, Arc<RwLock<CodegenModule>>)>,
+
+    /// Build state of each erased generic class by its compiled name. An erased
+    /// class is compiled once and shared across every instantiation; `false`
+    /// marks signatures emitted (bodies deferred), `true` marks bodies emitted.
+    /// A use site that resolves an already-built erased class returns the cached
+    /// class rather than re-emitting its method bodies.
+    pub erased_generic_classes: HashMap<String, bool>,
+
+    /// When set, a non-generic function declaration registers its signature and
+    /// returns before building its body. The signature pass sets this so every
+    /// top-level function is declared before any body is built, which lets a
+    /// body (or a closure in it) call a function defined later in the file.
+    pub declaring_signatures_only: bool,
+
+    /// Erased generic class names whose instantiation is currently in progress.
+    /// A self-referential field (a generic whose member is the same erased
+    /// generic) re-enters create_generic_class while it is still laying out;
+    /// this set breaks the cycle by returning the in-progress shell.
+    pub generic_instantiations_in_progress: HashSet<String>,
+
     pub files_to_link: Vec<PathBuf>,
 
     pub imported_styles: HashMap<PathBuf, String>,
@@ -61,6 +138,11 @@ pub struct PekoCodegenContext {
     pub return_references: bool,
     pub current_return_type: Option<PekoType>,
     pub current_expected_type_options: Option<Vec<PekoType>>,
+
+    /// Counter for fresh backward-inference variables (`?N`) bound when a
+    /// `new Class()` cannot infer its type arguments forward. Mirrors the
+    /// simulator; the erased body lowers them like any generic carrier.
+    pub inference_counter: usize,
 
     /// `true` when the value at the current position is consumed (a variable
     /// initializer, a call argument, a return value, ...). `if` reads this to
@@ -130,6 +212,12 @@ impl PekoCodegenContext {
             generated_args: Vec::new(),
             generated_kw_args: None,
             creating_required: false,
+            class_function_values: HashMap::new(),
+            building_class_signatures: false,
+            pending_generic_class_bodies: Vec::new(),
+            erased_generic_classes: HashMap::new(),
+            declaring_signatures_only: false,
+            generic_instantiations_in_progress: HashSet::new(),
 
             diagnostics: peko_core::diagnostics::DiagnosticList::new(),
             errored: false,
@@ -157,6 +245,7 @@ impl PekoCodegenContext {
             return_references: false,
             current_return_type: None,
             current_expected_type_options: None,
+            inference_counter: 0,
 
             current_this: None,
             previous_was_this: false,
@@ -180,6 +269,234 @@ impl PekoCodegenContext {
             root_folder,
         }
     }
+
+    /// Emit the method bodies of every generic instantiation that was laid out
+    /// during the signature pass. Call this after the body pass, when every
+    /// class is fully laid out, so a deferred body can box and dispatch on any
+    /// class. Re-instantiating with the signature flag clear takes the
+    /// signatures-done path and builds only the bodies. A body may itself
+    /// instantiate a new generic; with the flag clear that instantiation builds
+    /// fully in place rather than queueing, so the queue drains to empty.
+    /// Declare `function` in the current module's LLVM module and return the
+    /// external declaration value. Mirrors the per-module declaration the
+    /// import path creates, including gc-leaf marking, so a call emitted in a
+    /// module that never imported the function still resolves. `owner` is the
+    /// module that owns the function definition, used to lower its type.
+    pub fn declare_function_in_current(
+        &mut self,
+        function: &CodegenFunction,
+        owner: &Arc<RwLock<CodegenModule>>,
+    ) -> CodegenValue {
+        let function_type = function.get_type();
+        let variadic = function.visibility.variadic;
+        let external = function.visibility.external;
+        let gc_safepoint = function.visibility.gc_safepoint;
+        let qualified_name = function.qualified_name.clone();
+
+        // Lower the function type in its owner's module, as the import path
+        // does, so the signature matches the definition.
+        self.module_context
+            .move_to_module(owner.clone(), false, false);
+        let function_llvm_type = self
+            .get_llvm_type_full(&function_type, true, variadic)
+            .unwrap();
+        self.module_context.move_out_of_module();
+
+        let current_module = {
+            let post_stack = self.module_context.step_back_generics();
+            let module = self.module_context.current_module();
+            self.module_context.step_forward(post_stack);
+            module
+        };
+
+        let function_qualified_name = cstr(qualified_name.to_string(!external));
+        let llvm_module = current_module
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        // Reuse an existing declaration of this symbol in the module rather than
+        // adding a second one (LLVM would rename the duplicate), so declaring on
+        // demand is idempotent.
+        let existing = unsafe {
+            core::LLVMGetNamedFunction(llvm_module, function_qualified_name.as_ptr())
+        };
+        if !existing.is_null() {
+            return CodegenValue::new(existing, function_type);
+        }
+        let new_function_value = CodegenValue::new(
+            unsafe {
+                core::LLVMAddFunction(
+                    llvm_module,
+                    function_qualified_name.as_ptr(),
+                    function_llvm_type,
+                )
+            },
+            function_type,
+        );
+        unsafe {
+            core::LLVMSetLinkage(
+                new_function_value.llvm_value,
+                llvm_sys_180::LLVMLinkage::LLVMExternalLinkage,
+            );
+        }
+
+        // The allocation entrypoints always collect and so are never gc-leaf;
+        // every other external function is leaf unless declared gcsafe. This
+        // mirrors the marking applied where the function is first declared.
+        let unmangled_name = qualified_name.to_string(false);
+        let is_gc_alloc_entrypoint =
+            unmangled_name == "peko_gc_alloc_object" || unmangled_name == "peko_gc_alloc";
+        if external && !gc_safepoint && !is_gc_alloc_entrypoint {
+            crate::codegen::builders::functions::set_gc_leaf_attribute(
+                new_function_value.llvm_value,
+            );
+        }
+
+        new_function_value
+    }
+
+    pub fn drain_pending_generic_class_bodies(&mut self) {
+        let previously_building_signatures = self.building_class_signatures;
+        self.building_class_signatures = false;
+        while let Some((generic, type_parameters, owning_module)) =
+            self.pending_generic_class_bodies.pop()
+        {
+            // Restore the owning module so the body pass finds the method
+            // functions keyed under it, then unwind it afterward.
+            self.module_context
+                .move_to_module(owning_module, false, false);
+            self.create_generic_class(&generic, type_parameters);
+            self.module_context.move_out_of_module();
+        }
+        self.building_class_signatures = previously_building_signatures;
+    }
+
+    /// The restraints on a generic-parameter value. Prefers the bounds the
+    /// value's own type carries; when those are empty (a value derived through a
+    /// field load or index can drop them), it falls back to the authoritative
+    /// carrier installed in the current generic context.
+    pub fn generic_param_restraints(&self, value_type: &PekoType) -> Vec<TypeRestraint> {
+        if !value_type.restraints().is_empty() {
+            return value_type.restraints().to_vec();
+        }
+        self.get_generic_types()
+            .get(value_type.name())
+            .map(|carrier| carrier.restraints().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Map each of an erased generic class's typenames to the concrete generic
+    /// argument at the same position in `object_type`. Used to substitute a
+    /// class's member types at a use site (for example `KT -> string`,
+    /// `VT -> number` for an instance of `Map<string, number>`).
+    fn class_generic_substitution(
+        &mut self,
+        class: &CodegenClass,
+        object_type: &PekoType,
+    ) -> HashMap<String, PekoType> {
+        let mut substitution = HashMap::new();
+        for (typename, concrete) in class
+            .generic_typenames
+            .iter()
+            .zip(object_type.generics().iter())
+        {
+            if let Some(expanded) = self.expand_type(concrete) {
+                substitution.insert(typename.value.clone(), expanded);
+            }
+        }
+        substitution
+    }
+
+    /// Calls a `static` trait method at the type level: `Type::method(args)`.
+    ///
+    /// A static method has no receiver, so the concrete type is known here. The
+    /// method is dispatched directly through its own symbol (like a
+    /// constructor), not through a vtable, and its arguments carry no `this`.
+    /// The method's return type was bound to the concrete class when it was
+    /// registered, so `Self` already reads as that class.
+    pub fn call_static_method(
+        &mut self,
+        class_type: &PekoType,
+        method_name: impl ToString,
+        arguments: Vec<CodegenValue>,
+    ) -> Result<CodegenValue, String> {
+        let method_name_str = method_name.to_string();
+
+        let class = match self.get_class_by_type(class_type) {
+            Some(class) => class,
+            None => return Err(format!("could not find type '{class_type}'")),
+        };
+
+        let method_options: Vec<CodegenFunction> = if class
+            .main_virtual_table
+            .methods
+            .contains_key(&method_name_str)
+        {
+            class.main_virtual_table.methods[&method_name_str]
+                .iter()
+                .map(|option| option.read().unwrap().clone())
+                .filter(|function| function.is_static)
+                .collect()
+        } else {
+            return Err(format!(
+                "no static method '{method_name_str}' on type '{class_type}'"
+            ));
+        };
+
+        if method_options.is_empty() {
+            return Err(format!(
+                "no static method '{method_name_str}' on type '{class_type}'"
+            ));
+        }
+
+        let argument_types: Vec<PekoType> =
+            arguments.iter().map(|arg| arg.value_type.clone()).collect();
+
+        let method = match self.choose_function(method_options, argument_types, None, true) {
+            Some(method) => method,
+            None => {
+                return Err(format!(
+                    "incorrect argument types for static method '{method_name_str}'"
+                ));
+            }
+        };
+
+        // Resolve the method's own symbol, declaring it on demand when the
+        // current module has not imported it, mirroring the method-body path.
+        let owning_uuid = self.get_owning_module_uuid();
+        let function_value = match method.function_value.get(&owning_uuid) {
+            Some(value) => value.clone(),
+            None => {
+                let owner = method.parent.clone();
+                self.declare_function_in_current(&method, &owner)
+            }
+        };
+
+        // Box each argument to its declared parameter type. There is no `this`,
+        // so the arguments align one-to-one with the method's parameters.
+        let mut boxed_arguments = Vec::new();
+        for (argument, (_, parameter)) in itertools::izip!(&arguments, &method.arguments) {
+            let boxed = match self.box_value_to_type(&parameter.argument_type, argument) {
+                Some(value) => value,
+                None => {
+                    return Err(format!(
+                        "incorrect argument types for static method '{method_name_str}' (expected '{}' but got '{}')",
+                        parameter.argument_type, argument.value_type
+                    ));
+                }
+            };
+            boxed_arguments.push(boxed);
+        }
+
+        Ok(self.call_function(
+            &method.get_type(),
+            false,
+            function_value.llvm_value,
+            boxed_arguments,
+        ))
+    }
 }
 
 impl
@@ -189,11 +506,9 @@ impl
         CodegenVariable,
         CodegenFunction,
         CodegenArg,
-        CodegenFunctionGeneric,
         CodegenClass,
         CodegenVirtualTable,
         CodegenClassAttribute,
-        CodegenClassGeneric,
     > for PekoCodegenContext
 {
     fn get_module_context(&self) -> &ExecutionModuleContext<CodegenModule> {
@@ -235,64 +550,80 @@ impl
     /// Generates a generic function with the provided type parameters.
     fn create_generic_function(
         &mut self,
-        generic: &CodegenFunctionGeneric,
+        generic: &CodegenFunction,
         type_parameters: Vec<PekoType>,
     ) -> Option<CodegenFunction> {
-        let mut type_parameters_expanded = Vec::new();
+        // The template carries its source AST; a non-template function cannot be
+        // instantiated.
+        let source = generic.source_function.clone()?;
 
-        // Build the specialized function name with the type parameters
-        // appended in angle brackets.
-        let mut generic_function_name = generic.function.function_name.clone();
-        generic_function_name.value.push('<');
-
-        let post_stack = self.module_context.step_back();
-        for parameter in type_parameters {
-            let type_expanded = self.expand_type(&parameter)?;
-
-            type_parameters_expanded.push(type_expanded.clone());
-
-            generic_function_name
-                .value
-                .push_str(type_expanded.to_string().as_str());
-            generic_function_name.value.push_str(", ");
-        }
-        self.module_context.step_forward(post_stack);
-
-        // Strip trailing ", " and close the bracket.
-        generic_function_name.value.pop();
-        generic_function_name.value.pop();
-        generic_function_name.value.push('>');
-
-        if type_parameters_expanded.len() != generic.generic_typenames.len() {
+        // An erased generic function compiles ONCE. Its compiled name carries
+        // the generic typenames, not the concrete arguments, so every
+        // instantiation resolves to the single body. The arguments only gate
+        // arity here.
+        if type_parameters.len() != generic.generic_typenames.len() {
             return None;
         }
 
-        // Map the generic typenames to their concrete values.
-        // ex: class Generic<T> {...} | Generic<String> ~ T -> String
-        let mut new_generic_types = HashMap::new();
-        for (type_name, generic_type) in generic
+        let typenames: Vec<String> = generic
             .generic_typenames
             .iter()
-            .zip(type_parameters_expanded.iter())
+            .map(|name| name.value.clone())
+            .collect();
+        let mut generic_function_name = source.function_name.clone();
+        generic_function_name.value =
+            erased_generic_symbol(&generic_function_name.value, &typenames);
+
+        // The body was already compiled under this erased name; reuse it rather
+        // than emitting a second LLVM definition of the same symbol.
+        if let Some(existing) = generic
+            .parent
+            .read()
+            .unwrap()
+            .get_functions()
+            .get(&generic_function_name.value)
         {
-            new_generic_types.insert(type_name.value.clone(), generic_type.clone());
+            return Some(existing[0].read().unwrap().clone());
+        }
+
+        // Map each generic typename to its bounded carrier: a thin object whose
+        // restraints (the function's `impl`/`from` bounds) drive dispatch. The
+        // body is compiled against these carriers, not any concrete type.
+        let mut new_generic_types = HashMap::new();
+        for type_name in &generic.generic_typenames {
+            new_generic_types.insert(
+                type_name.value.clone(),
+                PekoType::generic_type(
+                    type_name.value.clone(),
+                    source
+                        .generic_bounds
+                        .get(&type_name.value)
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
         }
 
         let previous_context_generic_types = self.get_generic_types().clone();
         self.get_generic_types_mut().clear();
         self.get_generic_types_mut().extend(new_generic_types);
 
-        let mut generic_function = generic.function.clone();
+        let mut generic_function = source.clone();
         generic_function.function_name = generic_function_name.clone();
 
         let context = self.snapshot_context();
 
         self.module_context
-            .move_to_module(generic.module.clone(), false, true);
+            .move_to_module(generic.parent.clone(), false, true);
         let module = self.module_context.current_module().clone();
 
         generic_function.generic_types.clear();
+        // An instantiation may be requested while the signature pass is active;
+        // the erased body must still be fully emitted, not stopped short.
+        let previous_signatures_only = self.declaring_signatures_only;
+        self.declaring_signatures_only = false;
         generic_function.build_value(self);
+        self.declaring_signatures_only = previous_signatures_only;
 
         self.module_context.move_out_of_module();
 
@@ -460,66 +791,246 @@ impl
     /// Generates a generic class with the provided type parameters.
     fn create_generic_class(
         &mut self,
-        generic: &CodegenClassGeneric,
+        generic: &CodegenClass,
         type_parameters: Vec<PekoType>,
     ) -> Option<CodegenClass> {
+        // The template carries its source AST; a non-template class cannot be
+        // instantiated.
+        let source = generic.source_class.clone()?;
+
+        // Box is the one generic the compiler monomorphizes: each Box<T> is a
+        // distinct class laid out with T's real representation (so a raw FFI
+        // value fits) and a descriptor that traces the held value only when T
+        // is managed. Every other generic erases to one shared compiled class.
+        let monomorphize = source.class_name.value == "Box";
+
+        // Expand the concrete type parameters only to gate arity and to record
+        // the deferred body instantiation; the erased class is shared, so the
+        // arguments do not select a body.
         let mut type_parameters_expanded = Vec::new();
-
-        let mut generic_class_name = generic.class.class_name.clone();
-        generic_class_name.value.push('<');
-
         let post_stack = self.module_context.step_back();
         for parameter in type_parameters {
-            let type_expanded = self.expand_type(&parameter)?;
-
-            type_parameters_expanded.push(type_expanded.clone());
-
-            generic_class_name
-                .value
-                .push_str(type_expanded.to_string().as_str());
-            generic_class_name.value.push_str(", ");
+            type_parameters_expanded.push(self.expand_type(&parameter)?);
         }
         self.module_context.step_forward(post_stack);
-
-        generic_class_name.value.pop();
-        generic_class_name.value.pop();
-        generic_class_name.value.push('>');
 
         if type_parameters_expanded.len() != generic.generic_typenames.len() {
             return None;
         }
 
-        let mut new_generic_types = HashMap::new();
-        for (type_name, generic_type) in generic
+        // An erased generic class compiles ONCE under a name carrying its
+        // generic typenames. Every instantiation resolves to this one struct,
+        // descriptor, vtable, and TypeInfo.
+        let typenames: Vec<String> = generic
             .generic_typenames
             .iter()
-            .zip(type_parameters_expanded.iter())
+            .map(|name| name.value.clone())
+            .collect();
+        let mut generic_class_name = source.class_name.clone();
+        // A monomorphized class is named by its concrete type arguments so each
+        // instantiation is distinct; an erased class is named by its parameter
+        // names so every instantiation shares it.
+        let name_components: Vec<String> = if monomorphize {
+            type_parameters_expanded
+                .iter()
+                .map(|parameter| parameter.to_string())
+                .collect()
+        } else {
+            typenames.clone()
+        };
+        generic_class_name.value =
+            erased_generic_symbol(&generic_class_name.value, &name_components);
+
+        // Cached classes: a fully-built erased class is reused as-is; a
+        // signatures-only class is reused while still in the signature pass
+        // (its bodies arrive through the deferred drain). Re-emitting a built
+        // class would redefine its method bodies.
+        match self.erased_generic_classes.get(&generic_class_name.value) {
+            Some(true) => {
+                return Some(
+                    generic.parent.read().unwrap().get_classes()
+                        [&generic_class_name.value]
+                        .read()
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            Some(false) if self.building_class_signatures => {
+                return Some(
+                    generic.parent.read().unwrap().get_classes()
+                        [&generic_class_name.value]
+                        .read()
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            _ => {}
+        }
+
+        // Re-entrant self-referential instantiation: a generic whose own field
+        // is the same erased generic (a linked list node, or Option carrying an
+        // Option) re-enters here while still laying out. Its struct shell is
+        // already declared in the module, so return it to break the cycle; the
+        // field lays out as a pointer to the shell.
+        if self
+            .generic_instantiations_in_progress
+            .contains(&generic_class_name.value)
+            && let Some(existing) = generic
+                .parent
+                .read()
+                .unwrap()
+                .get_classes()
+                .get(&generic_class_name.value)
         {
-            new_generic_types.insert(
-                type_name.value.clone(),
-                self.expand_type(generic_type).unwrap(),
-            );
+            return Some(existing.read().unwrap().clone());
+        }
+
+        // Map each generic typename to its bound type. A monomorphized class
+        // binds the concrete type argument, so its fields lay out with the real
+        // representation. An erased class binds a bounded carrier: a thin object
+        // whose restraints (the class's `impl`/`from` bounds) drive dispatch.
+        let mut new_generic_types = HashMap::new();
+        for (index, type_name) in generic.generic_typenames.iter().enumerate() {
+            let bound_type = if monomorphize {
+                type_parameters_expanded[index].clone()
+            } else {
+                PekoType::generic_type(
+                    type_name.value.clone(),
+                    source
+                        .generic_bounds
+                        .get(&type_name.value)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            };
+            new_generic_types.insert(type_name.value.clone(), bound_type);
         }
 
         let previous_context_generic_types = self.generic_types.clone();
         self.generic_types.clear();
         self.generic_types.extend(new_generic_types);
 
-        let mut generic_class = generic.class.clone();
+        let mut generic_class = source.clone();
         generic_class.class_name = generic_class_name.clone();
 
         let context = self.snapshot_context();
 
         self.module_context
-            .move_to_module(generic.module.clone(), false, true);
+            .move_to_module(generic.parent.clone(), false, true);
         let module = self.module_context.current_module().clone();
 
+        // Mark this erased name in progress so a self-referential field that
+        // re-enters create_generic_class returns the in-progress shell rather
+        // than recursing forever.
+        self.generic_instantiations_in_progress
+            .insert(generic_class_name.value.clone());
+
+        // An instantiation may be requested while the signature pass is active;
+        // the class body must still be fully emitted, not stopped short.
+        let previous_signatures_only = self.declaring_signatures_only;
+        self.declaring_signatures_only = false;
         generic_class.build_value(self);
+        self.declaring_signatures_only = previous_signatures_only;
+
+        self.generic_instantiations_in_progress
+            .remove(&generic_class_name.value);
 
         self.module_context.move_out_of_module();
 
         let class_reference =
             module.read().unwrap().get_classes()[&generic_class_name.value].clone();
+
+        // Record the generic typenames so a use site can substitute them
+        // against an instance's concrete generic arguments.
+        class_reference.write().unwrap().generic_typenames = generic.generic_typenames.clone();
+
+        // Rewrite the class type's generic arguments. A monomorphized class
+        // keeps its concrete arguments so it resolves and sizes by them. An
+        // erased class rewrites them to bounded carriers so the one compiled
+        // class resolves and sizes anywhere without its generic context
+        // installed; the mangled name is unchanged, a carrier mangling to its
+        // parameter name.
+        {
+            let mut class_type = class_reference.read().unwrap().class_type.clone();
+            for (index, (generic, typename)) in class_type
+                .generics_mut()
+                .iter_mut()
+                .zip(typenames.iter())
+                .enumerate()
+            {
+                *generic = if monomorphize {
+                    type_parameters_expanded[index].clone()
+                } else {
+                    PekoType::generic_type(typename.clone(), generic.restraints().to_vec())
+                };
+            }
+            class_reference.write().unwrap().class_type = class_type;
+        }
+
+        // Make every stored member type self-describing. A monomorphized class
+        // rewrites bare parameter names to the concrete arguments, so a field or
+        // method is typed in T's real representation. An erased class rewrites
+        // them to bounded carriers, so a parameter-typed member resolves outside
+        // the class's generic context and keeps its bounds for dispatch.
+        {
+            let carriers: HashMap<String, PekoType> = if monomorphize {
+                generic
+                    .generic_typenames
+                    .iter()
+                    .enumerate()
+                    .map(|(index, typename)| {
+                        (typename.value.clone(), type_parameters_expanded[index].clone())
+                    })
+                    .collect()
+            } else {
+                typenames
+                    .iter()
+                    .map(|typename| {
+                        (
+                            typename.clone(),
+                            PekoType::generic_type(
+                                typename.clone(),
+                                source
+                                    .generic_bounds
+                                    .get(typename)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            ),
+                        )
+                    })
+                    .collect()
+            };
+
+            let method_options: Vec<Arc<RwLock<CodegenFunction>>> = {
+                let class_read = class_reference.read().unwrap();
+                class_read
+                    .main_virtual_table
+                    .methods
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect()
+            };
+            for option in method_options {
+                let mut function = option.write().unwrap();
+                function.return_type =
+                    substitute_generic_params(&function.return_type, &carriers);
+                for (_, argument) in function.arguments.iter_mut() {
+                    argument.argument_type =
+                        substitute_generic_params(&argument.argument_type, &carriers);
+                }
+                if let Some(var_args) = function.var_args_type.clone() {
+                    function.var_args_type =
+                        Some(substitute_generic_params(&var_args, &carriers));
+                }
+            }
+
+            let mut class_write = class_reference.write().unwrap();
+            for (_, attribute) in class_write.attributes.iter_mut() {
+                attribute.attribute_type =
+                    substitute_generic_params(&attribute.attribute_type, &carriers);
+            }
+        }
 
         let class_type = class_reference.read().unwrap().class_type.clone();
         let class_type_string = class_type.to_string();
@@ -626,8 +1137,19 @@ impl
                 self.module_context
                     .move_to_module(module.clone(), false, false);
 
+                // Substitute the erased class's generic parameters to bare
+                // carriers so the method type lowers outside the class's own
+                // generic context.
+                let lowering_type = if typenames.is_empty() {
+                    option_type.clone()
+                } else {
+                    substitute_generic_params(
+                        &option_type,
+                        &class_carrier_substitution(&generic.generic_typenames),
+                    )
+                };
                 let function_llvm_type = self
-                    .get_llvm_type_full(&option_type, true, option_variadic)
+                    .get_llvm_type_full(&lowering_type, true, option_variadic)
                     .unwrap();
 
                 self.module_context.move_out_of_module();
@@ -744,6 +1266,28 @@ impl
         self.generic_types.clear();
         self.generic_types.extend(previous_context_generic_types);
 
+        // A signature-pass instantiation laid out the class and declared its
+        // methods, but `build_value` skipped the bodies. Defer the body build
+        // until every class is laid out by recording the instantiation along
+        // with the module that owns its method declarations (the module
+        // current now that the instantiation's own frame is unwound).
+        if self.building_class_signatures {
+            let owning_module = self.module_context.current_module();
+            self.pending_generic_class_bodies.push((
+                generic.clone(),
+                type_parameters_expanded.clone(),
+                owning_module,
+            ));
+        }
+
+        // Record the build state: signatures only during the signature pass,
+        // bodies otherwise. A later use site reuses the cached class instead of
+        // re-emitting its method bodies.
+        self.erased_generic_classes.insert(
+            generic_class_name.value.clone(),
+            !self.building_class_signatures,
+        );
+
         Some(class_reference.read().unwrap().clone())
     }
 
@@ -753,6 +1297,21 @@ impl
         lhs: &CodegenValue,
         rhs: &CodegenValue,
     ) -> Option<CodegenValue> {
+        // Enum-to-enum `==` / `!=`, checked before expansion because a bare
+        // cross-module enum value does not expand in the importing module. Both
+        // lower to an i32 variant index, and a qualified enum type and a bare
+        // reference to the same enum compare equal.
+        let operator_early = operator.to_string();
+        if matches!(operator_early.as_str(), "==" | "!=")
+            && self.enum_types_match(&lhs.value_type, &rhs.value_type)
+        {
+            return Some(self.build_int_operation(
+                NumericalOperation::from(&operator_early).unwrap(),
+                lhs,
+                rhs,
+            ));
+        }
+
         let lhs_type = self.expand_type(&lhs.value_type)?;
         let rhs_type = self.expand_type(&rhs.value_type)?;
 
@@ -772,6 +1331,49 @@ impl
         }
 
         let operator_str = operator.to_string();
+
+        // An operator on an erased generic-parameter operand routes to the
+        // operand's bound trait method (`==` -> Equals.equals, `+` -> Plus.plus,
+        // and so on), dispatched through the runtime itable scan on the thin
+        // object. The bound must declare the operator's trait method.
+        if lhs.value_type.is_generic_param()
+            && let Some(method_name) = peko_core::types::operator_trait_method(&operator_str)
+        {
+            let restraints = self.generic_param_restraints(&lhs.value_type);
+            for restraint in &restraints {
+                if let TypeRestraint::Impl(trait_type) = restraint
+                    && self
+                        .get_trait(trait_type.name())
+                        .map(|trait_definition| {
+                            trait_definition
+                                .methods
+                                .iter()
+                                .any(|method| method.name == method_name)
+                        })
+                        .unwrap_or(false)
+                {
+                    return Some(self.call_trait_method_erased(
+                        &lhs,
+                        trait_type,
+                        method_name,
+                        vec![rhs.clone()],
+                    ));
+                }
+            }
+        }
+
+        // An enum value lowers to its i32 variant index, so `==` / `!=` between
+        // two enum values compares those indices in machine code.
+        if matches!(operator_str.as_str(), "==" | "!=")
+            && self.get_enum_variants(lhs.value_type.name()).is_some()
+            && self.get_enum_variants(rhs.value_type.name()).is_some()
+        {
+            return Some(self.build_int_operation(
+                NumericalOperation::from(&operator_str).unwrap(),
+                &lhs,
+                &rhs,
+            ));
+        }
 
         // `&&` / `||` between bool and i1 (any mix) reduce both operands to raw
         // i1 and combine in machine code, bypassing the And/Or trait.
@@ -932,8 +1534,15 @@ impl
         }
 
         // Pick the best-matching overload from the function's option set.
-        let function_to_call = self.choose_function(
-            next_module.read().unwrap().get_functions()[function_name_type.name()]
+        let function_options: Vec<Arc<RwLock<CodegenFunction>>> = next_module
+            .read()
+            .unwrap()
+            .get_functions()[function_name_type.name()]
+            .iter()
+            .map(Arc::clone)
+            .collect();
+        let mut function_to_call = self.choose_function(
+            function_options
                 .iter()
                 .map(|option| option.read().unwrap().clone())
                 .collect(),
@@ -973,8 +1582,27 @@ impl
             .unwrap();
         self.module_context.step_forward(post_stack);
 
+        // The current module may not yet hold a declaration of the chosen
+        // function (it was declared in another module, and the import that
+        // would mirror it here did not run before this call - a deferred
+        // generic body reaching an extern entrypoint, for example). Create the
+        // per-module declaration on demand, mirroring the import path, and
+        // record it on the shared function so later calls reuse it.
         if !function_to_call.function_value.contains_key(&uuid) {
-            println!("{} in {uuid}", function_name.to_string());
+            let function_value = self.declare_function_in_current(&function_to_call, &next_module);
+            function_to_call
+                .function_value
+                .insert(uuid.clone(), function_value.clone());
+            let chosen_name = function_to_call.qualified_name.to_string(true);
+            for option in &function_options {
+                if option.read().unwrap().qualified_name.to_string(true) == chosen_name {
+                    option
+                        .write()
+                        .unwrap()
+                        .function_value
+                        .insert(uuid.clone(), function_value.clone());
+                }
+            }
         }
 
         Some(self.call_function(
@@ -1067,6 +1695,20 @@ impl
             None
         };
 
+        // An erased class's method is typed in the class's generic parameters;
+        // substitute them to bare carriers so the function type lowers (each
+        // parameter to a thin managed pointer, matching the compiled body).
+        let method_lowering_type = if object_class.generic_typenames.is_empty() {
+            method.get_type()
+        } else {
+            crate::codegen::context::substitute_generic_params(
+                &method.get_type(),
+                &crate::codegen::context::class_carrier_substitution(
+                    &object_class.generic_typenames,
+                ),
+            )
+        };
+
         let object_vtable_method = match direct_constructor_value {
             Some(direct_value) => direct_value,
             None => {
@@ -1074,7 +1716,7 @@ impl
                 self.get_vtable_method(
                     &object_vtable,
                     object_class.main_virtual_table.llvm_type,
-                    &method.get_type(),
+                    &method_lowering_type,
                     method.virtual_table_index,
                     true,
                 )
@@ -1172,12 +1814,77 @@ impl
             boxed_arguments.insert(0, arguments[0].clone());
         }
 
-        let function_call = self.call_function(
-            &method.get_type(),
+        let mut function_call = self.call_function(
+            &method_lowering_type,
             false,
             object_vtable_method.llvm_value,
             boxed_arguments,
         );
+
+        // Whether the method's declared return type is a bare generic parameter
+        // (for example `Option<T>.unwrap() => T`). Such a result comes straight
+        // out of an erased slot, so if it resolves to an enum below it is a
+        // Box<i32> cell that must be unboxed.
+        let return_was_carrier = method.return_type.is_generic_param();
+
+        // Use-site substitution: an erased generic class's methods are typed in
+        // its generic parameters. Retype the result with the object's concrete
+        // generic arguments, so a caller of `Map<string, number>.get` observes
+        // `Option<number>` rather than `Option<VT>`.
+        if !object_class.generic_typenames.is_empty() {
+            let substitution = self.class_generic_substitution(&object_class, &object.value_type);
+            function_call.value_type = crate::codegen::context::substitute_generic_params(
+                &function_call.value_type,
+                &substitution,
+            );
+        }
+
+        // Method-level generics: infer each parameter the method declares itself
+        // by unifying its declared argument types against the supplied ones, then
+        // substitute into the result. So a caller of
+        // `Array<number>.map(closure(x) => ...)` observes the mapped element type.
+        if !method.method_generic_typenames.is_empty() {
+            let method_names: HashSet<String> = method
+                .method_generic_typenames
+                .iter()
+                .map(|name| name.value.clone())
+                .collect();
+            let mut method_substitution = HashMap::new();
+            for ((_, declared), actual) in method
+                .arguments
+                .iter()
+                .skip(1)
+                .zip(argument_types.iter().skip(1))
+            {
+                crate::codegen::context::infer_generic_bindings(
+                    &declared.argument_type,
+                    actual,
+                    &method_names,
+                    &mut method_substitution,
+                );
+            }
+            if !method_substitution.is_empty() {
+                function_call.value_type = crate::codegen::context::substitute_generic_params(
+                    &function_call.value_type,
+                    &method_substitution,
+                );
+            }
+        }
+
+        // Unbox an enum that came out of an erased slot: the method returned a
+        // bare carrier that resolved to an enum, so the value is a Box<i32> cell
+        // whose i32 must be recovered to match the enum's representation.
+        if return_was_carrier
+            && function_call.value_type.array_depth == 0
+            && self
+                .get_enum_variants(function_call.value_type.name())
+                .is_some()
+        {
+            let enum_type = function_call.value_type.clone();
+            if let Some(unboxed) = self.unbox_enum_value(&function_call, &enum_type) {
+                function_call = unboxed;
+            }
+        }
 
         // State-change notification: if this method mutates state on a
         // primary object that has an accessed state, notify the primary
@@ -1294,9 +2001,19 @@ impl
         };
         self.primary_object = Some(object.clone());
 
+        // Use-site substitution: a field typed in an erased generic class's
+        // parameters takes the object's concrete generic argument, so
+        // `Box<number>.value` reads as `number` rather than the parameter.
+        let mut attribute_type = class.attributes[&attribute_name_str].attribute_type.clone();
+        if !class.generic_typenames.is_empty() {
+            let substitution = self.class_generic_substitution(&class, &object.value_type);
+            attribute_type =
+                crate::codegen::context::substitute_generic_params(&attribute_type, &substitution);
+        }
+
         let element_access = self.get_struct_element(
             object,
-            &class.attributes[&attribute_name_str].attribute_type,
+            &attribute_type,
             class.attributes[&attribute_name_str].struct_index,
         );
 
@@ -1321,12 +2038,7 @@ impl
 
         for (key, value) in &key_value_pairs {
             if self
-                .call_object_method(
-                    &map_object,
-                    "insert",
-                    vec![key.clone(), value.clone()],
-                    None,
-                )
+                .call_object_method(&map_object, "set", vec![key.clone(), value.clone()], None)
                 .is_err()
             {
                 return None;

@@ -1,0 +1,46 @@
+# Toolchain description for Windows on x86_64.
+#
+# Paths are relative to this file's directory. Windows has a single
+# architecture, so there is no arch subdirectory. The flags below build a
+# console program.
+
+[toolchain]
+id = "windows-x86_64"
+target = "windows"
+arch = "x86_64"
+triple = "x86_64-pc-win32"
+
+[build]
+cxx_std = "c++17"
+c_flags = [
+  "-Wno-microsoft-anon-tag",
+  "-Wno-ignored-pragma-intrinsic",
+  "-Wno-ignored-attributes",
+  "-Wno-pragma-pack",
+  "-Wno-nonportable-include-path",
+  "-D_DLL",
+]
+objc_flags = []
+include = [
+  "msvc-inc",
+  "msvc-inc/msclr",
+  "ucrt-inc",
+  "um-inc",
+  "shared-inc",
+  "winrt-inc",
+  "webview2/build/native/include",
+]
+
+[link]
+driver = "lld-link"
+lib_paths = [
+  "msvc-lib",
+  "ucrt-lib",
+  "um-lib",
+  "atlmfc-lib",
+  "win-lib",
+]
+libs = ["ucrt", "msvcrt", "shell32", "shlwapi", "user32", "ws2_32"]
+frameworks = []
+objects = []
+flags = ["-machine:x64", "-subsystem:console", "-nologo"]

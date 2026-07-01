@@ -237,16 +237,8 @@ impl PekoAnalyzer {
             for (name, class) in &source.classes {
                 destination.classes.insert(name.clone(), class.clone());
             }
-            for (name, generic) in &source.function_generics {
-                destination
-                    .function_generics
-                    .insert(name.clone(), generic.clone());
-            }
-            for (name, generic) in &source.class_generics {
-                destination
-                    .class_generics
-                    .insert(name.clone(), generic.clone());
-            }
+            // Generic templates live in the function and class maps, so they
+            // are copied above.
         }
 
         simulator_context

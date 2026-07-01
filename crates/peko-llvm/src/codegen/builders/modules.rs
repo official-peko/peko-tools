@@ -26,6 +26,7 @@ use llvm_sys_180::core;
 use llvm_sys_180::prelude::LLVMModuleRef;
 use llvm_sys_180::target_machine::LLVMTargetRef;
 use peko_core::asts::data_structures::{PositionedValue, UnpackItem};
+use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::target::{OperatingSystem, PekoTarget};
 use peko_core::types::PekoType;
@@ -225,6 +226,30 @@ impl ModuleManager for PekoCodegenContext {
                 .insert(variable_name, Arc::clone(&variable));
         }
 
+        // Import traits. A trait is stored by value and resolved by name
+        // through the module's trait map, so copy each entry. Without this a
+        // bound-driven dispatch in this module (an `impl Trait` operator or
+        // method on an erased generic parameter) cannot find a trait that an
+        // imported module declares.
+        let imported_traits = from.read().unwrap().traits.clone();
+        for (trait_name, trait_definition) in imported_traits {
+            if to.read().unwrap().traits.contains_key(&trait_name) {
+                continue;
+            }
+            to.write().unwrap().traits.insert(trait_name, trait_definition);
+        }
+
+        // Import enums. Like traits, an enum is stored by value and resolved by
+        // name; copy each entry so an enum type an imported module declares (a
+        // token kind, a json value tag) resolves and compares in this module.
+        let imported_enums = from.read().unwrap().enums.clone();
+        for (enum_name, variants) in imported_enums {
+            if to.read().unwrap().enums.contains_key(&enum_name) {
+                continue;
+            }
+            to.write().unwrap().enums.insert(enum_name, variants);
+        }
+
         // Import global functions.
         let functions = from.read().unwrap().functions.clone();
         for (function_name, function_options) in functions {
@@ -358,6 +383,7 @@ impl ModuleManager for PekoCodegenContext {
 
             let class_type = class.read().unwrap().class_type.clone();
             let class_type_string = class_type.to_string();
+            let class_typenames = class.read().unwrap().generic_typenames.clone();
 
             for (method_name, option) in method_entries {
                 let to_uuid = to.read().unwrap().get_uuid().as_ref().unwrap().clone();
@@ -387,8 +413,20 @@ impl ModuleManager for PekoCodegenContext {
                 self.module_context
                     .move_to_module(from.clone(), false, false);
 
+                // An erased generic class's methods are typed in its generic
+                // parameters; substitute them to bare carriers so the type
+                // lowers (each parameter to a thin managed pointer) outside the
+                // class's own generic context.
+                let lowering_type = if class_typenames.is_empty() {
+                    option_type.clone()
+                } else {
+                    crate::codegen::context::substitute_generic_params(
+                        &option_type,
+                        &crate::codegen::context::class_carrier_substitution(&class_typenames),
+                    )
+                };
                 let function_llvm_type = self
-                    .get_llvm_type_full(&option_type, true, option_variadic)
+                    .get_llvm_type_full(&lowering_type, true, option_variadic)
                     .unwrap();
 
                 self.module_context.move_out_of_module();
@@ -557,65 +595,8 @@ impl ModuleManager for PekoCodegenContext {
                 .insert(class_name, Arc::clone(&class));
         }
 
-        // Import function generic templates.
-        for (function_name, function) in from.read().unwrap().function_generics.clone() {
-            let function_module = function.read().unwrap().module.clone();
-            if (!is_extern_import && function_module.read().unwrap().get_uuid() != from_top_uuid)
-                || unpacked_symbols.is_empty()
-                || (!unpack_all
-                    && !current_symbols
-                        .contains(&PositionedValue::create_no_position(function_name.clone())))
-            {
-                continue;
-            }
-
-            if !current_symbols.is_empty() {
-                current_symbols.remove(
-                    current_symbols
-                        .iter()
-                        .find_position(|symbol_name| {
-                            symbol_name
-                                == &&PositionedValue::create_no_position(function_name.clone())
-                        })
-                        .unwrap()
-                        .0,
-                );
-            }
-
-            to.write()
-                .unwrap()
-                .function_generics
-                .insert(function_name, Arc::clone(&function));
-        }
-
-        // Import class generic templates.
-        for (class_name, class) in from.read().unwrap().class_generics.clone() {
-            let class_module = class.read().unwrap().module.clone();
-            if (!is_extern_import && class_module.read().unwrap().get_uuid() != from_top_uuid)
-                || unpacked_symbols.is_empty()
-                || (!unpack_all
-                    && !current_symbols
-                        .contains(&PositionedValue::create_no_position(class_name.clone())))
-            {
-                continue;
-            }
-            if !current_symbols.is_empty() {
-                current_symbols.remove(
-                    current_symbols
-                        .iter()
-                        .find_position(|symbol_name| {
-                            symbol_name == &&PositionedValue::create_no_position(class_name.clone())
-                        })
-                        .unwrap()
-                        .0,
-                );
-            }
-
-            to.write()
-                .unwrap()
-                .class_generics
-                .insert(class_name, Arc::clone(&class));
-        }
+        // Generic templates are stored in the normal function and class maps
+        // (under their bare names) and so are imported by the blocks above.
 
         // Recurse into submodules.
         for (module_name, submodule) in from.read().unwrap().modules.clone() {
@@ -739,7 +720,16 @@ impl ModuleManager for PekoCodegenContext {
 
         let final_module = unsafe { core::LLVMModuleCreateWithName(c"main".as_ptr()) };
 
+        // A source file bound under two names appears twice in the registry as
+        // the same module. Link each underlying source once so its symbols are
+        // not defined twice in the final module.
+        let mut linked_files = std::collections::HashSet::new();
         for (_, module) in &self.module_context.top_level_modules {
+            let module_file = module.read().unwrap().get_file().to_path_buf();
+            let module_file = module_file.canonicalize().unwrap_or(module_file);
+            if !linked_files.insert(module_file) {
+                continue;
+            }
             unsafe {
                 llvm_sys_180::linker::LLVMLinkModules2(
                     final_module,

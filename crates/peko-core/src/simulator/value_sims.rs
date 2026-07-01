@@ -124,10 +124,14 @@ impl PekoValueSimulator for StringAST {
                         current_file,
                     ));
             } else {
+                // Any object converts through its to_string, so a class-typed
+                // value is fine. Only a raw FFI scalar, which has no to_string,
+                // cannot be interpolated.
                 let last_value_type = simulated_values.last().unwrap().get_type();
-                if !simulator_context
+                let convertible = simulator_context
                     .types_similar(&last_value_type, &types::PekoType::simple_type("string"))
-                {
+                    || simulator_context.get_class_by_type(&last_value_type).is_some();
+                if !convertible && !last_value_type.is_error_type() {
                     let last_ast = interpolated_asts.last().unwrap();
                     simulator_context
                         .diagnostics
@@ -135,7 +139,7 @@ impl PekoValueSimulator for StringAST {
                             last_ast.get_start().clone(),
                             last_ast.get_end().clone(),
                             format!(
-                                "interpolated value has type `{last_value_type}` but the string interpolation needs a value convertible to `string`. Check the expression's type or add an explicit cast",
+                                "cannot interpolate a value of type `{last_value_type}`; it has no to_string. Convert it to a value or object first",
                             ),
                             diagnostics::DiagnosticType::Error,
                             current_file,

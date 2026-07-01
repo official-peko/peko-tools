@@ -1,0 +1,354 @@
+//! std::threads: threads and synchronization.
+//!
+//! Spawn worker threads from closures, guard shared state with a mutex, and
+//! sleep the current thread. The platform layer is the C in c/threads/threads.c
+//! over pthreads and the GC runtime, exposed through c/threads/threads.peko.h.
+//! Used through the std::threads prefix.
+//!
+//! GC participation is automatic: the C trampoline attaches and detaches each
+//! worker thread, and every blocking call is bracketed so the collector can
+//! run while a thread waits.
+
+import c::threads::threads as c_threads;
+import { * } from core;
+import { * } from collections;
+import runtime;
+
+// ---------------------------------------------------------------------------
+// --- Sleep ---
+// ---------------------------------------------------------------------------
+
+/// Blocks the current thread for `seconds`.
+[public] fn sleep(seconds: number) {
+    let total: number = seconds * 1000
+    let ms: i32 = danger_cast<i32>(total.to_raw())
+    c_threads::pgc_begin_blocking()
+    c_threads::peko_sleep_ms(ms)
+    c_threads::pgc_end_blocking()
+}
+
+/// Blocks the current thread for `ms` milliseconds.
+[public] fn sleep_ms(ms: number) {
+    let count: i32 = danger_cast<i32>(ms.to_raw())
+    c_threads::pgc_begin_blocking()
+    c_threads::peko_sleep_ms(count)
+    c_threads::pgc_end_blocking()
+}
+
+// ---------------------------------------------------------------------------
+// --- Mutex ---
+// ---------------------------------------------------------------------------
+
+/// A mutual-exclusion lock guarding a value of type `T`. Call lock to acquire
+/// it and read the value, then release when done. For a reference type the
+/// value returned from lock is the shared object, so mutations through it are
+/// visible to other holders.
+[public] class Mutex<T> {
+    [private] data: T
+    [private] handle: opaque
+
+    /// A mutex guarding `data`. The OS lock lives in malloc memory so the
+    /// collector cannot move it.
+    constructor(data: T) {
+        this.data = data
+        this.handle = c_threads::peko_mutex_new()
+    }
+
+    /// Acquires the lock and returns the guarded value. release must follow.
+    [public] fn lock() => T {
+        c_threads::pgc_begin_blocking()
+        c_threads::peko_mutex_lock(this.handle)
+        c_threads::pgc_end_blocking()
+        return this.data
+    }
+
+    /// Releases the lock acquired by lock.
+    [public] fn release() {
+        c_threads::peko_mutex_unlock(this.handle)
+    }
+
+    /// Frees the OS lock. The mutex must not be used after this.
+    [public] fn free() {
+        c_threads::peko_mutex_free(this.handle)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Thread ---
+// ---------------------------------------------------------------------------
+
+/// A worker thread running a closure. Construct one with the work to run, then
+/// start it.
+[public] class Thread {
+    [private] worker: closure() => opaque
+    [private] handle: opaque
+    [private] active: bool
+
+    /// A thread that will run `work`. The work is wrapped so the C trampoline,
+    /// which expects a value-returning worker, can call it.
+    constructor(work: closure() => void) {
+        this.active = false
+        this.handle = null
+        this.worker = closure[work]() => opaque {
+            work()
+            return null
+        }
+    }
+
+    /// Starts the thread without blocking the caller.
+    [mutates] fn start() {
+        let function: opaque = danger_cast<opaque>(this.worker.function)
+        let zero: i1 = constant<i1>(0)
+        this.handle = c_threads::peko_thread_create(function, this.worker.context, zero)
+        this.active = true
+    }
+
+    /// Starts the thread and blocks the caller until it finishes.
+    [mutates] fn start_blocking() {
+        let function: opaque = danger_cast<opaque>(this.worker.function)
+        let one: i1 = constant<i1>(1)
+        this.active = true
+        this.handle = c_threads::peko_thread_create(function, this.worker.context, one)
+        this.active = false
+    }
+
+    /// True while the thread is running.
+    [public] fn is_active() => bool {
+        return this.active
+    }
+
+    /// Force-stops the thread. Unsafe: the thread may hold a lock or be
+    /// mid-allocation. Prefer cooperative cancellation.
+    [mutates] fn kill() {
+        c_threads::peko_thread_kill(this.handle)
+        c_threads::peko_thread_free(this.handle)
+        this.active = false
+    }
+}
+
+/// Creates and starts a thread running `work`.
+[public] fn new_thread(work: closure() => void) {
+    let thread: Thread = new Thread(work)
+    thread.start()
+}
+
+// ---------------------------------------------------------------------------
+// --- Cooperative cancellation ---
+// ---------------------------------------------------------------------------
+
+/// A cooperative cancellation token shared between a thread and its caller. The
+/// running closure checks is_cancelled at natural points and returns early when
+/// the token is cancelled. Safer than killing a thread.
+[public] class CancelToken {
+    [private] handle: opaque
+
+    /// A fresh, uncancelled token.
+    constructor() {
+        this.handle = c_threads::peko_cancel_token_new()
+    }
+
+    /// True once the token has been cancelled.
+    [public] fn is_cancelled() => bool {
+        return c_threads::peko_cancel_token_is_cancelled(this.handle)
+    }
+
+    /// Cancels the token. Safe to call from any thread.
+    [public] fn cancel() {
+        c_threads::peko_cancel_token_cancel(this.handle)
+    }
+
+    /// Registers a closure to run when the token is cancelled. If it is already
+    /// cancelled the closure runs immediately.
+    [public] fn on_cancel(callback: closure() => void) {
+        let wrapper: closure() => opaque = closure[callback]() => opaque {
+            callback()
+            return null
+        }
+        let function: opaque = danger_cast<opaque>(wrapper.function)
+        c_threads::peko_cancel_token_on_cancel(this.handle, function, wrapper.context)
+    }
+
+    /// Frees the token. It must not be used after this.
+    [public] fn free() {
+        c_threads::peko_cancel_token_free(this.handle)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Channel ---
+// ---------------------------------------------------------------------------
+
+/// A thread-safe message channel carrying values of type `T`. A buffer size of
+/// 0 is a rendezvous channel where send blocks until a receiver is ready; a
+/// positive size queues that many items before send blocks.
+[public] class Channel<T> {
+    [private] handle: opaque
+
+    /// A channel with `buffer_size` slots, or 0 for a rendezvous channel.
+    constructor(buffer_size: number) {
+        let size: i32 = danger_cast<i32>(buffer_size.to_raw())
+        this.handle = c_threads::peko_channel_new(size)
+    }
+
+    /// Sends `item`, blocking while the buffer is full. False when the channel
+    /// is closed.
+    [public] fn send(item: T) => bool {
+        return c_threads::peko_channel_send(this.handle, danger_cast<pointer<void>>(item))
+    }
+
+    /// Sends `item` without blocking. False when the buffer is full or closed.
+    [public] fn try_send(item: T) => bool {
+        return c_threads::peko_channel_try_send(this.handle, danger_cast<pointer<void>>(item))
+    }
+
+    /// Receives an item, blocking while the buffer is empty. None when the
+    /// channel is closed and drained.
+    [public] fn recv() => T? {
+        let result: pointer<void> = c_threads::peko_channel_recv_value(this.handle)
+        if result == null {
+            return None
+        }
+        return danger_cast<T>(result)
+    }
+
+    /// Receives an item without blocking. None when empty or closed.
+    [public] fn try_recv() => T? {
+        let result: pointer<void> = c_threads::peko_channel_try_recv_value(this.handle)
+        if result == null {
+            return None
+        }
+        return danger_cast<T>(result)
+    }
+
+    /// Closes the channel. Further sends fail and a drained recv returns None.
+    [public] fn close() {
+        c_threads::peko_channel_close(this.handle)
+    }
+
+    /// True once the channel is closed.
+    [public] fn is_closed() => bool {
+        return c_threads::peko_channel_is_closed(this.handle)
+    }
+
+    /// Frees the channel. It must not be used after this.
+    [public] fn free() {
+        c_threads::peko_channel_free(this.handle)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Future ---
+// ---------------------------------------------------------------------------
+
+/// The result of an asynchronous computation of type `T`. Obtain one from
+/// make_future.
+[public] class Future<T> {
+    [private] handle: opaque
+
+    /// Wraps a C future handle. make_future is the supported way to create one.
+    constructor(handle: opaque) {
+        this.handle = handle
+    }
+
+    /// Blocks until the result is ready. None when the future was cancelled.
+    [public] fn await() => T? {
+        let result: pointer<void> = c_threads::peko_future_await(this.handle)
+        if result == null {
+            return None
+        }
+        return danger_cast<T>(result)
+    }
+
+    /// Blocks until the result is ready or `ms` milliseconds elapse. None on
+    /// timeout or cancellation.
+    [public] fn await_timeout(ms: number) => T? {
+        let timeout: i32 = danger_cast<i32>(ms.to_raw())
+        let result: pointer<void> = c_threads::peko_future_await_timeout_value(this.handle, timeout)
+        if result == null {
+            return None
+        }
+        return danger_cast<T>(result)
+    }
+
+    /// True when the result is ready, without blocking.
+    [public] fn is_complete() => bool {
+        return c_threads::peko_future_is_complete(this.handle)
+    }
+
+    /// Signals that the result is no longer needed. await then returns None.
+    [public] fn cancel() {
+        c_threads::peko_future_cancel(this.handle)
+    }
+
+    /// Frees the future. It must not be used after this.
+    [public] fn free() {
+        c_threads::peko_future_free(this.handle)
+    }
+}
+
+/// Runs `work` on a new thread and returns a Future for its result.
+[public] fn make_future<T>(work: closure() => T) => Future<T> {
+    let handle: opaque = c_threads::peko_future_new()
+    new_thread(closure[work, handle]() => void {
+        let result: T = work()
+        c_threads::peko_future_set_result(handle, danger_cast<pointer<void>>(result))
+    })
+    return new Future<T>(handle)
+}
+
+// ---------------------------------------------------------------------------
+// --- Scope: structured concurrency ---
+// ---------------------------------------------------------------------------
+
+/// A structured concurrency scope. Work spawned on a scope is tracked and
+/// awaited when the scope finishes, so no spawned task outlives it. Obtain one
+/// from the scope function. Future handles are held as Box<opaque> so they ride
+/// inside the erased Array.
+[public] class Scope {
+    [private] handles: Array<Box<opaque>>
+    [private] cancel_token: CancelToken
+
+    /// An empty scope with a fresh shared cancel token.
+    constructor() {
+        this.handles = new Array<Box<opaque>>()
+        this.cancel_token = new CancelToken()
+    }
+
+    /// Spawns `work` on a new thread and tracks it for join.
+    [mutates] fn spawn(work: closure() => void) {
+        let handle: opaque = c_threads::peko_future_new()
+        new_thread(closure[work, handle]() => void {
+            work()
+            c_threads::peko_future_set_result(handle, danger_cast<pointer<void>>(null))
+        })
+        this.handles.push(new Box<opaque>(handle))
+    }
+
+    /// The cancel token shared by all work spawned in this scope.
+    [public] fn get_cancel_token() => CancelToken {
+        return this.cancel_token
+    }
+
+    /// Cancels all work spawned in this scope.
+    [public] fn cancel() {
+        this.cancel_token.cancel()
+    }
+
+    /// Awaits every spawned task and frees its handle. The scope function calls
+    /// this; it is not called directly.
+    [mutates] fn join_all() {
+        for boxed in this.handles {
+            let handle: opaque = boxed.get()
+            c_threads::peko_future_await(handle)
+            c_threads::peko_future_free(handle)
+        }
+    }
+}
+
+/// Runs `body` inside a structured concurrency scope. Every task spawned on the
+/// scope is awaited before this returns, so no spawned work outlives it.
+[public] fn scope(body: closure(Scope) => void) {
+    let s: Scope = new Scope()
+    body(s)
+    s.join_all()
+}

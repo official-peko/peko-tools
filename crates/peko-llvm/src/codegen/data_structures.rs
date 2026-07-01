@@ -22,9 +22,8 @@ use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
 use peko_core::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use peko_core::execution::data_structures::{
-    ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
-    ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionValue, ExecutionVariable, TraitDefinition,
+    EnumDefinition, ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassVirtualTable,
+    ExecutionFunction, ExecutionModule, ExecutionValue, ExecutionVariable, TraitDefinition,
 };
 use peko_core::target::{OperatingSystem, PekoTarget};
 use peko_core::types::PekoType;
@@ -177,6 +176,28 @@ pub struct CodegenFunction {
 
     pub imported_from: Option<Arc<RwLock<CodegenModule>>>,
     pub parent_class_info: Option<(PekoType, Arc<RwLock<CodegenModule>>)>,
+
+    /// Generic type-parameter names. Empty for a non-generic function.
+    #[new(default)]
+    pub generic_typenames: Vec<PositionedValue<String>>,
+
+    /// Generic type-parameter names a class method declares itself (`fn map<U>`),
+    /// distinct from the owning class's parameters. An erased method compiles
+    /// once with these params as bare carriers; a call site infers their
+    /// concrete types from the arguments and substitutes them into the result.
+    #[new(default)]
+    pub method_generic_typenames: Vec<PositionedValue<String>>,
+
+    /// The source AST, present only on a generic template awaiting
+    /// instantiation.
+    #[new(default)]
+    pub source_function: Option<FunctionDeclarationAST>,
+
+    /// A `static` method: no implicit `this` parameter, called directly at a
+    /// type-level call site (`Type::method(args)`). Its argument list holds only
+    /// the explicit parameters and its `Self` types are bound to the class.
+    #[new(default)]
+    pub is_static: bool,
 }
 
 impl CodegenFunction {
@@ -215,6 +236,22 @@ impl CodegenFunction {
 impl ExecutionFunction<CodegenArg, CodegenModule> for CodegenFunction {
     fn get_parent_module(&self) -> Arc<RwLock<CodegenModule>> {
         self.parent.clone()
+    }
+
+    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
+        &self.generic_typenames
+    }
+
+    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
+        &mut self.generic_typenames
+    }
+
+    fn get_source_function(&self) -> Option<&FunctionDeclarationAST> {
+        self.source_function.as_ref()
+    }
+
+    fn get_source_function_mut(&mut self) -> &mut Option<FunctionDeclarationAST> {
+        &mut self.source_function
     }
 
     fn get_arguments(&self) -> &IndexMap<String, CodegenArg> {
@@ -386,6 +423,26 @@ pub struct CodegenClass {
     pub imported_from: Option<Arc<RwLock<CodegenModule>>>,
 
     pub type_descriptor: HashMap<String, CodegenValue>,
+
+    /// The generic parameter names of a generic class (for example
+    /// `["KT", "VT"]` for `Map`). Empty for a non-generic class. A use site
+    /// substitutes these against an instance's concrete generic arguments to
+    /// recover instantiated member types from the shared erased class.
+    #[new(default)]
+    pub generic_typenames: Vec<PositionedValue<String>>,
+
+    /// The source AST, present only on a generic template awaiting
+    /// instantiation.
+    #[new(default)]
+    pub source_class: Option<ClassAST>,
+
+    /// Source-file path a generic template was declared in.
+    #[new(default)]
+    pub template_filename: PathBuf,
+
+    /// Names of the traits this class implements, from its `impl` clause.
+    #[new(default)]
+    pub implements: Vec<String>,
 }
 
 impl CodegenClass {
@@ -435,46 +492,6 @@ impl ExecutionClass<CodegenClass, CodegenVirtualTable, CodegenClassAttribute, Co
     fn get_parent_class_mut(&mut self) -> &mut Option<Box<CodegenClass>> {
         &mut self.parent_class
     }
-}
-
-// ------------------------------
-// --- CODEGEN CLASS GENERICS ---
-// ------------------------------
-
-/// A generic class declaration that hasn't been instantiated yet.
-#[derive(Clone, new)]
-pub struct CodegenClassGeneric {
-    pub visibility: VisibilityData,
-
-    pub generic_typenames: Vec<PositionedValue<String>>,
-    pub class: ClassAST,
-    pub module: Arc<RwLock<CodegenModule>>,
-
-    pub filename: PathBuf,
-
-    pub imported_from: Option<Arc<RwLock<CodegenModule>>>,
-}
-
-impl ExecutionClassGeneric<CodegenModule> for CodegenClassGeneric {
-    fn get_parent_module(&self) -> Arc<RwLock<CodegenModule>> {
-        self.module.clone()
-    }
-
-    fn get_class(&self) -> &ClassAST {
-        &self.class
-    }
-
-    fn get_class_mut(&mut self) -> &mut ClassAST {
-        &mut self.class
-    }
-
-    fn get_filename(&self) -> &Path {
-        self.filename.as_path()
-    }
-
-    fn get_filename_mut(&mut self) -> &mut PathBuf {
-        &mut self.filename
-    }
 
     fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
         &self.generic_typenames
@@ -484,76 +501,16 @@ impl ExecutionClassGeneric<CodegenModule> for CodegenClassGeneric {
         &mut self.generic_typenames
     }
 
-    fn get_module(&self) -> &Arc<RwLock<CodegenModule>> {
-        &self.module
+    fn get_source_class(&self) -> Option<&ClassAST> {
+        self.source_class.as_ref()
     }
 
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<CodegenModule>> {
-        &mut self.module
+    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST> {
+        &mut self.source_class
     }
 
-    fn get_visibility(&self) -> &VisibilityData {
-        &self.visibility
-    }
-
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData {
-        &mut self.visibility
-    }
-}
-
-// ---------------------------------
-// --- CODEGEN FUNCTION GENERICS ---
-// ---------------------------------
-
-/// A generic function declaration that hasn't been instantiated yet.
-#[derive(Clone, new)]
-pub struct CodegenFunctionGeneric {
-    pub visibility: VisibilityData,
-
-    pub generic_typenames: Vec<PositionedValue<String>>,
-    pub function: FunctionDeclarationAST,
-    pub module: Arc<RwLock<CodegenModule>>,
-
-    pub filename: PathBuf,
-
-    pub imported_from: Option<Arc<RwLock<CodegenModule>>>,
-}
-
-impl ExecutionFunctionGeneric<CodegenModule> for CodegenFunctionGeneric {
-    fn get_parent_module(&self) -> Arc<RwLock<CodegenModule>> {
-        self.module.clone()
-    }
-
-    fn get_function(&self) -> &FunctionDeclarationAST {
-        &self.function
-    }
-
-    fn get_function_mut(&mut self) -> &mut FunctionDeclarationAST {
-        &mut self.function
-    }
-
-    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
-        &self.generic_typenames
-    }
-
-    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
-        &mut self.generic_typenames
-    }
-
-    fn get_module(&self) -> &Arc<RwLock<CodegenModule>> {
-        &self.module
-    }
-
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<CodegenModule>> {
-        &mut self.module
-    }
-
-    fn get_visibility(&self) -> &VisibilityData {
-        &self.visibility
-    }
-
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData {
-        &mut self.visibility
+    fn get_implemented_trait_names(&self) -> Vec<String> {
+        self.implements.clone()
     }
 }
 
@@ -1114,10 +1071,13 @@ pub struct CodegenModule {
     pub functions: IndexMap<String, Vec<Arc<RwLock<CodegenFunction>>>>,
     pub variables: IndexMap<String, Arc<RwLock<CodegenVariable>>>,
     pub classes: IndexMap<String, Arc<RwLock<CodegenClass>>>,
-    pub enums: IndexMap<String, Vec<String>>,
+    pub enums: IndexMap<String, EnumDefinition>,
     pub traits: IndexMap<String, TraitDefinition>,
-    pub class_generics: IndexMap<String, Arc<RwLock<CodegenClassGeneric>>>,
-    pub function_generics: IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>>,
+
+    /// Modules this one imported under a local name, keyed by that name.
+    /// Private to this module, so two modules may import different files under
+    /// the same alias. Qualified access (`alias::member`) resolves here first.
+    pub module_aliases: IndexMap<String, Arc<RwLock<CodegenModule>>>,
 }
 
 impl CodegenModule {
@@ -1275,8 +1235,7 @@ impl CodegenModule {
             classes: IndexMap::new(),
             enums: IndexMap::new(),
             traits: IndexMap::new(),
-            class_generics: IndexMap::new(),
-            function_generics: IndexMap::new(),
+            module_aliases: IndexMap::new(),
         }
     }
 
@@ -1294,8 +1253,7 @@ impl CodegenModule {
             classes: IndexMap::new(),
             enums: IndexMap::new(),
             traits: IndexMap::new(),
-            class_generics: IndexMap::new(),
-            function_generics: IndexMap::new(),
+            module_aliases: IndexMap::new(),
         }
     }
 }
@@ -1306,10 +1264,8 @@ impl
         CodegenValue,
         CodegenVariable,
         CodegenFunction,
-        CodegenFunctionGeneric,
         CodegenArg,
         CodegenClass,
-        CodegenClassGeneric,
         CodegenVirtualTable,
         CodegenClassAttribute,
     > for CodegenModule
@@ -1342,16 +1298,8 @@ impl
         &self.functions
     }
 
-    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>> {
-        &self.function_generics
-    }
-
     fn get_classes(&self) -> &IndexMap<String, Arc<RwLock<CodegenClass>>> {
         &self.classes
-    }
-
-    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<CodegenClassGeneric>>> {
-        &self.class_generics
     }
 
     fn get_parent(&self) -> Option<&Arc<RwLock<CodegenModule>>> {
@@ -1374,21 +1322,15 @@ impl
         &mut self.functions
     }
 
-    fn get_function_generics_mut(
-        &mut self,
-    ) -> &mut IndexMap<String, Arc<RwLock<CodegenFunctionGeneric>>> {
-        &mut self.function_generics
-    }
-
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<CodegenClass>>> {
         &mut self.classes
     }
 
-    fn get_enums(&self) -> &IndexMap<String, Vec<String>> {
+    fn get_enums(&self) -> &IndexMap<String, EnumDefinition> {
         &self.enums
     }
 
-    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, EnumDefinition> {
         &mut self.enums
     }
 
@@ -1398,12 +1340,6 @@ impl
 
     fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition> {
         &mut self.traits
-    }
-
-    fn get_class_generics_mut(
-        &mut self,
-    ) -> &mut IndexMap<String, Arc<RwLock<CodegenClassGeneric>>> {
-        &mut self.class_generics
     }
 
     fn get_parent_mut(&mut self) -> &mut Option<Arc<RwLock<CodegenModule>>> {

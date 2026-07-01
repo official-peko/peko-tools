@@ -279,11 +279,19 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                 },
                 PekoType::simple_type("i1"),
             ),
-            NumericalOperation::Modulus => self
-                .call_named_function("Runtime::Modulus", vec![int1.clone(), int2.clone()])
-                .unwrap(),
+            NumericalOperation::Modulus => CodegenValue::new(
+                unsafe {
+                    core::LLVMBuildSRem(
+                        self.llvm_builder,
+                        int1.llvm_value,
+                        int2.llvm_value,
+                        c"".as_ptr(),
+                    )
+                },
+                int2.value_type.clone(),
+            ),
             NumericalOperation::Exponentiation => self
-                .call_named_function("Runtime::Exponential", vec![int1.clone(), int2.clone()])
+                .call_named_function("runtime::pow", vec![int1.clone(), int2.clone()])
                 .unwrap(),
         }
     }
@@ -411,11 +419,19 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
                 },
                 PekoType::simple_type("i1"),
             ),
-            NumericalOperation::Modulus => self
-                .call_named_function("Runtime::Modulus", vec![float1.clone(), float2.clone()])
-                .unwrap(),
+            NumericalOperation::Modulus => CodegenValue::new(
+                unsafe {
+                    core::LLVMBuildFRem(
+                        self.llvm_builder,
+                        float1.llvm_value,
+                        float2.llvm_value,
+                        c"".as_ptr(),
+                    )
+                },
+                float2.value_type.clone(),
+            ),
             NumericalOperation::Exponentiation => self
-                .call_named_function("Runtime::Exponential", vec![float1.clone(), float2.clone()])
+                .call_named_function("runtime::pow", vec![float1.clone(), float2.clone()])
                 .unwrap(),
         }
     }
@@ -521,15 +537,20 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
     ) -> CodegenValue {
         let string2 =
             if !string2.value_type.is_string_type() && string2.value_type.to_string() != "string" {
-                &self
-                    .box_value_to_type(&PekoType::simple_type("string"), string2)
+                self.box_value_to_type(&PekoType::simple_type("string"), string2)
                     .unwrap()
             } else {
-                string2
+                string2.clone()
             };
 
+        // `strcmp` takes raw `cstr` operands. A `string` object holds its bytes
+        // in the managed `data` buffer, so reach through to that buffer for the
+        // comparison.
+        let left = string_data_as_cstr(self, string1);
+        let right = string_data_as_cstr(self, &string2);
+
         let strcmp_result = self
-            .call_named_function("extern::strcmp", vec![string1.clone(), string2.clone()])
+            .call_named_function("extern::strcmp", vec![left, right])
             .unwrap();
         let zero = self.create_constant_int(0);
 
@@ -620,4 +641,43 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
             PekoType::simple_type("i1"),
         )
     }
+}
+
+/// Reduce a string-like value to a raw `cstr` pointer for a libc call.
+///
+/// A `string` object stores its bytes in the managed `data` buffer, so the
+/// buffer pointer is read out of that field. A value that is already a raw
+/// char pointer (`cstr`, `char[]`, `&char`) is used directly. The buffer
+/// pointer is cast down to address space 0; the comparison that consumes it is
+/// synchronous and allocates nothing, so no collection can move the buffer
+/// across the call.
+fn string_data_as_cstr(
+    context: &mut PekoCodegenContext,
+    value: &CodegenValue,
+) -> CodegenValue {
+    let raw_pointer = if context.get_class_by_type(&value.value_type).is_some() {
+        context
+            .get_object_attribute(value, "data", true)
+            .unwrap_or_else(|_| value.clone())
+    } else {
+        value.clone()
+    };
+
+    let cstr_type = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 0) };
+    let address_space =
+        unsafe { core::LLVMGetPointerAddressSpace(core::LLVMTypeOf(raw_pointer.llvm_value)) };
+    let lowered = if address_space == 0 {
+        raw_pointer.llvm_value
+    } else {
+        unsafe {
+            core::LLVMBuildAddrSpaceCast(
+                context.llvm_builder,
+                raw_pointer.llvm_value,
+                cstr_type,
+                c"".as_ptr(),
+            )
+        }
+    };
+
+    CodegenValue::new(lowered, PekoType::simple_type("cstr"))
 }

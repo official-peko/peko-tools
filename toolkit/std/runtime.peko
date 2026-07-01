@@ -1,0 +1,121 @@
+//! std::runtime: the garbage collector and runtime entry points.
+//!
+//! The compiler-emitted GC ABI and the GC lifecycle calls are declared in the
+//! C header c/runtime/gc.peko.h and imported below, so the symbols resolve to
+//! the C implementations with no Peko name mangling. The C is compiled from
+//! the package's native sources. Auto-imported and used through the runtime
+//! prefix.
+//!
+//! The GC ABI lives in that header and nowhere else. Redeclaring it produces
+//! duplicate symbols and undefined behavior.
+
+import c::runtime::gc;
+import c::core::conversions;
+import { * } from core;
+
+/// Allocates a GC-managed array of `T` with the given element count. The
+/// __rt_peko_alloc built-in branches on `T`: a primitive `T` gets an atomic
+/// buffer, a managed `T` gets a traced buffer with a descriptor.
+[public] fn allocate<T>(amount: i32) => pointer<T> {
+    return __rt_peko_alloc<T>(amount)
+}
+
+/// Wraps a managed byte buffer (NUL-terminated) into a `string` object.
+[public] fn managed_string(buffer: pointer<i8>) => string {
+    let length: i64 = conversions::peko_buffer_length(buffer)
+    return new string(buffer, length)
+}
+
+/// Wraps a raw, unmanaged C string into a GC-managed `string`. The bytes
+/// (including the trailing NUL) are copied into a fresh managed buffer the
+/// collector owns, so the result survives independently of the source. Used by
+/// the compiler when a raw string value must become a managed `string`.
+[public] fn create_managed(raw: cstr) => string {
+    return managed_string(conversions::peko_managed_from_cstr(raw))
+}
+
+/// Renders a raw integer as a `string`.
+[public] fn int_to_string(value: i64) => string {
+    return managed_string(conversions::peko_int_to_cstr(value))
+}
+
+/// Renders a raw float as a `string`.
+[public] fn float_to_string(value: f64) => string {
+    return managed_string(conversions::peko_float_to_cstr(value))
+}
+
+/// Renders a raw boolean as `"true"` or `"false"`.
+[public] fn bool_to_string(value: i1) => string {
+    return managed_string(conversions::peko_bool_to_cstr(value))
+}
+
+/// Renders a raw character as a one-character `string`.
+[public] fn char_to_string(value: i8) => string {
+    return managed_string(conversions::peko_char_to_cstr(value))
+}
+
+/// Parses a `string` as a raw integer.
+[public] fn string_to_int(value: string) => i64 {
+    return conversions::peko_cstr_to_int(value.to_raw())
+}
+
+/// Parses a `string` as a raw float.
+[public] fn string_to_float(value: string) => f64 {
+    return conversions::peko_cstr_to_float(value.to_raw())
+}
+
+/// Parses a `string` as a raw boolean (`"true"` is true).
+[public] fn string_to_bool(value: string) => i1 {
+    return conversions::peko_cstr_to_bool(value.to_raw())
+}
+
+/// Parses the first byte of a `string` as a raw character.
+[public] fn string_to_char(value: string) => i8 {
+    return conversions::peko_cstr_to_char(value.to_raw())
+}
+
+/// Initializes the collector with the given heap size in bytes. Called once
+/// from the program entry before any managed allocation.
+[public] fn init(heap_bytes: i32) => i32 {
+    return gc::pgc_init(heap_bytes)
+}
+
+/// Tears the collector down at program exit.
+[public] fn shutdown() {
+    gc::pgc_shutdown()
+}
+
+/// Attaches the calling thread to the collector before its first managed
+/// access.
+[public] fn attach_thread() {
+    gc::pgc_thread_attach()
+}
+
+/// Detaches the calling thread before it exits.
+[public] fn detach_thread() {
+    gc::pgc_thread_detach()
+}
+
+/// The compiler-emitted global initializer. It runs every module's
+/// `set_globals` once, before user code. Declared external here so the entry
+/// point resolves it by its bare symbol name at link time.
+[external] fn __create_globals();
+
+/// The program entry hook. A user project defines `on_start` in its main
+/// module, the compiler force-exports it under this bare symbol, and the
+/// entry point below calls it after the runtime is initialized.
+[external] fn on_start();
+
+/// The native program entry point. It boots the collector, attaches the main
+/// thread, runs the global initializers, calls the user entry hook, then tears
+/// the collector down. The C runtime and OS call this by its bare `main`
+/// symbol.
+[external] fn main(argc: i32, argv: pointer<cstr>) => i32 {
+    let initialized: i32 = init(constant<i32>(0))
+    attach_thread()
+    extern::__create_globals()
+    extern::on_start()
+    detach_thread()
+    shutdown()
+    return constant<i32>(0)
+}

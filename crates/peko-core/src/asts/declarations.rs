@@ -50,6 +50,27 @@ impl Spanned for NewVariableAST {
     }
 }
 
+/// A destructuring declaration: `let (a, b) = pair`. Binds each name to a
+/// positional element of the value: the first name to `get_first`, the second
+/// to `get_second`. The element types are inferred from those accessors.
+#[derive(Clone, new)]
+pub struct DestructureAST {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub names: Vec<PositionedValue<String>>,
+    pub value: Box<PekoAST>,
+}
+
+impl Spanned for DestructureAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
 /// A function declaration: `fn name<G>(args) => Type { body }`.
 ///
 /// `function_body` is `None` for `external` functions whose body is
@@ -76,6 +97,12 @@ pub struct FunctionDeclarationAST {
     pub varargs_type: Option<types::PekoType>,
     pub varargs_name: PositionedValue<String>,
     pub class_order: usize,
+    /// A `static fn` method: it takes no implicit `this` and is called at the
+    /// type level (`Type::method(args)`). Set by the class and trait member
+    /// parsers when a `static` keyword precedes the `fn`. Defaults to false, so
+    /// a plain function or instance method is never static.
+    #[new(default)]
+    pub is_static: bool,
 }
 
 impl Spanned for FunctionDeclarationAST {

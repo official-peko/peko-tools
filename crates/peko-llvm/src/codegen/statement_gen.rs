@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use indexmap::IndexMap;
 use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
-use peko_core::asts::data_structures::{PositionData, PositionedValue, UnpackItem, VisibilityData};
+use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
 use peko_core::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
     PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST, VariableReassignmentAST,
@@ -733,14 +733,12 @@ impl PekoValueBuilder for ForLoopAST {
             return codegen_context.create_error_value();
         }
 
-        // Resolve the iterable to its iterator via the `[operator iterator]` overload.
+        // Resolve the iterable to its iterator via the `iter` method. A type is
+        // iterable when it provides an `Iter` (`iter` returning an iterator
+        // object whose `next` yields `T?`).
         let iterable = self.iterator.build_value(codegen_context);
-        let get_iterator = codegen_context.call_object_method(
-            &iterable,
-            String::from("[operator iterator]"),
-            Vec::new(),
-            None,
-        );
+        let get_iterator =
+            codegen_context.call_object_method(&iterable, String::from("iter"), Vec::new(), None);
 
         let iterator = match get_iterator {
             Ok(value) => value,
@@ -762,52 +760,14 @@ impl PekoValueBuilder for ForLoopAST {
         let loop_block = codegen_context.create_new_block(None);
         let loop_condition_check = codegen_context.create_new_block(None);
 
-        // check range first
+        // Each iteration pulls the next optional and stops when it is None. The
+        // optional is held in a stack slot so the loop body can unwrap it.
         codegen_context.build_branch(loop_condition_check);
         codegen_context.goto_block_end(loop_condition_check);
-        let inrange_call = codegen_context.call_object_method(
-            &iterator,
-            String::from("inrange"),
-            Vec::new(),
-            None,
-        );
-
-        match inrange_call {
-            Err(_) => {
-                codegen_context
-                    .diagnostics
-                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        self.iterator.get_start().clone(),
-                        self.iterator.get_end().clone(),
-                        format!(
-                            "iterator of type `{}` does not have a valid `inrange` method",
-                            iterable.get_type()
-                        ),
-                        diagnostics::DiagnosticType::Error,
-                        codegen_context.get_current_file().to_path_buf(),
-                    ));
-            }
-            Ok(value) => {
-                codegen_context.build_conditional_branch(&value, loop_block, after_block);
-            }
-        }
-
-        let previous_loop_finish = codegen_context.current_loop_finish_block;
-        let previous_loop = codegen_context.current_loop_block;
-        codegen_context.current_loop_finish_block = Some(after_block);
-        codegen_context.current_loop_block = Some(loop_condition_check);
-        codegen_context.goto_block_end(loop_block);
-
-        codegen_context
-            .previous_scoped_variables
-            .push(codegen_context.scoped_variables.clone());
-
-        // Pull the next value for this iteration via the iterator's
-        // `next` method.
-        let get_next =
+        let next_optional =
             codegen_context.call_object_method(&iterator, String::from("next"), Vec::new(), None);
 
-        let get_next = match get_next {
+        let next_optional = match next_optional {
             Ok(value) => value,
             Err(_) => {
                 codegen_context
@@ -825,6 +785,37 @@ impl PekoValueBuilder for ForLoopAST {
                 codegen_context.create_error_value()
             }
         };
+
+        let optional_slot = codegen_context.build_stack_allocation(&next_optional.value_type);
+        codegen_context.build_store(&optional_slot, &next_optional);
+
+        // Continue while the optional holds a value.
+        let has_value = codegen_context
+            .call_object_method(&next_optional, String::from("is_value"), Vec::new(), None)
+            .ok();
+        let has_value_raw = match has_value {
+            Some(value) => codegen_context
+                .call_object_method(&value, String::from("to_raw"), Vec::new(), None)
+                .unwrap_or_else(|_| codegen_context.create_error_value()),
+            None => codegen_context.create_error_value(),
+        };
+        codegen_context.build_conditional_branch(&has_value_raw, loop_block, after_block);
+
+        let previous_loop_finish = codegen_context.current_loop_finish_block;
+        let previous_loop = codegen_context.current_loop_block;
+        codegen_context.current_loop_finish_block = Some(after_block);
+        codegen_context.current_loop_block = Some(loop_condition_check);
+        codegen_context.goto_block_end(loop_block);
+
+        codegen_context
+            .previous_scoped_variables
+            .push(codegen_context.scoped_variables.clone());
+
+        // Unwrap the held optional into the loop variable for this iteration.
+        let stored_optional = codegen_context.load_value(&optional_slot);
+        let get_next = codegen_context
+            .call_object_method(&stored_optional, String::from("unwrap"), Vec::new(), None)
+            .unwrap_or_else(|_| codegen_context.create_error_value());
 
         let allocate_next_value = codegen_context.build_stack_allocation(&get_next.value_type);
         codegen_context.build_store(&allocate_next_value, &get_next);
@@ -1010,36 +1001,6 @@ impl PekoValueBuilder for ImportStatementAST {
             module_name.clone()
         };
 
-        // A plain import that binds a name already bound to a different
-        // module file is a conflict. Unpack imports cannot conflict
-        // because their identity is the unique module id.
-        let conflicting_import = if has_unpack_list {
-            false
-        } else {
-            codegen_context
-                .module_context
-                .top_level_modules
-                .get(&import_as_module_name)
-                .map(|existing| existing.read().unwrap().get_file().to_path_buf())
-                .map(|existing_file| existing_file != module_entry_file_path)
-                .unwrap_or(false)
-        };
-
-        if conflicting_import {
-            codegen_context
-                .diagnostics
-                .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                    self.start.clone(),
-                    self.end.clone(),
-                    format!(
-                        "module name `{import_as_module_name}` is already imported from a different module. Use `as <alias>` to bind one of them under a different name",
-                    ),
-                    diagnostics::DiagnosticType::Error,
-                    codegen_context.get_current_file().to_path_buf(),
-                ));
-            return codegen_context.create_error_value();
-        }
-
         // Move the root folder to the resolved module's root for the
         // duration of this import. A registry import points the root at
         // the package directory so its internal paths and ids stay
@@ -1051,12 +1012,27 @@ impl PekoValueBuilder for ImportStatementAST {
         let previous_outside_primary = codegen_context.outside_primary_module;
         codegen_context.outside_primary_module = true;
 
-        let module_to_import = if codegen_context
+        // Reuse an already-loaded module for the SAME source file, regardless
+        // of the name it was bound to, so a file imported under two names is
+        // compiled once and shares one identity. The local alias is bound
+        // separately into the importing module (see module_aliases), so two
+        // modules may import different files under the same alias without
+        // colliding in the global registry.
+        let target_file = module_entry_file_path
+            .canonicalize()
+            .unwrap_or_else(|_| module_entry_file_path.clone());
+        let already_compiled_for_file = codegen_context
             .module_context
             .top_level_modules
-            .contains_key(&import_as_module_name)
-        {
-            codegen_context.module_context.top_level_modules[&import_as_module_name].clone()
+            .values()
+            .find(|module| {
+                let module_file = module.read().unwrap().get_file().to_path_buf();
+                module_file.canonicalize().unwrap_or(module_file) == target_file
+            })
+            .cloned();
+
+        let module_to_import = if let Some(existing) = already_compiled_for_file {
+            existing
         } else {
             // Parse the imported module's source into an AST list. An FFI
             // header is parsed as a C interop surface and lowered to external
@@ -1087,8 +1063,9 @@ impl PekoValueBuilder for ImportStatementAST {
 
             let mut asts = Vec::new();
 
-            while parser.tokens.length() != 0
-                && parser.tokens.get_index() != parser.tokens.length() - 1
+            while (parser.tokens.length() != 0
+                && parser.tokens.get_index() != parser.tokens.length() - 1)
+                || parser.has_pending()
             {
                 loop {
                     if parser.tokens.finished() {
@@ -1111,7 +1088,7 @@ impl PekoValueBuilder for ImportStatementAST {
                     }
                 }
 
-                if parser.tokens.finished() {
+                if parser.tokens.finished() && !parser.has_pending() {
                     break;
                 }
 
@@ -1123,67 +1100,66 @@ impl PekoValueBuilder for ImportStatementAST {
                 codegen_context.diagnostics.report_diagnostic(error.clone());
             }
 
+            // When the local alias is already taken by a different file, name
+            // this module by its canonical id so its globals-initializer and
+            // other name-mangled symbols stay unique. The alias resolves
+            // through module_aliases regardless of this name.
+            let module_local_name = if codegen_context
+                .module_context
+                .top_level_modules
+                .contains_key(&import_as_module_name)
+            {
+                resolved.module_id.clone()
+            } else {
+                import_as_module_name.clone()
+            };
+
             let new_module = Arc::new(RwLock::new(CodegenModule::new_top_level(
-                import_as_module_name.clone(),
+                module_local_name.clone(),
                 module_entry_file_path,
                 None,
                 codegen_context.llvm_context,
             )));
 
-            let importing_module = codegen_context
-                .module_context
-                .current_module()
-                .read()
-                .unwrap()
-                .name
-                .clone();
             codegen_context
                 .module_context
                 .move_to_module(new_module.clone(), false, false);
 
-            // The runtime, standard library, console, and UI modules
-            // are implicitly visible in every module; pre-import them
-            // here, with care to skip self-imports and circular cases.
-            let default_imports = ["Runtime", "standard", "console", "ui"];
-            for import in default_imports {
-                if import_as_module_name == "Runtime" {
-                    break;
-                }
-
-                if import_as_module_name == import
-                    || (import_as_module_name == "standard" && import == "console")
-                    || (import_as_module_name == "ui" && importing_module == "ui")
-                    || !codegen_context
-                        .module_context
-                        .top_level_modules
-                        .contains_key(import)
-                {
-                    continue;
-                }
-
-                let module = Arc::clone(&codegen_context.module_context.top_level_modules[import]);
-                codegen_context.import_module(
-                    module,
-                    if import == "standard" {
-                        vec![UnpackItem::All]
-                    } else {
-                        Vec::new()
-                    },
-                );
-            }
-
+            // Each module declares the imports it needs explicitly, and user
+            // source receives the std default imports up front, so no implicit
+            // pre-import of the standard library is done here.
+            // The global registry is keyed by the module's local name, which
+            // is the canonical id when the alias collided. Resolution goes
+            // through the per-module alias binding regardless of this key.
             codegen_context
                 .module_context
                 .top_level_modules
-                .insert_before(1, import_as_module_name, Arc::clone(&new_module));
+                .insert_before(1, module_local_name.clone(), Arc::clone(&new_module));
 
             // Declarations lowered from an FFI header stay external for their
             // raw name and gc-leaf marking, but are scoped to this module so
             // they resolve through it rather than the global extern module.
+            //
+            // The compiler's own runtime ABI is the exception: it emits a fixed
+            // set of calls as `extern::<name>` (the allocation, global-root, and
+            // write-barrier entrypoints, plus strcmp), so those names must live
+            // in the global extern module to resolve from every file - including
+            // std::core itself, which allocates. They are left unscoped wherever
+            // a header declares them.
+            const COMPILER_EXTERN_ABI: [&str; 5] = [
+                "peko_gc_alloc_object",
+                "peko_gc_alloc",
+                "peko_gc_add_global_root",
+                "peko_gc_write_barrier",
+                "strcmp",
+            ];
             if is_ffi {
                 for ast in asts.iter_mut() {
                     match ast {
-                        PekoAST::FunctionDeclaration(declaration) => {
+                        PekoAST::FunctionDeclaration(declaration)
+                            if !COMPILER_EXTERN_ABI
+                                .contains(&declaration.function_name.value.as_str()) =>
+                        {
                             declaration.visibility.scoped = true;
                         }
                         PekoAST::NewVariable(declaration) => {
@@ -1194,9 +1170,24 @@ impl PekoValueBuilder for ImportStatementAST {
                 }
             }
 
+            // Three passes so a class body can dispatch on any other class
+            // regardless of source order: declare every shell, then lay out and
+            // declare every class's method signatures, then build the bodies.
+            for ast in &asts {
+                PekoValueBuilder::declare(ast, codegen_context);
+            }
+
+            for ast in &asts {
+                ast.declare_signatures(codegen_context);
+            }
+
             for ast in &asts {
                 ast.build_value(codegen_context);
             }
+
+            // Emit the bodies of any generic instantiation that the signature
+            // pass laid out, now that every class in the module is laid out.
+            codegen_context.drain_pending_generic_class_bodies();
 
             codegen_context.module_context.move_out_of_module();
             new_module
@@ -1206,6 +1197,18 @@ impl PekoValueBuilder for ImportStatementAST {
 
         // Restore the root folder now that the imported module is loaded.
         codegen_context.root_folder = previous_root_folder;
+
+        // Bind the alias in the importing module so qualified access resolves
+        // per-module (mirrors the simulator).
+        if !has_unpack_list {
+            codegen_context
+                .module_context
+                .current_module()
+                .write()
+                .unwrap()
+                .module_aliases
+                .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+        }
 
         if !codegen_context.creating_required || codegen_context.outside_primary_module {
             codegen_context.import_module(module_to_import, self.symbols_to_unpack.clone());

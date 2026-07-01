@@ -1,0 +1,1200 @@
+//! std::collections: the standard collection types.
+//!
+//! Holds the array, map, and set types built on the core object model.
+//! Auto-imported and used bare.
+
+import { * } from core;
+import runtime;
+
+/// The sorting algorithm an Array uses. Insertion is stable and adaptive, best
+/// for small or nearly-sorted data. Merge is stable and always n log n but
+/// uses O(n) scratch space. Quick is in-place and fast on average, but unstable
+/// and O(n squared) in the worst case. Heap is in-place and always n log n, but
+/// unstable.
+[public] enum SortAlgorithm {
+    Insertion,
+    Merge,
+    Quick,
+    Heap,
+}
+
+/// The search algorithm for an ordered probe. Linear scans in order and works
+/// on any array. Binary is O(log n) but needs the array already sorted by the
+/// same order the probe describes.
+[public] enum SearchAlgorithm {
+    Linear,
+    Binary,
+}
+
+/// A growable, contiguous sequence of `T`. The backing store is a managed
+/// `pointer<T>` buffer that doubles when it fills. `count` is the number of
+/// live elements and `capacity` is the buffer's slot count. Indexing goes
+/// through the `Index` / `IndexRef` traits, so `a[i]` and `a[i] = v` work.
+[public] class Array<T> impl Index<number, T>, IndexRef<number, T> {
+    buffer: pointer<T>
+    count: i64
+    capacity: i64
+    sort_algorithm: SortAlgorithm
+    search_algorithm: SearchAlgorithm
+
+    /// An empty array with a small initial buffer.
+    constructor() {
+        let initial: i64 = constant<i64>(8)
+        let zero: i64 = constant<i64>(0)
+        this.capacity = initial
+        this.count = zero
+        this.buffer = runtime::allocate<T>(danger_cast<i32>(initial))
+        this.sort_algorithm = SortAlgorithm::Merge
+        this.search_algorithm = SearchAlgorithm::Linear
+    }
+
+    /// The number of live elements.
+    [public] fn size() => number {
+        return new number(danger_cast<f64>(this.count))
+    }
+
+    /// Append `value`, growing the backing buffer when it is full.
+    [public] fn push(value: T) {
+        let one: i64 = constant<i64>(1)
+        if this.count >= this.capacity {
+            this.grow()
+        }
+        this.buffer[this.count] = value
+        this.count = this.count + one
+    }
+
+    /// Double the backing buffer and copy the live elements across.
+    fn grow() {
+        let one: i64 = constant<i64>(1)
+        let two: i64 = constant<i64>(2)
+        let zero: i64 = constant<i64>(0)
+
+        let new_capacity: i64 = this.capacity * two
+        let new_buffer: pointer<T> = runtime::allocate<T>(danger_cast<i32>(new_capacity))
+
+        let index: i64 = zero
+        while index < this.count {
+            new_buffer[index] = this.buffer[index]
+            index = index + one
+        }
+
+        this.buffer = new_buffer
+        this.capacity = new_capacity
+    }
+
+    /// The element at index `i`.
+    [public] fn index(i: number) => T {
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        return this.buffer[offset]
+    }
+
+    /// A reference to the element slot at index `i`, for `a[i] = v`.
+    [public] fn index_ref(i: number) => &T {
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        return &this.buffer[offset]
+    }
+
+    /// An iterator over this array's elements in order, for `for x in array`.
+    [public] fn iter() => ArrayIterator<T> {
+        return new ArrayIterator<T>(this)
+    }
+
+    /// True when the array holds no elements.
+    [public] fn is_empty() => bool {
+        let zero: i64 = constant<i64>(0)
+        return this.count == zero
+    }
+
+    /// Sets the element at index `i`.
+    [mutates] fn set(i: number, value: T) {
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        this.buffer[offset] = value
+    }
+
+    /// The first element, or None when empty.
+    [public] fn first() => T? {
+        let zero: i64 = constant<i64>(0)
+        if this.count == zero {
+            return None
+        }
+        return this.buffer[zero]
+    }
+
+    /// The last element, or None when empty.
+    [public] fn last() => T? {
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        if this.count == zero {
+            return None
+        }
+        return this.buffer[this.count - one]
+    }
+
+    /// Removes and returns the last element, or None when empty.
+    [mutates] fn pop() => T? {
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        if this.count == zero {
+            return None
+        }
+        this.count = this.count - one
+        return this.buffer[this.count]
+    }
+
+    /// Removes the element at index `i`, shifts the later elements down, and
+    /// returns it.
+    [mutates] fn remove_at(i: number) => T {
+        let one: i64 = constant<i64>(1)
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        let removed: T = this.buffer[offset]
+        let index: i64 = offset
+        while index < this.count - one {
+            this.buffer[index] = this.buffer[index + one]
+            index = index + one
+        }
+        this.count = this.count - one
+        return removed
+    }
+
+    /// Inserts `value` at index `i`, shifting the later elements up.
+    [mutates] fn insert(i: number, value: T) {
+        let one: i64 = constant<i64>(1)
+        if this.count >= this.capacity {
+            this.grow()
+        }
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        let index: i64 = this.count
+        while index > offset {
+            this.buffer[index] = this.buffer[index - one]
+            index = index - one
+        }
+        this.buffer[offset] = value
+        this.count = this.count + one
+    }
+
+    /// Removes every element.
+    [mutates] fn clear() {
+        this.count = constant<i64>(0)
+    }
+
+    /// Reverses the elements in place.
+    [mutates] fn reverse() {
+        let one: i64 = constant<i64>(1)
+        let low: i64 = constant<i64>(0)
+        let high: i64 = this.count - one
+        while low < high {
+            let temp: T = this.buffer[low]
+            this.buffer[low] = this.buffer[high]
+            this.buffer[high] = temp
+            low = low + one
+            high = high - one
+        }
+    }
+
+    /// The first element for which `predicate` is true, or None.
+    [public] fn find(predicate: closure(T) => bool) => T? {
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            let element: T = this.buffer[index]
+            if predicate(element) {
+                return element
+            }
+            index = index + one
+        }
+        return None
+    }
+
+    /// The index of the first element for which `predicate` is true, or -1.
+    [public] fn index_of_where(predicate: closure(T) => bool) => number {
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            let element: T = this.buffer[index]
+            if predicate(element) {
+                return new number(danger_cast<f64>(index))
+            }
+            index = index + one
+        }
+        return 0 - 1
+    }
+
+    /// True when any element satisfies `predicate`.
+    [public] fn contains_where(predicate: closure(T) => bool) => bool {
+        return this.index_of_where(predicate) >= 0
+    }
+
+    // --- Higher-order helpers ---
+
+    /// Applies `action` to each element in order.
+    [public] fn for_each(action: closure(T) => void) {
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            action(this.buffer[index])
+            index = index + one
+        }
+    }
+
+    /// A new array holding `transform` applied to each element, in order.
+    [public] fn map<U>(transform: closure(T) => U) => Array<U> {
+        let out: Array<U> = new Array<U>()
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            out.push(transform(this.buffer[index]))
+            index = index + one
+        }
+        return out
+    }
+
+    /// A new array of the elements for which `predicate` is true.
+    [public] fn filter(predicate: closure(T) => bool) => Array<T> {
+        let out: Array<T> = new Array<T>()
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            let element: T = this.buffer[index]
+            if predicate(element) {
+                out.push(element)
+            }
+            index = index + one
+        }
+        return out
+    }
+
+    /// Folds the elements left to right into a single value, starting from
+    /// `initial` and combining each element with the running accumulator.
+    [public] fn reduce<U>(initial: U, combine: closure(U, T) => U) => U {
+        let accumulator: U = initial
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            accumulator = combine(accumulator, this.buffer[index])
+            index = index + one
+        }
+        return accumulator
+    }
+
+    /// A new array of `Pair`s joining each element with the element at the same
+    /// index in `other`. Its length is the shorter of the two.
+    [public] fn zip<U>(other: Array<U>) => Array<Pair<T, U>> {
+        let out: Array<Pair<T, U>> = new Array<Pair<T, U>>()
+        let limit: i64 = this.count
+        let other_count: i64 = danger_cast<i64>(other.size().to_raw())
+        if other_count < limit {
+            limit = other_count
+        }
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < limit {
+            let position: number = new number(danger_cast<f64>(index))
+            out.push(new Pair<T, U>(this.buffer[index], other[position]))
+            index = index + one
+        }
+        return out
+    }
+
+    /// A new array concatenating the arrays `transform` returns for each
+    /// element.
+    [public] fn flat_map<U>(transform: closure(T) => Array<U>) => Array<U> {
+        let out: Array<U> = new Array<U>()
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            let produced: Array<U> = transform(this.buffer[index])
+            let inner: i64 = constant<i64>(0)
+            let inner_count: i64 = danger_cast<i64>(produced.size().to_raw())
+            while inner < inner_count {
+                let inner_position: number = new number(danger_cast<f64>(inner))
+                out.push(produced[inner_position])
+                inner = inner + one
+            }
+            index = index + one
+        }
+        return out
+    }
+
+    /// True when at least one element satisfies `predicate`.
+    [public] fn any(predicate: closure(T) => bool) => bool {
+        return this.index_of_where(predicate) >= 0
+    }
+
+    /// True when every element satisfies `predicate`.
+    [public] fn all(predicate: closure(T) => bool) => bool {
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            if !predicate(this.buffer[index]) {
+                return false
+            }
+            index = index + one
+        }
+        return true
+    }
+
+    /// The number of elements for which `predicate` is true.
+    [public] fn count_where(predicate: closure(T) => bool) => number {
+        let total: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            if predicate(this.buffer[index]) {
+                total = total + one
+            }
+            index = index + one
+        }
+        return new number(danger_cast<f64>(total))
+    }
+
+    /// A new array of the first `amount` elements, or all of them when the
+    /// array is shorter.
+    [public] fn take(amount: number) => Array<T> {
+        let out: Array<T> = new Array<T>()
+        let limit: i64 = danger_cast<i64>(amount.to_raw())
+        if limit > this.count {
+            limit = this.count
+        }
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < limit {
+            out.push(this.buffer[index])
+            index = index + one
+        }
+        return out
+    }
+
+    /// A new array without the first `amount` elements.
+    [public] fn drop(amount: number) => Array<T> {
+        let out: Array<T> = new Array<T>()
+        let start: i64 = danger_cast<i64>(amount.to_raw())
+        if start < constant<i64>(0) {
+            start = constant<i64>(0)
+        }
+        let one: i64 = constant<i64>(1)
+        let index: i64 = start
+        while index < this.count {
+            out.push(this.buffer[index])
+            index = index + one
+        }
+        return out
+    }
+
+    // --- Sorting ---
+
+    /// Sets the algorithm `sort` uses.
+    [mutates] fn set_sort_method(algorithm: SortAlgorithm) {
+        this.sort_algorithm = algorithm
+    }
+
+    /// The algorithm `sort` currently uses.
+    [public] fn get_sort_method() => SortAlgorithm {
+        return this.sort_algorithm
+    }
+
+    /// Sorts the elements in place using the configured algorithm (Merge by
+    /// default). `compare` returns a negative number when its first argument
+    /// should come first, zero when the two are equal, and a positive number
+    /// otherwise.
+    [mutates] fn sort(compare: closure(T, T) => number) {
+        this.sort_using(this.sort_algorithm, compare)
+    }
+
+    /// Sorts the elements in place with an explicit algorithm, without changing
+    /// the configured default.
+    [mutates] fn sort_using(algorithm: SortAlgorithm, compare: closure(T, T) => number) {
+        switch algorithm {
+            SortAlgorithm::Insertion => {
+                this.sort_insertion(compare)
+            }
+            SortAlgorithm::Merge => {
+                this.sort_merge(compare)
+            }
+            SortAlgorithm::Quick => {
+                this.sort_quick(compare)
+            }
+            SortAlgorithm::Heap => {
+                this.sort_heap(compare)
+            }
+        }
+    }
+
+    /// Stable insertion sort. Best for small or nearly-sorted data.
+    [mutates] fn sort_insertion(compare: closure(T, T) => number) {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let i: i64 = one
+        while i < this.count {
+            let current: T = this.buffer[i]
+            let j: i64 = i - one
+            while j >= zero {
+                let ordering: number = compare(this.buffer[j], current)
+                if ordering > 0 {
+                    this.buffer[j + one] = this.buffer[j]
+                    j = j - one
+                } else {
+                    break
+                }
+            }
+            this.buffer[j + one] = current
+            i = i + one
+        }
+    }
+
+    /// Stable bottom-up merge sort into a scratch buffer.
+    [mutates] fn sort_merge(compare: closure(T, T) => number) {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let two: i64 = constant<i64>(2)
+        let n: i64 = this.count
+        if n < two {
+            return
+        }
+        let scratch: pointer<T> = runtime::allocate<T>(danger_cast<i32>(n))
+        let width: i64 = one
+        while width < n {
+            let low: i64 = zero
+            while low < n {
+                let mid: i64 = low + width
+                let high: i64 = low + width * two
+                if mid > n {
+                    mid = n
+                }
+                if high > n {
+                    high = n
+                }
+                let i: i64 = low
+                let j: i64 = mid
+                let k: i64 = low
+                while i < mid && j < high {
+                    let ordering: number = compare(this.buffer[i], this.buffer[j])
+                    if ordering <= 0 {
+                        scratch[k] = this.buffer[i]
+                        i = i + one
+                    } else {
+                        scratch[k] = this.buffer[j]
+                        j = j + one
+                    }
+                    k = k + one
+                }
+                while i < mid {
+                    scratch[k] = this.buffer[i]
+                    i = i + one
+                    k = k + one
+                }
+                while j < high {
+                    scratch[k] = this.buffer[j]
+                    j = j + one
+                    k = k + one
+                }
+                low = low + width * two
+            }
+            let copy: i64 = zero
+            while copy < n {
+                this.buffer[copy] = scratch[copy]
+                copy = copy + one
+            }
+            width = width * two
+        }
+    }
+
+    /// In-place quicksort. Fast on average, unstable.
+    [mutates] fn sort_quick(compare: closure(T, T) => number) {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        this.quick_range(zero, this.count - one, compare)
+    }
+
+    /// Recursively partitions [low, high] around a pivot for quicksort.
+    [mutates] fn quick_range(low: i64, high: i64, compare: closure(T, T) => number) {
+        if low >= high {
+            return
+        }
+        let one: i64 = constant<i64>(1)
+        let pivot: T = this.buffer[high]
+        let store: i64 = low - one
+        let scan: i64 = low
+        while scan < high {
+            let ordering: number = compare(this.buffer[scan], pivot)
+            if ordering <= 0 {
+                store = store + one
+                let temp: T = this.buffer[store]
+                this.buffer[store] = this.buffer[scan]
+                this.buffer[scan] = temp
+            }
+            scan = scan + one
+        }
+        let pivot_index: i64 = store + one
+        let swap: T = this.buffer[pivot_index]
+        this.buffer[pivot_index] = this.buffer[high]
+        this.buffer[high] = swap
+        this.quick_range(low, pivot_index - one, compare)
+        this.quick_range(pivot_index + one, high, compare)
+    }
+
+    /// In-place heapsort. Always n log n, unstable.
+    [mutates] fn sort_heap(compare: closure(T, T) => number) {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let two: i64 = constant<i64>(2)
+        let n: i64 = this.count
+        let start: i64 = n / two - one
+        while start >= zero {
+            this.sift_down(start, n, compare)
+            start = start - one
+        }
+        let end: i64 = n - one
+        while end > zero {
+            let temp: T = this.buffer[zero]
+            this.buffer[zero] = this.buffer[end]
+            this.buffer[end] = temp
+            this.sift_down(zero, end, compare)
+            end = end - one
+        }
+    }
+
+    /// Restores the max-heap property from `root` over the first `size`
+    /// elements.
+    [mutates] fn sift_down(root: i64, size: i64, compare: closure(T, T) => number) {
+        let one: i64 = constant<i64>(1)
+        let two: i64 = constant<i64>(2)
+        let node: i64 = root
+        while true {
+            let left: i64 = two * node + one
+            if left >= size {
+                break
+            }
+            let largest: i64 = node
+            let ordering_left: number = compare(this.buffer[left], this.buffer[largest])
+            if ordering_left > 0 {
+                largest = left
+            }
+            let right: i64 = left + one
+            if right < size {
+                let ordering_right: number = compare(this.buffer[right], this.buffer[largest])
+                if ordering_right > 0 {
+                    largest = right
+                }
+            }
+            if largest == node {
+                break
+            }
+            let temp: T = this.buffer[node]
+            this.buffer[node] = this.buffer[largest]
+            this.buffer[largest] = temp
+            node = largest
+        }
+    }
+
+    // --- Searching ---
+
+    /// Sets the algorithm `search` uses.
+    [mutates] fn set_search_method(algorithm: SearchAlgorithm) {
+        this.search_algorithm = algorithm
+    }
+
+    /// The algorithm `search` currently uses.
+    [public] fn get_search_method() => SearchAlgorithm {
+        return this.search_algorithm
+    }
+
+    /// The index of an element the `probe` matches, or -1, using the configured
+    /// algorithm (Linear by default). `probe` returns a negative number when the
+    /// element is less than the target, zero on a match, and a positive number
+    /// when it is greater.
+    [public] fn search(probe: closure(T) => number) => number {
+        return this.search_using(this.search_algorithm, probe)
+    }
+
+    /// Searches with an explicit algorithm, without changing the configured
+    /// default. Binary search requires the array to be sorted by the order the
+    /// probe describes.
+    [public] fn search_using(algorithm: SearchAlgorithm, probe: closure(T) => number) => number {
+        if algorithm == SearchAlgorithm::Binary {
+            return this.binary_search(probe)
+        }
+        return this.linear_search(probe)
+    }
+
+    /// Scans in order for an element the `probe` matches. Returns its index, or
+    /// -1.
+    [public] fn linear_search(probe: closure(T) => number) => number {
+        let one: i64 = constant<i64>(1)
+        let index: i64 = constant<i64>(0)
+        while index < this.count {
+            let ordering: number = probe(this.buffer[index])
+            if ordering == 0 {
+                return new number(danger_cast<f64>(index))
+            }
+            index = index + one
+        }
+        return 0 - 1
+    }
+
+    /// Binary search for an element the `probe` matches. The array must already
+    /// be sorted by the order the probe describes. Returns the index, or -1.
+    [public] fn binary_search(probe: closure(T) => number) => number {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let two: i64 = constant<i64>(2)
+        let low: i64 = zero
+        let high: i64 = this.count - one
+        while low <= high {
+            let mid: i64 = low + (high - low) / two
+            let ordering: number = probe(this.buffer[mid])
+            if ordering == 0 {
+                return new number(danger_cast<f64>(mid))
+            } else if ordering < 0 {
+                low = mid + one
+            } else {
+                high = mid - one
+            }
+        }
+        return 0 - 1
+    }
+}
+
+/// A forward iterator over an `Array`. Holds the array and a cursor; `next`
+/// yields each element in order and `None` once the array is exhausted.
+[public] class ArrayIterator<T> impl Iter<T> {
+    [private] source: Array<T>
+    [private] index: i64
+
+    constructor(source: Array<T>) {
+        let zero: i64 = constant<i64>(0)
+        this.source = source
+        this.index = zero
+    }
+
+    /// The next element, advancing the cursor, or None at the end.
+    [mutates] fn next() => T? {
+        let count: i64 = danger_cast<i64>(this.source.size().to_raw())
+        if this.index >= count {
+            return None
+        }
+        let position: number = new number(danger_cast<f64>(this.index))
+        let one: i64 = constant<i64>(1)
+        this.index = this.index + one
+        return this.source[position]
+    }
+
+    /// Whether a further element is available without advancing.
+    [public] fn check() => bool {
+        let count: i64 = danger_cast<i64>(this.source.size().to_raw())
+        return this.index < count
+    }
+}
+
+/// A hashmap from keys of type `KT` to values of type `VT`. Keys must hash and
+/// compare by value. The backing store is open-addressed with linear probing:
+/// three managed buffers (keys, values, slot states) grow together and rehash
+/// when the live load passes three quarters. A slot is 0 empty, 1 live,
+/// or 2 deleted; a deleted slot is a tombstone a probe steps over but an insert
+/// may reuse.
+[public] class Map<KT: impl Hash, impl Equals, VT> {
+    keys: pointer<KT>
+    values: pointer<VT>
+    states: pointer<i8>
+    count: i64
+    capacity: i64
+
+    /// An empty map with a small power-of-two bucket count. Fresh GC buffers
+    /// are zeroed, so every slot starts empty.
+    constructor() {
+        let initial: i64 = constant<i64>(16)
+        let zero: i64 = constant<i64>(0)
+        this.capacity = initial
+        this.count = zero
+        this.keys = runtime::allocate<KT>(danger_cast<i32>(initial))
+        this.values = runtime::allocate<VT>(danger_cast<i32>(initial))
+        this.states = runtime::allocate<i8>(danger_cast<i32>(initial))
+    }
+
+    /// The bucket a key prefers, its hash folded into the capacity. The hash is
+    /// non-negative and the capacity positive, so the result is in range.
+    fn bucket_for(key: KT) => i64 {
+        let raw_hash: i64 = danger_cast<i64>(key.hash().to_raw())
+        return raw_hash % this.capacity
+    }
+
+    /// The number of live entries.
+    [public] fn size() => number {
+        return new number(danger_cast<f64>(this.count))
+    }
+
+    /// The live keys, in arbitrary order. Pair each with `get` to walk entries.
+    [public] fn key_list() => Array<KT> {
+        let result: Array<KT> = new Array<KT>()
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let occupied: i8 = constant<i8>(1)
+        let index: i64 = zero
+        while index < this.capacity {
+            let slot_state: i8 = this.states[index]
+            if slot_state == occupied {
+                result.push(this.keys[index])
+            }
+            index = index + one
+        }
+        return result
+    }
+
+    /// Inserts or updates `value` under `key`. Grows and rehashes first when the
+    /// live load would pass three quarters.
+    [public] fn set(key: KT, value: VT) {
+        let three: i64 = constant<i64>(3)
+        let four: i64 = constant<i64>(4)
+        if this.count * four >= this.capacity * three {
+            this.grow()
+        }
+
+        let one: i64 = constant<i64>(1)
+        let occupied: i8 = constant<i8>(1)
+        let index: i64 = this.bucket_for(key)
+        let probes: i64 = constant<i64>(0)
+
+        while probes < this.capacity {
+            let slot_state: i8 = this.states[index]
+            if slot_state != occupied {
+                this.keys[index] = key
+                this.values[index] = value
+                this.states[index] = occupied
+                this.count = this.count + one
+                return
+            }
+            let existing: KT = this.keys[index]
+            if existing == key {
+                this.values[index] = value
+                return
+            }
+            index = (index + one) % this.capacity
+            probes = probes + one
+        }
+    }
+
+    /// The value stored under `key`, or None when the key is absent.
+    [public] fn get(key: KT) => VT? {
+        let one: i64 = constant<i64>(1)
+        let empty: i8 = constant<i8>(0)
+        let occupied: i8 = constant<i8>(1)
+        let index: i64 = this.bucket_for(key)
+        let probes: i64 = constant<i64>(0)
+
+        while probes < this.capacity {
+            let slot_state: i8 = this.states[index]
+            if slot_state == empty {
+                return None
+            }
+            if slot_state == occupied {
+                let existing: KT = this.keys[index]
+                if existing == key {
+                    return this.values[index]
+                }
+            }
+            index = (index + one) % this.capacity
+            probes = probes + one
+        }
+        return None
+    }
+
+    /// Whether `key` has a value in the map.
+    [public] fn contains(key: KT) => bool {
+        let one: i64 = constant<i64>(1)
+        let empty: i8 = constant<i8>(0)
+        let occupied: i8 = constant<i8>(1)
+        let index: i64 = this.bucket_for(key)
+        let probes: i64 = constant<i64>(0)
+
+        while probes < this.capacity {
+            let slot_state: i8 = this.states[index]
+            if slot_state == empty {
+                return false
+            }
+            if slot_state == occupied {
+                let existing: KT = this.keys[index]
+                if existing == key {
+                    return true
+                }
+            }
+            index = (index + one) % this.capacity
+            probes = probes + one
+        }
+        return false
+    }
+
+    /// Removes `key` if present, leaving a tombstone the probe chain steps over.
+    [public] fn remove(key: KT) {
+        let one: i64 = constant<i64>(1)
+        let empty: i8 = constant<i8>(0)
+        let occupied: i8 = constant<i8>(1)
+        let deleted: i8 = constant<i8>(2)
+        let index: i64 = this.bucket_for(key)
+        let probes: i64 = constant<i64>(0)
+
+        while probes < this.capacity {
+            let slot_state: i8 = this.states[index]
+            if slot_state == empty {
+                return
+            }
+            if slot_state == occupied {
+                let existing: KT = this.keys[index]
+                if existing == key {
+                    this.states[index] = deleted
+                    this.count = this.count - one
+                    return
+                }
+            }
+            index = (index + one) % this.capacity
+            probes = probes + one
+        }
+    }
+
+    /// Doubles the bucket count and re-inserts every live entry. The old
+    /// buffers are stack-rooted locals, so the collector keeps them live and
+    /// relocates them across the allocations below.
+    fn grow() {
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let two: i64 = constant<i64>(2)
+        let occupied: i8 = constant<i8>(1)
+
+        let old_keys: pointer<KT> = this.keys
+        let old_values: pointer<VT> = this.values
+        let old_states: pointer<i8> = this.states
+        let old_capacity: i64 = this.capacity
+
+        let new_capacity: i64 = this.capacity * two
+        this.capacity = new_capacity
+        this.count = zero
+        this.keys = runtime::allocate<KT>(danger_cast<i32>(new_capacity))
+        this.values = runtime::allocate<VT>(danger_cast<i32>(new_capacity))
+        this.states = runtime::allocate<i8>(danger_cast<i32>(new_capacity))
+
+        let index: i64 = zero
+        while index < old_capacity {
+            let slot_state: i8 = old_states[index]
+            if slot_state == occupied {
+                this.set(old_keys[index], old_values[index])
+            }
+            index = index + one
+        }
+    }
+
+    /// Every value in the map, in no particular order.
+    [public] fn value_list() => Array<VT> {
+        let result: Array<VT> = new Array<VT>()
+        let keys: Array<KT> = this.key_list()
+        for key in keys {
+            result.push(this.get(key).unwrap())
+        }
+        return result
+    }
+
+    /// Every key-value pair in the map, in no particular order.
+    [public] fn entries() => Array<Pair<KT, VT>> {
+        let result: Array<Pair<KT, VT>> = new Array<Pair<KT, VT>>()
+        let keys: Array<KT> = this.key_list()
+        for key in keys {
+            let value: VT = this.get(key).unwrap()
+            result.push(new Pair<KT, VT>(key, value))
+        }
+        return result
+    }
+
+    /// Applies `action` to each key and its value. The order is unspecified.
+    [public] fn for_each(action: closure(KT, VT) => void) {
+        for (key, value) in this.entries() {
+            action(key, value)
+        }
+    }
+
+    /// The keys, sorted by `compare`.
+    [public] fn sorted_keys(compare: closure(KT, KT) => number) => Array<KT> {
+        let result: Array<KT> = this.key_list()
+        result.sort(compare)
+        return result
+    }
+
+    /// The key-value pairs, sorted by `compare`.
+    [public] fn sorted_entries(compare: closure(Pair<KT, VT>, Pair<KT, VT>) => number) => Array<Pair<KT, VT>> {
+        let result: Array<Pair<KT, VT>> = this.entries()
+        result.sort(compare)
+        return result
+    }
+}
+
+/// A growable text buffer for assembling strings without an allocation per
+/// append. Bytes accumulate in a managed `pointer<i8>` that doubles when it
+/// fills; `build` wraps a right-sized, NUL-terminated copy in a `string`.
+[public] class StringBuilder {
+    buffer: pointer<i8>
+    count: i64
+    capacity: i64
+
+    /// An empty builder with a small initial buffer.
+    constructor() {
+        let initial: i64 = constant<i64>(16)
+        let zero: i64 = constant<i64>(0)
+        this.capacity = initial
+        this.count = zero
+        this.buffer = runtime::allocate<i8>(danger_cast<i32>(initial))
+    }
+
+    /// The number of bytes accumulated so far.
+    [public] fn size() => number {
+        return new number(danger_cast<f64>(this.count))
+    }
+
+    /// Ensure the buffer can hold `needed` more bytes, doubling until it fits.
+    fn reserve(needed: i64) {
+        let one: i64 = constant<i64>(1)
+        let two: i64 = constant<i64>(2)
+        let zero: i64 = constant<i64>(0)
+
+        let required: i64 = this.count + needed
+        if required <= this.capacity {
+            return
+        }
+
+        let new_capacity: i64 = this.capacity
+        while new_capacity < required {
+            new_capacity = new_capacity * two
+        }
+
+        let new_buffer: pointer<i8> = runtime::allocate<i8>(danger_cast<i32>(new_capacity))
+        let index: i64 = zero
+        while index < this.count {
+            new_buffer[index] = this.buffer[index]
+            index = index + one
+        }
+        this.buffer = new_buffer
+        this.capacity = new_capacity
+    }
+
+    /// Append a single character.
+    [public] fn append_char(c: char) {
+        let one: i64 = constant<i64>(1)
+        this.reserve(one)
+        this.buffer[this.count] = c.to_raw()
+        this.count = this.count + one
+    }
+
+    /// Append every byte of `text`.
+    [public] fn append(text: string) {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let length: i64 = danger_cast<i64>(text.size().to_raw())
+        this.reserve(length)
+        let source: pointer<i8> = text.to_raw()
+        let index: i64 = zero
+        while index < length {
+            this.buffer[this.count] = source[index]
+            this.count = this.count + one
+            index = index + one
+        }
+    }
+
+    /// A `string` holding a NUL-terminated copy of the accumulated bytes.
+    [public] fn build() => string {
+        let one: i64 = constant<i64>(1)
+        let zero: i64 = constant<i64>(0)
+        let nul: i8 = constant<i8>(0)
+
+        let total: i64 = this.count + one
+        let result: pointer<i8> = runtime::allocate<i8>(danger_cast<i32>(total))
+        let index: i64 = zero
+        while index < this.count {
+            result[index] = this.buffer[index]
+            index = index + one
+        }
+        result[this.count] = nul
+        return new string(result, this.count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- String splitting ---
+// Lives here rather than on the string class because it produces an Array,
+// and core (where string is defined) cannot import collections.
+// ---------------------------------------------------------------------------
+
+/// Splits `text` on each occurrence of `separator`, returning the pieces in
+/// order. Consecutive separators produce empty pieces. An empty separator
+/// yields the whole text as a single piece.
+[public] fn split(text: string, separator: string) => Array<string> {
+    let result: Array<string> = new Array<string>()
+    let zero: number = 0
+    let one: number = 1
+    let separator_len: number = separator.size()
+
+    if separator_len == zero {
+        result.push(text)
+        return result
+    }
+
+    let len: number = text.size()
+    let start: number = 0
+    let index: number = 0
+    let limit: number = len - separator_len
+
+    while index <= limit {
+        if text.substring(index, index + separator_len) == separator {
+            result.push(text.substring(start, index))
+            index = index + separator_len
+            start = index
+        } else {
+            index = index + one
+        }
+    }
+
+    result.push(text.substring(start, len))
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// --- Pair ---
+// ---------------------------------------------------------------------------
+
+/// An ordered pair of two values of possibly different types.
+[public] class Pair<A, B> {
+    first: A
+    second: B
+
+    /// A pair of `first` and `second`.
+    constructor(first: A, second: B) {
+        this.first = first
+        this.second = second
+    }
+
+    /// The first element.
+    [public] fn get_first() => A {
+        return this.first
+    }
+
+    /// The second element.
+    [public] fn get_second() => B {
+        return this.second
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- IndexMap ---
+// ---------------------------------------------------------------------------
+
+/// A map that remembers insertion order. Lookups go through a hash map while a
+/// parallel list records the order keys were first inserted, so key_list and
+/// entries iterate in that order.
+[public] class IndexMap<KT: impl Hash, impl Equals, VT> {
+    [private] backing: Map<KT, VT>
+    [private] order: Array<KT>
+
+    /// An empty insertion-ordered map.
+    constructor() {
+        this.backing = new Map<KT, VT>()
+        this.order = new Array<KT>()
+    }
+
+    /// The number of entries.
+    [public] fn size() => number {
+        return this.backing.size()
+    }
+
+    /// Inserts or updates `key` with `value`. A new key is appended to the
+    /// order.
+    [mutates] fn set(key: KT, value: VT) {
+        if !this.backing.contains(key) {
+            this.order.push(key)
+        }
+        this.backing.set(key, value)
+    }
+
+    /// The value for `key`, or None.
+    [public] fn get(key: KT) => VT? {
+        return this.backing.get(key)
+    }
+
+    /// Whether `key` is present.
+    [public] fn contains(key: KT) => bool {
+        return this.backing.contains(key)
+    }
+
+    /// The keys in insertion order.
+    [public] fn key_list() => Array<KT> {
+        let result: Array<KT> = new Array<KT>()
+        for key in this.order {
+            result.push(key)
+        }
+        return result
+    }
+
+    /// The values in insertion order.
+    [public] fn value_list() => Array<VT> {
+        let result: Array<VT> = new Array<VT>()
+        for key in this.order {
+            result.push(this.backing.get(key).unwrap())
+        }
+        return result
+    }
+
+    /// The key-value pairs in insertion order.
+    [public] fn entries() => Array<Pair<KT, VT>> {
+        let result: Array<Pair<KT, VT>> = new Array<Pair<KT, VT>>()
+        for key in this.order {
+            result.push(new Pair<KT, VT>(key, this.backing.get(key).unwrap()))
+        }
+        return result
+    }
+
+    /// Applies `action` to each key and its value, in insertion order.
+    [public] fn for_each(action: closure(KT, VT) => void) {
+        for (key, value) in this.entries() {
+            action(key, value)
+        }
+    }
+
+    /// Removes `key` and its value, preserving the order of the rest.
+    [mutates] fn remove(key: KT) {
+        this.backing.remove(key)
+        let position: number = this.order.index_of_where(closure[key](candidate: KT) => bool {
+            return candidate == key
+        })
+        if position >= 0 {
+            this.order.remove_at(position)
+        }
+    }
+
+    /// The keys, sorted by `compare` (rather than in insertion order).
+    [public] fn sorted_keys(compare: closure(KT, KT) => number) => Array<KT> {
+        let result: Array<KT> = this.key_list()
+        result.sort(compare)
+        return result
+    }
+
+    /// The key-value pairs, sorted by `compare` (rather than in insertion
+    /// order).
+    [public] fn sorted_entries(compare: closure(Pair<KT, VT>, Pair<KT, VT>) => number) => Array<Pair<KT, VT>> {
+        let result: Array<Pair<KT, VT>> = this.entries()
+        result.sort(compare)
+        return result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- List ---
+// ---------------------------------------------------------------------------
+
+/// A growable list of `T`. List is Array under a name that reads as an ordered
+/// sequence; it inherits the full Array surface (push, pop, insert, remove_at,
+/// find, sort, indexing, iteration).
+[public] class List<T> from Array<T> {
+    /// An empty list.
+    constructor() {
+        let initial: i64 = constant<i64>(8)
+        let zero: i64 = constant<i64>(0)
+        this.capacity = initial
+        this.count = zero
+        this.buffer = runtime::allocate<T>(danger_cast<i32>(initial))
+        this.sort_algorithm = SortAlgorithm::Merge
+        this.search_algorithm = SearchAlgorithm::Linear
+    }
+}

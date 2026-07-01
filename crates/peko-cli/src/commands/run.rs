@@ -355,6 +355,7 @@ fn run_ui_project(
         Some(apprender_executable.clone()),
         false,
         None,
+        Vec::new(),
     );
 
     progress.finish_phase();

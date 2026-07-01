@@ -108,76 +108,92 @@ impl PekoValueBuilder for StringAST {
             return codegen_context.create_string(text);
         }
 
-        // Interpolated path: build a `%`-delimited format string and a
-        // parallel list of values, then hand both to the runtime's
-        // `unsafe_format` function.
-        let mut format_string = String::new();
-        let mut interpolated_values = Vec::new();
+        // Interpolated path: assemble the text and the interpolated values with
+        // a StringBuilder, converting each value to a string through its
+        // to_string. StringBuilder lives in std::collections, which a program
+        // using interpolation has in scope.
+        let builder_type =
+            match codegen_context.expand_type(&PekoType::simple_type("StringBuilder")) {
+                Some(builder_type) if builder_type.name() == "StringBuilder" => builder_type,
+                _ => {
+                    codegen_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.start.clone(),
+                            self.end.clone(),
+                            "string interpolation needs std::collections::StringBuilder in scope"
+                                .to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            codegen_context.get_current_file().to_path_buf(),
+                        ));
+                    return codegen_context.create_error_value();
+                }
+            };
+
+        let Some(builder) = codegen_context.create_object(&builder_type, Vec::new()) else {
+            return codegen_context.create_error_value();
+        };
 
         for chunk in &self.chunks {
-            if chunk.is_text() {
-                format_string.push_str(chunk.get_text().as_str());
-                continue;
-            }
-
-            format_string.push('%');
-
-            // Codegen every AST in the interpolation body. Only the last
-            // value is used; the earlier ones are for side effects.
-            let mut built_values = Vec::new();
-            for ast in &chunk.get_interpolation() {
-                built_values.push(ast.build_value(codegen_context));
-            }
-
-            if built_values.is_empty() {
-                codegen_context
-                    .diagnostics
-                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        chunk.start.clone(),
-                        chunk.end.clone(),
-                        "expected a value to interpolate but got nothing".to_string(),
-                        diagnostics::DiagnosticType::Error,
-                        codegen_context.get_current_file().to_path_buf(),
-                    ));
-                continue;
-            }
-
-            let last_value = built_values.last().unwrap();
-            if !codegen_context
-                .types_similar(&last_value.value_type, &PekoType::simple_type("string"))
-            {
-                codegen_context
-                    .diagnostics
-                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                        chunk.start.clone(),
-                        chunk.end.clone(),
-                        "expected a string for interpolated value".to_string(),
-                        diagnostics::DiagnosticType::Error,
-                        codegen_context.get_current_file().to_path_buf(),
-                    ));
+            let piece = if chunk.is_text() {
+                codegen_context.create_string(chunk.get_text())
             } else {
-                interpolated_values.push(last_value.clone());
-            }
+                // Codegen every AST in the interpolation body. Only the last
+                // value is appended; the earlier ones are for side effects.
+                let mut built_values = Vec::new();
+                for ast in &chunk.get_interpolation() {
+                    built_values.push(ast.build_value(codegen_context));
+                }
+
+                let Some(value) = built_values.last().cloned() else {
+                    codegen_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            chunk.start.clone(),
+                            chunk.end.clone(),
+                            "expected a value to interpolate but got nothing".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            codegen_context.get_current_file().to_path_buf(),
+                        ));
+                    continue;
+                };
+
+                if codegen_context
+                    .types_similar(&value.value_type, &PekoType::simple_type("string"))
+                {
+                    value
+                } else {
+                    match codegen_context.call_object_method(
+                        &value,
+                        "to_string",
+                        Vec::new(),
+                        None,
+                    ) {
+                        Ok(as_string) => as_string,
+                        Err(_) => {
+                            codegen_context.diagnostics.report_diagnostic(
+                                diagnostics::PekoDiagnostic::new(
+                                    chunk.start.clone(),
+                                    chunk.end.clone(),
+                                    format!(
+                                        "cannot interpolate a value of type `{}`; it has no to_string",
+                                        value.value_type
+                                    ),
+                                    diagnostics::DiagnosticType::Error,
+                                    codegen_context.get_current_file().to_path_buf(),
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let _ = codegen_context.call_object_method(&builder, "append", vec![piece], None);
         }
 
-        let format_string = codegen_context.create_string(format_string);
-
-        let interpolation_list = codegen_context
-            .create_standard_array(&PekoType::simple_type("string"), interpolated_values)
-            .unwrap_or_else(|| codegen_context.create_error_value());
-
-        let (previous_line, previous_file) = codegen_context.track_call_position(
-            self.start.file.to_string_lossy().into_owned(),
-            self.start.line,
-        );
-
-        let format_call = codegen_context.call_named_function(
-            "standard::unsafe_format",
-            vec![format_string, interpolation_list],
-        );
-
-        codegen_context.reset_call_position(&previous_line, &previous_file);
-
-        format_call.unwrap_or_else(|| codegen_context.create_error_value())
+        codegen_context
+            .call_object_method(&builder, "build", Vec::new(), None)
+            .unwrap_or_else(|_| codegen_context.create_error_value())
     }
 }

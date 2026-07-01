@@ -99,7 +99,7 @@ pub(super) fn parse_peko_source(file: PathBuf, source: String) -> (Vec<PekoAST>,
 
     // Walk the token stream until exhausted, skipping stray `;` / `}` that
     // tail-end a previous statement.
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }

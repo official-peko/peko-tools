@@ -1,0 +1,268 @@
+//! std::xml: an XML/HTML element tree with serialization and diffing.
+//!
+//! An Element has a tag, string attributes, ordered children, and optional
+//! text content. to_string renders the tree (escaping the characters XML
+//! requires); equals compares two trees structurally, the basis for diffing a
+//! rendered view against a new one.
+
+import { * } from core;
+import { * } from collections;
+import json;
+
+/// Escapes the five characters that are special in XML text and attributes.
+fn xml_escape(text: string) => string {
+    let builder: StringBuilder = new StringBuilder()
+    let length: number = text.size()
+    let index: number = 0
+    let one: number = 1
+    while index < length {
+        let c: char = text[index]
+        if c == '&' {
+            builder.append("&amp;")
+        } else if c == '<' {
+            builder.append("&lt;")
+        } else if c == '>' {
+            builder.append("&gt;")
+        } else if c == '"' {
+            builder.append("&quot;")
+        } else if c == '\'' {
+            builder.append("&apos;")
+        } else {
+            builder.append_char(c)
+        }
+        index = index + one
+    }
+    return builder.build()
+}
+
+/// An interface event delivered to an element handler. An event carries its
+/// kind (for example "onclick"), the uid of the element it fired on, a raw
+/// GC pointer to that element, and the JSON payload the frontend sent.
+[public] class Event {
+    [private] event_type: string
+    [private] element_id: string
+    [private] target_ref: pointer<void>
+    [private] data: json::JsonObject
+
+    /// Constructs an event from a delivered payload.
+    constructor(event_type: string, element_id: string, target_ref: pointer<void>, data: json::JsonObject) {
+        this.event_type = event_type
+        this.element_id = element_id
+        this.target_ref = target_ref
+        this.data = data
+    }
+
+    /// The event kind, such as "onclick" or "onkeydown".
+    [public] fn kind() => string {
+        return this.event_type
+    }
+
+    /// The uid of the element the event fired on.
+    [public] fn element_uid() => string {
+        return this.element_id
+    }
+
+    /// The raw GC pointer to the element that fired the event. Cast it back
+    /// with `as Element`.
+    [public] fn target_ref_raw() => pointer<void> {
+        return this.target_ref
+    }
+
+    /// The JSON payload the frontend sent with the event.
+    [public] fn get_data() => json::JsonObject {
+        return this.data
+    }
+}
+
+/// An XML element: a tag, string attributes, ordered child elements, optional
+/// text content, and event handlers keyed by event kind. An element with text
+/// and no children renders the text as its body; an element with children
+/// renders them in order. Handlers do not render; they drive interactivity when
+/// an element tree is served through a UI layer.
+[public] class Element {
+    tag: string
+    attributes: Map<string, string>
+    children: Array<Element>
+    text: string
+    has_text: bool
+    events: Map<string, closure(Event) => void>
+
+    /// An element with the given tag, no attributes, children, text, or events.
+    constructor(tag: string) {
+        this.tag = tag
+        this.attributes = new Map<string, string>()
+        this.children = new Array<Element>()
+        this.text = ""
+        this.has_text = false
+        this.events = new Map<string, closure(Event) => void>()
+    }
+
+    /// An element assembled from a tag, attribute map, child list, text, and
+    /// event handler map. This is the shape a PekoX tag literal lowers to.
+    constructor(tag: string, attributes: Map<string, string>, children: Array<Element>, inner_text: string, events: Map<string, closure(Event) => void>) {
+        this.tag = tag
+        this.attributes = attributes
+        this.children = children
+        this.text = inner_text
+        this.has_text = inner_text.size() > 0
+        this.events = events
+    }
+
+    /// The element's tag name.
+    [public] fn get_tag() => string {
+        return this.tag
+    }
+
+    /// Set an attribute, replacing any existing value.
+    [public] fn set_attribute(name: string, value: string) {
+        this.attributes.set(name, value)
+    }
+
+    /// The attribute under `name`, or None when absent.
+    [public] fn get_attribute(name: string) => string? {
+        return this.attributes.get(name)
+    }
+
+    /// Append a child element.
+    [public] fn add_child(child: Element) {
+        this.children.push(child)
+    }
+
+    /// The number of child elements.
+    [public] fn child_count() => number {
+        return this.children.size()
+    }
+
+    /// The child at `index`.
+    [public] fn child_at(index: number) => Element {
+        return this.children[index]
+    }
+
+    /// Set the element's text content.
+    [public] fn set_text(value: string) {
+        this.text = value
+        this.has_text = true
+    }
+
+    /// The element's text content (empty when none was set).
+    [public] fn get_text() => string {
+        return this.text
+    }
+
+    /// Registers `handler` for the event `kind`, replacing any existing one.
+    [public] fn set_event(kind: string, handler: closure(Event) => void) {
+        this.events.set(kind, handler)
+    }
+
+    /// True when a handler is registered for the event `kind`.
+    [public] fn has_event(kind: string) => bool {
+        return this.events.contains(kind)
+    }
+
+    /// The full map of event handlers, keyed by event kind.
+    [public] fn get_events() => Map<string, closure(Event) => void> {
+        return this.events
+    }
+
+    /// Render the opening tag with its attributes, in key order.
+    fn render_open(builder: StringBuilder) {
+        builder.append(`<${this.tag}`)
+        let names: Array<string> = this.attributes.key_list()
+        let count: number = names.size()
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            let name: string = names[index]
+            builder.append(` ${name}="${xml_escape(this.attributes.get(name).unwrap())}"`)
+            index = index + one
+        }
+        builder.append(">")
+    }
+
+    /// Render this element and its subtree into `builder`. A tagless node is a
+    /// text node: its text and children render without an element wrapper.
+    fn render(builder: StringBuilder) {
+        let one: number = 1
+        let tagged: bool = this.tag.size() > 0
+        if tagged {
+            this.render_open(builder)
+        }
+        if this.has_text {
+            builder.append(xml_escape(this.text))
+        }
+        let count: number = this.children.size()
+        let index: number = 0
+        while index < count {
+            this.children[index].render(builder)
+            index = index + one
+        }
+        if tagged {
+            builder.append(`</${this.tag}>`)
+        }
+    }
+
+    /// The element and its subtree as XML text.
+    [public] fn to_string() => string {
+        let builder: StringBuilder = new StringBuilder()
+        this.render(builder)
+        return builder.build()
+    }
+
+    /// True when `other` has the same tag, attributes, text, and child subtrees
+    /// in the same order. This is the structural comparison a view diff uses to
+    /// decide whether a node can be reused.
+    [public] fn equals(other: Element) => bool {
+        let same_tag: bool = this.tag == other.get_tag()
+        if !same_tag {
+            return false
+        }
+        let same_text: bool = this.text == other.get_text()
+        if !same_text {
+            return false
+        }
+
+        let names: Array<string> = this.attributes.key_list()
+        let other_names: Array<string> = other.attributes.key_list()
+        let attribute_count: number = names.size()
+        let other_attribute_count: number = other_names.size()
+        let same_attribute_count: bool = attribute_count == other_attribute_count
+        if !same_attribute_count {
+            return false
+        }
+
+        let one: number = 1
+        let index: number = 0
+        while index < attribute_count {
+            let name: string = names[index]
+            let mine: string = this.attributes.get(name).unwrap()
+            let theirs_value: string = other.get_attribute(name)? else {
+                return false
+            }
+            let same_value: bool = mine == theirs_value
+            if !same_value {
+                return false
+            }
+            index = index + one
+        }
+
+        let child_count: number = this.children.size()
+        let other_child_count: number = other.child_count()
+        let same_child_count: bool = child_count == other_child_count
+        if !same_child_count {
+            return false
+        }
+
+        let child_index: number = 0
+        while child_index < child_count {
+            let mine_child: Element = this.children[child_index]
+            let theirs_child: Element = other.child_at(child_index)
+            let children_equal: bool = mine_child.equals(theirs_child)
+            if !children_equal {
+                return false
+            }
+            child_index = child_index + one
+        }
+
+        return true
+    }
+}

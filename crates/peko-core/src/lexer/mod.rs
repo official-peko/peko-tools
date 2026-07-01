@@ -96,6 +96,8 @@ pub enum TokenType {
     From,               // from
     Constructor,        // constructor
     Super,              // super
+    Static,             // static
+    Serial,             // serial
     If,                 // if
     Else,               // else
     While,              // while
@@ -206,6 +208,8 @@ impl TokenType {
             Self::From => "'from'",
             Self::Constructor => "'constructor'",
             Self::Super => "'super'",
+            Self::Static => "'static'",
+            Self::Serial => "'serial'",
             Self::If => "'if'",
             Self::Else => "'else'",
             Self::While => "'while'",
@@ -606,6 +610,8 @@ impl TokenList {
                         "danger_cast" => TokenType::DangerCast,
                         "return" => TokenType::Return,
                         "class" => TokenType::Class,
+                        "static" => TokenType::Static,
+                        "serial" => TokenType::Serial,
                         "trait" => TokenType::Trait,
                         "impl" => TokenType::Impl,
                         "enum" => TokenType::Enum,

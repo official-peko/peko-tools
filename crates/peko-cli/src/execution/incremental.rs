@@ -258,8 +258,13 @@ impl ProjectIncrementalMap {
         self.global_set_ids.clone()
     }
 
-    /// Append a new `set_globals` function id to the registry.
+    /// Append a new `set_globals` function id to the registry. No-op if the
+    /// id is already registered, so a module reached under two binding names
+    /// contributes its globals initializer only once.
     pub fn add_global_set_function(&mut self, function_id: String) {
+        if self.global_set_ids.contains(&function_id) {
+            return;
+        }
         self.global_set_ids.push(function_id);
         self.updated_filemap = true;
     }
@@ -380,6 +385,14 @@ impl ProjectIncrementalMap {
 
     /// Register a new file and its hash in the cache.
     pub fn add_file(&mut self, file: ProjectFile) {
+        // A source file reached under two binding names produces two module
+        // entries with the same file id. Track it once so its object file is
+        // linked once; a second entry makes the linker reject every symbol the
+        // object defines as a duplicate.
+        if self.tracked_files.contains(&file.file_id) {
+            return;
+        }
+
         self.file_hashes
             .insert(file.file_id.clone(), file.generate_md5().to_vec());
 
@@ -789,6 +802,12 @@ fn initialize_incremental_for_target(
     super::load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
 
+    // Declare class and function signatures before building bodies, so a body
+    // (or a closure in it) can reference a class or function defined later in
+    // the file.
+    for ast in &asts {
+        ast.declare_signatures(&mut codegen_context);
+    }
     for ast in asts {
         ast.build_value(&mut codegen_context);
     }
@@ -983,9 +1002,24 @@ fn compile_component(
         .module_context
         .move_to_module(this_module.clone(), false, false);
 
+    // Three passes so a class body can dispatch on any other class regardless
+    // of source order: declare every shell, then lay out and declare every
+    // class's method signatures, then build the bodies.
+    for ast in asts.iter() {
+        PekoValueBuilder::declare(ast, &mut codegen_context);
+    }
+
+    for ast in asts.iter() {
+        ast.declare_signatures(&mut codegen_context);
+    }
+
     for ast in asts.iter() {
         ast.build_value(&mut codegen_context);
     }
+
+    // Emit the bodies of any generic instantiation laid out during the
+    // signature pass, now that every class is laid out.
+    codegen_context.drain_pending_generic_class_bodies();
 
     codegen_context.init_module_globals(&this_module);
 
@@ -1334,6 +1368,33 @@ pub fn compile_project(
         }
     };
 
+    // Compile each reachable package's `[native]` C sources to objects so the
+    // linker resolves the C symbols those objects define (the GC runtime, the
+    // value conversion helpers, and the program entry's C side).
+    let native_link_args = match super::native::compile_native_sources(
+        peko_root,
+        &project_root,
+        target,
+        &objects_directory,
+        &resolved.toolchain,
+        &resolved.dir,
+    ) {
+        Ok(native_build) => {
+            linked_files.extend(native_build.objects);
+            native_build.link_args
+        }
+        Err(error) => {
+            eprintln!("could not compile native sources: {error}");
+            return Ok((imported_styles, None));
+        }
+    };
+
+    // Drop any object that resolved to the same path through more than one
+    // source (tracked files, package link objects, native objects). The linker
+    // rejects an object passed to it twice as a wall of duplicate symbols.
+    let mut seen_objects = std::collections::HashSet::new();
+    linked_files.retain(|path| seen_objects.insert(path.clone()));
+
     progress.tick("Linking");
     peko_llvm::linker::lld_link(
         target,
@@ -1344,6 +1405,7 @@ pub fn compile_project(
         binary_output,
         link_shared,
         entitlements,
+        native_link_args,
     );
 
     project.incremental_info.as_mut().unwrap().write_updates();

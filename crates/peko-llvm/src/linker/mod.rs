@@ -26,7 +26,10 @@ unsafe extern "C" {
 /// `Compiler/toolchains/<os>/<arch>` directory). `output` is the binary path,
 /// or `None` for the driver default. `shared` builds a shared library on the
 /// targets that support it. `entitlements`, when supplied on an iOS target, is
-/// embedded as the `__TEXT,__entitlements` section.
+/// embedded as the `__TEXT,__entitlements` section. `package_link_args` are the
+/// raw linker arguments a package requests through its `[native.link]` table
+/// (for example `-framework Cocoa` for the desktop webview); they are passed to
+/// the driver ahead of the input objects.
 ///
 /// Returns `true` on a successful link.
 pub fn lld_link(
@@ -38,6 +41,7 @@ pub fn lld_link(
     output: Option<PathBuf>,
     shared: bool,
     entitlements: Option<PathBuf>,
+    package_link_args: Vec<String>,
 ) -> bool {
     linked_objects.insert(0, main_object);
 
@@ -101,6 +105,11 @@ pub fn lld_link(
     for lib in &link.libs {
         tokens.push(format!("{lib_prefix}{lib}"));
     }
+
+    // Package-requested link arguments from `[native.link]`, passed to the
+    // driver verbatim. A framework request is two tokens (`-framework`,
+    // `WebKit`); each array entry is already one token.
+    tokens.extend(package_link_args);
 
     // Objects last: the project objects, then the toolchain's runtime objects.
     for object in linked_objects.iter().chain(objects.iter()) {

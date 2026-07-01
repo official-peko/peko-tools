@@ -27,9 +27,8 @@ use indexmap::IndexMap;
 use crate::asts::data_structures::{DocInfo, PositionData, PositionedValue, VisibilityData};
 use crate::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use crate::execution::data_structures::{
-    ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
-    ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionVariable, TraitDefinition,
+    ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassVirtualTable,
+    EnumDefinition, ExecutionFunction, ExecutionModule, ExecutionVariable, TraitDefinition,
 };
 use crate::types::{self, PekoType};
 
@@ -99,11 +98,48 @@ pub struct SimulatorFunction {
 
     /// Back-reference to the module the function was declared in.
     pub parent: Arc<RwLock<SimulatorModule>>,
+
+    /// Generic type-parameter names. Empty for a non-generic function.
+    #[new(default)]
+    pub generic_typenames: Vec<PositionedValue<String>>,
+
+    /// Generic type-parameter names a class method declares itself (`fn map<U>`),
+    /// distinct from the owning class's parameters. Used at a call site to infer
+    /// them from the arguments and substitute them into the result.
+    #[new(default)]
+    pub method_generic_typenames: Vec<PositionedValue<String>>,
+
+    /// The source AST, present only on a generic template awaiting
+    /// instantiation.
+    #[new(default)]
+    pub source_function: Option<FunctionDeclarationAST>,
+
+    /// A `static` method: no implicit `this`, dispatched at the type level via
+    /// `Type::method(args)`. Its stored `arguments` are all explicit and any
+    /// `Self` in its signature is resolved to the owning class.
+    #[new(default)]
+    pub is_static: bool,
 }
 
 impl ExecutionFunction<SimulatorArg, SimulatorModule> for SimulatorFunction {
     fn get_parent_module(&self) -> Arc<RwLock<SimulatorModule>> {
         self.parent.clone()
+    }
+
+    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
+        &self.generic_typenames
+    }
+
+    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
+        &mut self.generic_typenames
+    }
+
+    fn get_source_function(&self) -> Option<&FunctionDeclarationAST> {
+        self.source_function.as_ref()
+    }
+
+    fn get_source_function_mut(&mut self) -> &mut Option<FunctionDeclarationAST> {
+        &mut self.source_function
     }
 
     fn get_visibility(&self) -> &VisibilityData {
@@ -261,6 +297,24 @@ pub struct SimulatorClass {
 
     /// Back-reference to the module the class was declared in.
     pub parent: Arc<RwLock<SimulatorModule>>,
+
+    /// Generic type-parameter names. Empty for a non-generic class.
+    #[new(default)]
+    pub generic_typenames: Vec<PositionedValue<String>>,
+
+    /// The source AST, present only on a generic template awaiting
+    /// instantiation.
+    #[new(default)]
+    pub source_class: Option<ClassAST>,
+
+    /// The scope a generic template was declared in, so its body re-processes
+    /// with the same surrounding names. None on a non-template class.
+    #[new(default)]
+    pub template_scope: Option<Arc<RwLock<Scope>>>,
+
+    /// Source-file path a generic template was declared in.
+    #[new(default)]
+    pub template_filename: PathBuf,
 }
 
 impl
@@ -273,6 +327,26 @@ impl
 {
     fn get_parent_module(&self) -> Arc<RwLock<SimulatorModule>> {
         self.parent.clone()
+    }
+
+    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
+        &self.generic_typenames
+    }
+
+    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
+        &mut self.generic_typenames
+    }
+
+    fn get_source_class(&self) -> Option<&ClassAST> {
+        self.source_class.as_ref()
+    }
+
+    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST> {
+        &mut self.source_class
+    }
+
+    fn get_implemented_trait_names(&self) -> Vec<String> {
+        self.implements.clone()
     }
 
     fn get_class_type(&self) -> &types::PekoType {
@@ -308,133 +382,6 @@ impl
     }
 }
 
-/// Info on a generic class declaration so it can be re-processed when
-/// invoked with concrete type arguments.
-#[derive(Clone, new)]
-pub struct SimulatorClassGeneric {
-    /// Visibility modifiers from the original declaration.
-    pub visibility: VisibilityData,
-
-    /// Names of the generic type parameters in declaration order.
-    pub generic_typenames: Vec<PositionedValue<String>>,
-
-    /// The original class AST, stashed for re-processing under
-    /// substitution.
-    pub class: ClassAST,
-
-    /// The module the generic was declared in.
-    pub module: Arc<RwLock<SimulatorModule>>,
-
-    /// The scope the generic was declared in. Used when re-processing so
-    /// the generic's body sees the same surrounding names that were
-    /// visible at declaration time.
-    pub scope: Arc<RwLock<Scope>>,
-
-    /// Source-file path the generic was declared in.
-    pub filename: PathBuf,
-}
-
-impl ExecutionClassGeneric<SimulatorModule> for SimulatorClassGeneric {
-    fn get_parent_module(&self) -> Arc<RwLock<SimulatorModule>> {
-        self.module.clone()
-    }
-
-    fn get_class(&self) -> &ClassAST {
-        &self.class
-    }
-
-    fn get_class_mut(&mut self) -> &mut ClassAST {
-        &mut self.class
-    }
-
-    fn get_filename(&self) -> &std::path::Path {
-        self.filename.as_path()
-    }
-
-    fn get_filename_mut(&mut self) -> &mut PathBuf {
-        &mut self.filename
-    }
-
-    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
-        &self.generic_typenames
-    }
-
-    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
-        &mut self.generic_typenames
-    }
-
-    fn get_module(&self) -> &Arc<RwLock<SimulatorModule>> {
-        &self.module
-    }
-
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<SimulatorModule>> {
-        &mut self.module
-    }
-
-    fn get_visibility(&self) -> &VisibilityData {
-        &self.visibility
-    }
-
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData {
-        &mut self.visibility
-    }
-}
-
-/// Info on a generic function declaration so it can be re-processed when
-/// invoked with concrete type arguments.
-#[derive(Clone, new)]
-pub struct SimulatorFunctionGeneric {
-    /// Visibility modifiers from the original declaration.
-    pub visibility: VisibilityData,
-
-    /// Names of the generic type parameters in declaration order.
-    pub generic_typenames: Vec<PositionedValue<String>>,
-
-    /// The original function AST, stashed for re-processing under
-    /// substitution.
-    pub function: FunctionDeclarationAST,
-
-    /// The module the generic was declared in.
-    pub module: Arc<RwLock<SimulatorModule>>,
-}
-
-impl ExecutionFunctionGeneric<SimulatorModule> for SimulatorFunctionGeneric {
-    fn get_parent_module(&self) -> Arc<RwLock<SimulatorModule>> {
-        self.module.clone()
-    }
-
-    fn get_function(&self) -> &FunctionDeclarationAST {
-        &self.function
-    }
-
-    fn get_function_mut(&mut self) -> &mut FunctionDeclarationAST {
-        &mut self.function
-    }
-
-    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>> {
-        &self.generic_typenames
-    }
-
-    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>> {
-        &mut self.generic_typenames
-    }
-
-    fn get_module(&self) -> &Arc<RwLock<SimulatorModule>> {
-        &self.module
-    }
-
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<SimulatorModule>> {
-        &mut self.module
-    }
-
-    fn get_visibility(&self) -> &VisibilityData {
-        &self.visibility
-    }
-
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData {
-        &mut self.visibility
-    }
-}
 
 /// A single Pekoscript module which holds every declaration that lives at
 /// this module's scope, plus links to parent / submodules / importers.
@@ -471,17 +418,9 @@ pub struct SimulatorModule {
     /// modules that reference it.
     pub variables: IndexMap<String, Arc<RwLock<SimulatorVariable>>>,
 
-    /// Classes. Each is held behind a lock shared by all modules that
-    /// reference it.
+    /// Classes (including generic templates, stored under their bare name).
+    /// Each is held behind a lock shared by all modules that reference it.
     pub classes: IndexMap<String, Arc<RwLock<SimulatorClass>>>,
-
-    /// Generic class declarations awaiting type substitution. Each is held
-    /// behind a lock shared by all modules that reference it.
-    pub class_generics: IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>>,
-
-    /// Generic function declarations awaiting type substitution. Each is
-    /// held behind a lock shared by all modules that reference it.
-    pub function_generics: IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>>,
 
     /// The module's top-level scope, used by tooling for symbol lookup.
     pub scope: Arc<RwLock<Scope>>,
@@ -492,11 +431,18 @@ pub struct SimulatorModule {
 
     /// Enums, keyed by name, holding their variant names in declaration
     /// order. Enums are immutable once declared, so they are stored by value.
-    pub enums: IndexMap<String, Vec<String>>,
+    pub enums: IndexMap<String, EnumDefinition>,
 
     /// Traits, keyed by name. Traits are immutable once declared, so they are
     /// stored by value.
     pub traits: IndexMap<String, TraitDefinition>,
+
+    /// Modules this one imported under a local name, keyed by that name. The
+    /// binding is private to this module, so two modules may import different
+    /// files under the same alias. Qualified access (`alias::member`) resolves
+    /// here first.
+    #[new(default)]
+    pub module_aliases: IndexMap<String, Arc<RwLock<SimulatorModule>>>,
 }
 
 impl SimulatorModule {
@@ -547,10 +493,8 @@ impl
         SimulatorValue,
         SimulatorVariable,
         SimulatorFunction,
-        SimulatorFunctionGeneric,
         SimulatorArg,
         SimulatorClass,
-        SimulatorClassGeneric,
         SimulatorClassVirtualTable,
         SimulatorClassAttribute,
     > for SimulatorModule
@@ -583,16 +527,8 @@ impl
         &self.functions
     }
 
-    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>> {
-        &self.function_generics
-    }
-
     fn get_classes(&self) -> &IndexMap<String, Arc<RwLock<SimulatorClass>>> {
         &self.classes
-    }
-
-    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>> {
-        &self.class_generics
     }
 
     fn get_parent(&self) -> Option<&Arc<RwLock<SimulatorModule>>> {
@@ -615,21 +551,15 @@ impl
         &mut self.functions
     }
 
-    fn get_function_generics_mut(
-        &mut self,
-    ) -> &mut IndexMap<String, Arc<RwLock<SimulatorFunctionGeneric>>> {
-        &mut self.function_generics
-    }
-
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<SimulatorClass>>> {
         &mut self.classes
     }
 
-    fn get_enums(&self) -> &IndexMap<String, Vec<String>> {
+    fn get_enums(&self) -> &IndexMap<String, EnumDefinition> {
         &self.enums
     }
 
-    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>> {
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, EnumDefinition> {
         &mut self.enums
     }
 
@@ -639,12 +569,6 @@ impl
 
     fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition> {
         &mut self.traits
-    }
-
-    fn get_class_generics_mut(
-        &mut self,
-    ) -> &mut IndexMap<String, Arc<RwLock<SimulatorClassGeneric>>> {
-        &mut self.class_generics
     }
 
     fn get_parent_mut(&mut self) -> &mut Option<Arc<RwLock<SimulatorModule>>> {
@@ -758,6 +682,25 @@ pub struct ScopeModule {
     pub definition_end: PositionData,
 }
 
+/// An enum as surfaced to tooling.
+#[derive(Clone, new)]
+pub struct ScopeEnum {
+    /// Doc-info comment block preceding the declaration, if any.
+    pub docinfo: Option<DocInfo>,
+
+    /// Enum name.
+    pub name: String,
+
+    /// Start of the declaration's span.
+    pub definition_start: PositionData,
+
+    /// End of the declaration's span.
+    pub definition_end: PositionData,
+
+    /// Variant names, in declaration order.
+    pub variants: Vec<String>,
+}
+
 /// Tagged-union view of any kind of scoped symbol.
 ///
 /// Each variant pairs the symbol-specific info with the visibility flags
@@ -776,6 +719,9 @@ pub enum ScopeSymbol {
 
     /// A submodule.
     Module(ScopeModule, VisibilityData),
+
+    /// An enum.
+    Enum(ScopeEnum, VisibilityData),
 }
 
 impl ScopeSymbol {
@@ -810,6 +756,7 @@ impl ScopeSymbol {
                 }
             }
             Self::Module(_, _) => "module",
+            Self::Enum(_, _) => "enum",
         }
     }
 
@@ -857,6 +804,7 @@ impl ScopeSymbol {
             Self::Function(scoped, _) => scoped.definition_start.clone(),
             Self::Class(scoped, _) => scoped.definition_start.clone(),
             Self::Module(scoped, _) => scoped.definition_start.clone(),
+            Self::Enum(scoped, _) => scoped.definition_start.clone(),
         }
     }
 
@@ -868,6 +816,7 @@ impl ScopeSymbol {
             Self::Function(scoped, _) => scoped.definition_end.clone(),
             Self::Class(scoped, _) => scoped.definition_end.clone(),
             Self::Module(scoped, _) => scoped.definition_end.clone(),
+            Self::Enum(scoped, _) => scoped.definition_end.clone(),
         }
     }
 
@@ -879,6 +828,7 @@ impl ScopeSymbol {
             Self::Function(_, vis) => vis.clone(),
             Self::Class(_, vis) => vis.clone(),
             Self::Module(_, vis) => vis.clone(),
+            Self::Enum(_, vis) => vis.clone(),
         }
     }
 
@@ -891,6 +841,7 @@ impl ScopeSymbol {
             Self::Function(func, _) => func.docinfo.clone(),
             Self::Class(class, _) => class.docinfo.clone(),
             Self::Module(module, _) => module.docinfo.clone(),
+            Self::Enum(scoped, _) => scoped.docinfo.clone(),
         }
     }
 
@@ -902,6 +853,7 @@ impl ScopeSymbol {
             Self::Function(scoped, _) => scoped.name.clone(),
             Self::Class(scoped, _) => scoped.name.clone(),
             Self::Module(scoped, _) => scoped.name.clone(),
+            Self::Enum(scoped, _) => scoped.name.clone(),
         }
     }
 }

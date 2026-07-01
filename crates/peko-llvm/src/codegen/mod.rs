@@ -62,6 +62,14 @@ pub trait PekoValueBuilder {
     /// rest are no-ops. `build_value` reuses the shell's types rather than
     /// recreating them.
     fn declare(&self, _codegen_context: &mut PekoCodegenContext) {}
+
+    /// Signature pass, run after every shell is declared and before any body:
+    /// lay out a class's fields, declare its method LLVM functions, and emit its
+    /// static data, without emitting method bodies. This makes a class
+    /// dispatchable from another class's body regardless of source order. Only
+    /// `ClassAST` overrides this; every other declaration is a no-op here and is
+    /// built fully in the body pass.
+    fn declare_signatures(&self, _codegen_context: &mut PekoCodegenContext) {}
 }
 
 /// Dispatch a `PekoAST` to the appropriate `PekoValueBuilder` impl.
@@ -95,6 +103,7 @@ impl PekoValueBuilder for PekoAST {
                 Number,
                 Null,
                 NewVariable,
+                Destructure,
                 VariableReassignment,
                 VariableReference,
                 FunctionDeclaration,
@@ -129,11 +138,42 @@ impl PekoValueBuilder for PekoAST {
         )
     }
 
-    /// Routes the header pass to the contained AST. Only class declarations
-    /// create a type shell; everything else keeps the trait default.
+    /// Routes the header pass to the contained AST. Class declarations create a
+    /// type shell. Trait declarations register their slot layout here, before
+    /// any class signature pass, so a class can emit a witness table and itable
+    /// for the traits it implements (the itable drives erased-generic dispatch).
     fn declare(&self, codegen_context: &mut PekoCodegenContext) {
-        if let PekoAST::Class(ast) = self {
-            ast.declare(codegen_context);
+        match self {
+            PekoAST::Class(ast) => ast.declare(codegen_context),
+            PekoAST::Trait(ast) => {
+                ast.build_value(codegen_context);
+            }
+            PekoAST::Enum(ast) => {
+                ast.build_value(codegen_context);
+            }
+            _ => {}
+        }
+    }
+
+    /// Routes the signature pass to the contained AST. Class declarations lay
+    /// out fields and declare method signatures. Import statements run here too,
+    /// before any class signature, so a class can name an imported type in its
+    /// fields or method signatures. An import is idempotent across passes, so
+    /// the body pass running it again reuses the already-loaded module.
+    fn declare_signatures(&self, codegen_context: &mut PekoCodegenContext) {
+        match self {
+            PekoAST::Class(ast) => ast.declare_signatures(codegen_context),
+            PekoAST::FunctionDeclaration(ast) => ast.declare_signatures(codegen_context),
+            PekoAST::ImportStatement(ast) => {
+                ast.build_value(codegen_context);
+            }
+            // Register enums in the signature pass as well (registration is
+            // idempotent), so a class can name an enum in its attribute and
+            // method-parameter types regardless of pass ordering.
+            PekoAST::Enum(ast) => {
+                ast.build_value(codegen_context);
+            }
+            _ => {}
         }
     }
 }

@@ -182,6 +182,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         output_path,
         cli_info.flags.has_flag("shared"),
         None,
+        Vec::new(),
     );
 
     reporter.success(format!("compiled {}", main_file.display()));

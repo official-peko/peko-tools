@@ -386,6 +386,15 @@ impl PekoType {
         matches!(self.kind, PekoTypeKind::Generic { .. })
     }
 
+    /// The restraints on a generic-parameter type. Empty for any other form.
+    #[must_use]
+    pub fn restraints(&self) -> &[TypeRestraint] {
+        match &self.kind {
+            PekoTypeKind::Generic { restraints, .. } => restraints,
+            _ => &[],
+        }
+    }
+
     /// Parses a `PekoType` from a standalone string.
     ///
     /// The string is lexed and then handed to [`PekoType::from_tokens`].
@@ -957,7 +966,6 @@ impl PekoType {
     pub fn is_pointer(&self) -> bool {
         self.array_depth > 0
             || self.name() == "opaque"
-            || self.name() == "string"
             || self.name() == "cstr"
             || self.name() == "pointer"
             || self.reference_depth > 0
@@ -1240,4 +1248,132 @@ fn parse_depth_suffixes(
     }
 
     (array_depth, optional_depth, ending_position)
+}
+
+/// Replaces generic parameters in `ty` with their concrete types from `map`,
+/// recursing through generic arguments and function argument/return types. A
+/// parameter carries its own array and reference depth onto the substitute.
+/// Used at an erased call site to retype the result, and at member access to
+/// substitute a class's use-site type arguments. Shared by the codegen and the
+/// simulator so both resolve erased generics identically.
+#[must_use]
+pub fn substitute_generic_params(
+    ty: &PekoType,
+    map: &std::collections::HashMap<String, PekoType>,
+) -> PekoType {
+    // A named slot (a bare `Generic` parameter, or a basic type whose name is a
+    // parameter) becomes its concrete type, keeping any depth it carried.
+    if !ty.is_function()
+        && let Some(concrete) = map.get(ty.name())
+    {
+        let mut result = concrete.clone();
+        result.array_depth += ty.array_depth;
+        result.reference_depth += ty.reference_depth;
+        return result;
+    }
+
+    // A parameter with no mapping stays as-is (no inner types to walk).
+    if ty.is_generic_param() {
+        return ty.clone();
+    }
+
+    let mut result = ty.clone();
+    for generic in result.generics_mut().iter_mut() {
+        *generic = substitute_generic_params(generic, map);
+    }
+    if let Some(return_type) = result.function_return().cloned() {
+        result.set_function_return(Some(substitute_generic_params(&return_type, map)));
+    }
+    result
+}
+
+/// Replaces the `Self` type in `ty` with `class_type`, recursing through
+/// generic arguments and function returns (so `Self?`, which is `Option<Self>`,
+/// and `Array<Self>` resolve too). Used to bind the return and argument types of
+/// a `static` trait method to the concrete type that implements it, so a call
+/// such as `Point::deserialize(...)` yields `Point`. Shared by the codegen and
+/// the simulator.
+#[must_use]
+pub fn substitute_self(ty: &PekoType, class_type: &PekoType) -> PekoType {
+    let mut map = std::collections::HashMap::new();
+    map.insert(String::from("Self"), class_type.clone());
+    substitute_generic_params(ty, &map)
+}
+
+/// The first generic-parameter carrier found in `ty`, searching the type
+/// itself, then its generic arguments (or a function's argument types), then a
+/// function's return type. Returns `None` when `ty` mentions no carrier. Used to
+/// canonicalize an erased instantiation so nested generics do not spiral.
+#[must_use]
+pub fn first_generic_param(ty: &PekoType) -> Option<PekoType> {
+    if ty.is_generic_param() {
+        return Some(ty.clone());
+    }
+    for generic in ty.generics() {
+        if let Some(found) = first_generic_param(generic) {
+            return Some(found);
+        }
+    }
+    if let Some(return_type) = ty.function_return() {
+        return first_generic_param(return_type);
+    }
+    None
+}
+
+/// The depth of generic-argument nesting in `ty`. A leaf (a bare parameter, or
+/// a type with no generic arguments) is depth 0; each layer of generic
+/// arguments adds one. `Pair<T, U>` is depth 1; `Pair<Pair<T, U>, U>` is depth
+/// 2. Used to bound how deep an erased instantiation may nest before it is
+/// canonicalized.
+#[must_use]
+pub fn generic_nesting_depth(ty: &PekoType) -> usize {
+    if ty.is_generic_param() {
+        return 0;
+    }
+    let mut child_max = 0;
+    for generic in ty.generics() {
+        child_max = child_max.max(generic_nesting_depth(generic));
+    }
+    if let Some(return_type) = ty.function_return() {
+        child_max = child_max.max(generic_nesting_depth(return_type));
+    }
+    if ty.generics().is_empty() && ty.function_return().is_none() {
+        0
+    } else {
+        1 + child_max
+    }
+}
+
+/// Infers concrete bindings for the parameter names in `names` by unifying a
+/// `declared` type (which may reference those parameters, possibly nested in
+/// generic arguments or a closure's argument and return types) against a
+/// concrete `actual` type. Used at an erased method call site to recover the
+/// method's own generic parameters from the supplied arguments. A parameter
+/// already bound keeps its first binding.
+pub fn infer_generic_bindings(
+    declared: &PekoType,
+    actual: &PekoType,
+    names: &std::collections::HashSet<String>,
+    out: &mut std::collections::HashMap<String, PekoType>,
+) {
+    // A declared slot that names a parameter binds to the actual type.
+    if !declared.is_function() && names.contains(declared.name()) {
+        out.entry(declared.name().to_string())
+            .or_insert_with(|| actual.clone());
+        return;
+    }
+
+    // Recurse through generic arguments (and function argument types).
+    for (declared_generic, actual_generic) in
+        declared.generics().iter().zip(actual.generics().iter())
+    {
+        infer_generic_bindings(declared_generic, actual_generic, names, out);
+    }
+
+    // Recurse through the function return type.
+    if let (Some(declared_return), Some(actual_return)) =
+        (declared.function_return(), actual.function_return())
+    {
+        infer_generic_bindings(declared_return, actual_return, names, out);
+    }
 }

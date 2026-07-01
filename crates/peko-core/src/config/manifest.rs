@@ -11,7 +11,7 @@ use toml_edit::DocumentMut;
 use super::container::{Compression, encode_container};
 use super::{ConfigError, MANIFEST_FILE, SOURCE_DIR, operating_system_from_str};
 use crate::{ExternalModuleInfo, ExternalModuleVersion};
-use crate::target::OperatingSystem;
+use crate::target::{Architecture, OperatingSystem};
 
 /// How far up the directory tree discovery searches for a manifest.
 const DISCOVERY_DEPTH: usize = 16;
@@ -211,8 +211,35 @@ pub struct Native {
     pub flags: NativeFlags,
     /// The link arguments.
     pub link: NativeLink,
+    /// Prebuilt static libraries to link, keyed by platform.
+    pub libs: NativeLibs,
     /// The vendored C libraries.
     pub vendor: Vec<Vendor>,
+}
+
+/// Prebuilt static libraries from `[native.libs]`, keyed by a platform string
+/// that is either an operating system name (`macos`) or an operating system
+/// and architecture (`macos-arm`). The paths are relative to the package root.
+#[derive(Debug, Clone, Default)]
+pub struct NativeLibs {
+    /// One entry per platform key, in declaration order.
+    pub per_platform: Vec<(String, Vec<PathBuf>)>,
+}
+
+impl NativeLibs {
+    /// Every library archive that applies to `os`/`arch`: entries keyed `all`,
+    /// the operating system name, or the `os-arch` pair.
+    pub fn for_target(&self, os: OperatingSystem, arch: Architecture) -> Vec<&PathBuf> {
+        let os_key = os.name();
+        let os_arch_key = format!("{}-{}", os.name(), arch.name());
+        let mut result = Vec::new();
+        for (key, paths) in &self.per_platform {
+            if key == "all" || key == os_key || key == &os_arch_key {
+                result.extend(paths.iter());
+            }
+        }
+        result
+    }
 }
 
 /// Compile flags from `[native.flags]`.
@@ -299,6 +326,15 @@ impl Manifest {
         match self {
             Manifest::Application(app) => &app.project.name,
             Manifest::Package(pkg) => &pkg.package.name,
+        }
+    }
+
+    /// The `[native]` table, drawn from either manifest form. `None` when the
+    /// manifest declares no native build.
+    pub fn native(&self) -> Option<&Native> {
+        match self {
+            Manifest::Application(app) => app.native.as_ref(),
+            Manifest::Package(pkg) => pkg.native.as_ref(),
         }
     }
 
@@ -654,6 +690,8 @@ struct RawNative {
     #[serde(default)]
     link: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    libs: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     vendor: Vec<RawVendor>,
 }
 
@@ -860,6 +898,13 @@ fn build_native(raw: RawNative, source: &Path) -> Result<Native, ConfigError> {
         link: NativeLink {
             all: link.0,
             per_os: link.1,
+        },
+        libs: NativeLibs {
+            per_platform: raw
+                .libs
+                .into_iter()
+                .map(|(key, paths)| (key, paths.into_iter().map(PathBuf::from).collect()))
+                .collect(),
         },
         vendor: raw
             .vendor

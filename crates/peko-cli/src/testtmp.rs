@@ -327,7 +327,7 @@ fn parse_without_defaults(file: &Path, source: &str) -> (Vec<PekoAST>, Diagnosti
     let mut parser = PekoParser::new(TokenList::from_source(source, &file), &file);
 
     let mut asts = Vec::new();
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }
