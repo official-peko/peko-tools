@@ -57,6 +57,25 @@ pub struct TraitMethodSlot {
     /// Whether the trait supplies a default body for this slot. A slot with no
     /// default is a required method the implementer must provide.
     pub has_default: bool,
+
+    /// A `static` slot has no implicit `this` and is called at the type level
+    /// (`Type::method(args)`). Its `argument_types` are all explicit; there is
+    /// no receiver. Dispatch resolves to a concrete type at compile time.
+    pub is_static: bool,
+}
+
+/// A registered enum: its variant names in declaration order plus its
+/// visibility. Stored by value in each module so it survives being copied into
+/// an importing module, which a parallel visibility map would not.
+#[derive(Clone, Debug, Default)]
+pub struct EnumDefinition {
+    /// Variant names in declaration order. The zero-based index of a variant
+    /// is its integer value.
+    pub variants: Vec<String>,
+
+    /// `true` when the enum was declared `[private]`, so a qualified access
+    /// from another module is rejected.
+    pub private: bool,
 }
 
 /// A registered trait: a named, ordered set of method slots.
@@ -135,6 +154,21 @@ pub trait ExecutionFunction<ArgumentType, ModuleType> {
     /// The module the function was declared in. Used to resolve the
     /// function's free identifiers.
     fn get_parent_module(&self) -> Arc<RwLock<ModuleType>>;
+
+    /// Names of the generic type parameters in declaration order. Empty for a
+    /// non-generic function.
+    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>>;
+
+    /// Mutable view of the generic type-parameter names.
+    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>>;
+
+    /// The original function AST, present only on a generic template (a
+    /// function with type parameters awaiting instantiation). Instantiation
+    /// re-processes it under concrete or erased type arguments.
+    fn get_source_function(&self) -> Option<&FunctionDeclarationAST>;
+
+    /// Mutable view of the stashed source AST.
+    fn get_source_function_mut(&mut self) -> &mut Option<FunctionDeclarationAST>;
 }
 
 /// A declared top-level or class-level variable.
@@ -214,79 +248,26 @@ pub trait ExecutionClass<ClassType, ClassVirtualTableType, ClassAttributeType, M
 
     /// The module the class was declared in.
     fn get_parent_module(&self) -> Arc<RwLock<ModuleType>>;
-}
 
-/// A generic class declaration awaiting type substitution.
-///
-/// Implementations stash the original [`ClassAST`] so that
-/// [`crate::execution::ExecutionContextAlgorithms::create_generic_class`]
-/// can re-process it once concrete type arguments are supplied.
-pub trait ExecutionClassGeneric<ModuleType> {
-    /// Visibility modifiers from the original declaration.
-    fn get_visibility(&self) -> &VisibilityData;
-
-    /// Mutable view of the generic's visibility modifiers.
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData;
-
-    /// Names of the generic type parameters in declaration order.
+    /// Names of the generic type parameters in declaration order. Empty for a
+    /// non-generic class.
     fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>>;
 
     /// Mutable view of the generic type-parameter names.
     fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>>;
 
-    /// The original class AST stashed for later substitution.
-    fn get_class(&self) -> &ClassAST;
+    /// The original class AST, present only on a generic template (a class with
+    /// type parameters awaiting instantiation). Instantiation re-processes it
+    /// under concrete or erased type arguments.
+    fn get_source_class(&self) -> Option<&ClassAST>;
 
-    /// Mutable view of the stashed class AST.
-    fn get_class_mut(&mut self) -> &mut ClassAST;
+    /// Mutable view of the stashed source AST.
+    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST>;
 
-    /// The module the generic class was declared in.
-    fn get_module(&self) -> &Arc<RwLock<ModuleType>>;
-
-    /// Mutable view of the declaring module reference.
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<ModuleType>>;
-
-    /// Path of the source file the generic class was declared in. Used by
-    /// downstream diagnostics to report the original declaration site
-    /// after instantiation.
-    fn get_filename(&self) -> &Path;
-
-    /// Mutable view of the source-file path.
-    fn get_filename_mut(&mut self) -> &mut PathBuf;
-
-    /// Same as [`Self::get_module`] but returns an owned `Arc` clone for
-    /// callers that need to bind it across scopes.
-    fn get_parent_module(&self) -> Arc<RwLock<ModuleType>>;
-}
-
-/// A generic function declaration awaiting type substitution.
-pub trait ExecutionFunctionGeneric<ModuleType> {
-    /// Visibility modifiers from the original declaration.
-    fn get_visibility(&self) -> &VisibilityData;
-
-    /// Mutable view of the generic's visibility modifiers.
-    fn get_visibility_mut(&mut self) -> &mut VisibilityData;
-
-    /// Names of the generic type parameters in declaration order.
-    fn get_generic_typenames(&self) -> &Vec<PositionedValue<String>>;
-
-    /// Mutable view of the generic type-parameter names.
-    fn get_generic_typenames_mut(&mut self) -> &mut Vec<PositionedValue<String>>;
-
-    /// The original function AST stashed for later substitution.
-    fn get_function(&self) -> &FunctionDeclarationAST;
-
-    /// Mutable view of the stashed function AST.
-    fn get_function_mut(&mut self) -> &mut FunctionDeclarationAST;
-
-    /// The module the generic function was declared in.
-    fn get_module(&self) -> &Arc<RwLock<ModuleType>>;
-
-    /// Mutable view of the declaring module reference.
-    fn get_module_mut(&mut self) -> &mut Arc<RwLock<ModuleType>>;
-
-    /// Same as [`Self::get_module`] but returns an owned `Arc` clone.
-    fn get_parent_module(&self) -> Arc<RwLock<ModuleType>>;
+    /// Names of the traits this class implements, from its `impl` clause. Used
+    /// to accept a class argument where a trait it implements is expected
+    /// (implicit trait-object coercion).
+    fn get_implemented_trait_names(&self) -> Vec<String>;
 }
 
 /// A single Pekoscript module (the central typed namespace).
@@ -304,20 +285,16 @@ pub trait ExecutionModule<
             ValueType,
             VariableType,
             FunctionType,
-            FunctionGenericType,
             ArgumentType,
             ClassType,
-            ClassGenericType,
             ClassVirtualTableType,
             ClassAttributeType,
         >,
     ValueType: ExecutionValue,
     VariableType: ExecutionVariable<ValueType, ModuleType>,
     FunctionType: ExecutionFunction<ArgumentType, ModuleType>,
-    FunctionGenericType: ExecutionFunctionGeneric<ModuleType>,
     ArgumentType: ExecutionArgument,
     ClassType: ExecutionClass<ClassType, ClassVirtualTableType, ClassAttributeType, ModuleType>,
-    ClassGenericType: ExecutionClassGeneric<ModuleType>,
     ClassVirtualTableType: ExecutionClassVirtualTable<FunctionType>,
     ClassAttributeType: ExecutionClassAttribute,
 >
@@ -376,13 +353,13 @@ pub trait ExecutionModule<
     /// Mutable view of the class map.
     fn get_classes_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ClassType>>>;
 
-    /// Enum map (name -> variant names in declaration order), preserving
-    /// declaration order. Enums are immutable once declared, so the variant
-    /// list is stored by value rather than behind a lock.
-    fn get_enums(&self) -> &IndexMap<String, Vec<String>>;
+    /// Enum map (name -> definition), preserving declaration order. Enums are
+    /// immutable once declared, so they are stored by value rather than behind
+    /// a lock.
+    fn get_enums(&self) -> &IndexMap<String, EnumDefinition>;
 
     /// Mutable view of the enum map.
-    fn get_enums_mut(&mut self) -> &mut IndexMap<String, Vec<String>>;
+    fn get_enums_mut(&mut self) -> &mut IndexMap<String, EnumDefinition>;
 
     /// Trait map (name -> trait definition), preserving declaration order.
     /// Traits are immutable once declared, so they are stored by value rather
@@ -391,24 +368,4 @@ pub trait ExecutionModule<
 
     /// Mutable view of the trait map.
     fn get_traits_mut(&mut self) -> &mut IndexMap<String, TraitDefinition>;
-
-    /// Generic-class map (name -> generic-class data), preserving
-    /// declaration order. Keyed on the bare name without type parameters.
-    /// Each entry is held behind a lock shared by all modules that
-    /// reference the generic.
-    fn get_class_generics(&self) -> &IndexMap<String, Arc<RwLock<ClassGenericType>>>;
-
-    /// Mutable view of the generic-class map.
-    fn get_class_generics_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ClassGenericType>>>;
-
-    /// Generic-function map (name -> generic-function data), preserving
-    /// declaration order. Keyed on the bare name without type parameters.
-    /// Each entry is held behind a lock shared by all modules that
-    /// reference the generic.
-    fn get_function_generics(&self) -> &IndexMap<String, Arc<RwLock<FunctionGenericType>>>;
-
-    /// Mutable view of the generic-function map.
-    fn get_function_generics_mut(
-        &mut self,
-    ) -> &mut IndexMap<String, Arc<RwLock<FunctionGenericType>>>;
 }

@@ -310,6 +310,28 @@ fn build_app_bundle(
     }
     recursive_zip_add(&mut module_writer, &app_directory.join("lib"), "lib")?;
 
+    // Prebuilt application DEX shipped by native packages (std::webview needs a
+    // Java WebViewClient and JS bridge that cannot be built from JNI alone). The
+    // bundle keeps DEX under dex/; bundletool places it at the apk root as
+    // classes.dex. The manifest is marked hasCode to load it.
+    let dex_files = crate::execution::native::collect_android_dex_files(
+        cli_info.get_peko_root(),
+        project.get_root(),
+    );
+    for (index, dex) in dex_files.iter().enumerate() {
+        let name = if index == 0 {
+            "dex/classes.dex".to_owned()
+        } else {
+            format!("dex/classes{}.dex", index + 1)
+        };
+        module_writer.start_file::<&str, ExtendedFileOptions>(
+            name.as_str(),
+            FileOptions::default().compression_method(CompressionMethod::Stored),
+        )?;
+        let dex_bytes = io_at(dex, fs::read(dex))?;
+        io_at(&module_zip, module_writer.write_all(&dex_bytes))?;
+    }
+
     module_writer.finish()?;
     io_at(&proto_extracted, fs::remove_dir_all(&proto_extracted))?;
     io_at(&compiled_resources, fs::remove_file(&compiled_resources))?;

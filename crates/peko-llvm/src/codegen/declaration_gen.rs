@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use itertools::Itertools;
 use peko_core::asts::data_structures::{ClassMethod, PositionData, VisibilityData};
 use peko_core::asts::declarations::{
-    ClassAST, ClosureAST, EnumDeclarationAST, FunctionDeclarationAST, ModuleCreationAST,
-    NewVariableAST, TraitDeclarationAST,
+    ClassAST, ClosureAST, DestructureAST, EnumDeclarationAST, FunctionDeclarationAST,
+    ModuleCreationAST, NewVariableAST, TraitDeclarationAST,
 };
 use peko_core::asts::{PekoAST, PlaceholderAST};
 use peko_core::diagnostics;
@@ -22,11 +22,42 @@ use crate::codegen::PekoValueBuilder;
 use crate::codegen::builders::prelude::*;
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::data_structures::{
-    CodegenArg, CodegenClass, CodegenClassAttribute, CodegenClassGeneric, CodegenFunction,
-    CodegenFunctionGeneric, CodegenModule, CodegenValue, CodegenVariable, CodegenVirtualTable,
-    GlobalVariable, is_managed_pointer, managed_pointer_type,
+    CodegenArg, CodegenClass, CodegenClassAttribute, CodegenFunction, CodegenModule, CodegenValue,
+    CodegenVariable, CodegenVirtualTable, GlobalVariable, is_managed_pointer, managed_pointer_type,
 };
 use crate::codegen::symbol::SymbolName;
+
+/// Builds a generic-class template: a CodegenClass stored under its bare name
+/// that holds the source AST and the type-parameter names. Its struct type and
+/// members are placeholders; instantiation compiles the source under
+/// substitution.
+fn build_generic_class_template(
+    codegen_context: &mut PekoCodegenContext,
+    ast: &ClassAST,
+) -> CodegenClass {
+    let mut source = ast.clone();
+    source.generics.clear();
+
+    let current_module = codegen_context.module_context.current_module().clone();
+    let current_file = codegen_context.get_current_file().to_path_buf();
+    let class_type = PekoType::from_string(ast.class_name.value.as_str(), &current_file);
+    let placeholder = codegen_context.create_named_struct(format!("template.{}", ast.class_name.value));
+
+    let mut class = CodegenClass::new(
+        class_type,
+        None,
+        IndexMap::new(),
+        CodegenVirtualTable::new(IndexMap::new(), 0, placeholder),
+        placeholder,
+        current_module,
+        None,
+        std::collections::HashMap::new(),
+    );
+    class.generic_typenames = ast.generics.clone();
+    class.source_class = Some(source);
+    class.template_filename = current_file;
+    class
+}
 
 impl PekoValueBuilder for NewVariableAST {
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
@@ -306,7 +337,106 @@ impl PekoValueBuilder for NewVariableAST {
     }
 }
 
+impl PekoValueBuilder for DestructureAST {
+    fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        if !codegen_context.local_scope {
+            codegen_context
+                .diagnostics
+                .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    self.start.clone(),
+                    self.end.clone(),
+                    "destructuring is only allowed inside a function".to_string(),
+                    diagnostics::DiagnosticType::Error,
+                    codegen_context.get_current_file().to_path_buf(),
+                ));
+            return codegen_context.create_error_value();
+        }
+
+        // Build the value once, then bind each name to a positional accessor.
+        codegen_context.expecting_value = true;
+        let value = self.value.build_value(codegen_context);
+        codegen_context.expecting_value = false;
+
+        for (index, name) in self.names.iter().enumerate() {
+            let accessor = match index {
+                0 => "get_first",
+                1 => "get_second",
+                _ => {
+                    codegen_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            name.start.clone(),
+                            name.end.clone(),
+                            "destructuring binds at most two names".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            codegen_context.get_current_file().to_path_buf(),
+                        ));
+                    continue;
+                }
+            };
+
+            let element = match codegen_context.call_object_method(
+                &value,
+                accessor,
+                Vec::new(),
+                None,
+            ) {
+                Ok(element) => element,
+                Err(_) => {
+                    codegen_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.value.get_start().clone(),
+                            self.value.get_end().clone(),
+                            format!(
+                                "cannot destructure a value of type `{}`; it is not a Pair",
+                                value.value_type
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            codegen_context.get_current_file().to_path_buf(),
+                        ));
+                    codegen_context.create_error_value()
+                }
+            };
+
+            let element_type = element.value_type.clone();
+            let slot = codegen_context.build_stack_allocation(&element_type);
+            if !element_type.is_error_type() {
+                codegen_context.build_store(&slot, &element);
+            }
+            let qualified = codegen_context.qualify_value_to_current(slot);
+            codegen_context.scoped_variables.insert(
+                name.value.clone(),
+                CodegenVariable::new(
+                    VisibilityData::open_visibility(),
+                    element_type,
+                    qualified,
+                    None,
+                    codegen_context.module_context.current_module().clone(),
+                    None,
+                ),
+            );
+        }
+
+        codegen_context.create_null_pointer()
+    }
+}
+
 impl PekoValueBuilder for FunctionDeclarationAST {
+    /// Registers a non-generic function's signature without building its body,
+    /// so a body built later can call a function declared later in the file. A
+    /// generic function is skipped: it is a template that registers and emits
+    /// lazily on instantiation, and re-running it here would disturb that.
+    fn declare_signatures(&self, codegen_context: &mut PekoCodegenContext) {
+        if !self.generic_types.is_empty() {
+            return;
+        }
+        let previous = codegen_context.declaring_signatures_only;
+        codegen_context.declaring_signatures_only = true;
+        self.build_value(codegen_context);
+        codegen_context.declaring_signatures_only = previous;
+    }
+
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
         // Generic function declarations are tracked, not emitted; the
         // emit happens when a concrete instantiation is requested.
@@ -315,23 +445,39 @@ impl PekoValueBuilder for FunctionDeclarationAST {
             self_reference.generic_types.clear();
 
             let current_module = codegen_context.module_context.current_module().clone();
-            let current_file = codegen_context.get_current_file().to_path_buf();
+
+            // A generic function is stored as a template: a CodegenFunction
+            // under the bare name that holds the source AST and the type
+            // parameter names. Its base fields are placeholders; instantiation
+            // compiles the source under substitution.
+            let mut template = CodegenFunction::new(
+                self.visibility.clone(),
+                PekoType::simple_type("void"),
+                IndexMap::new(),
+                None,
+                std::collections::HashMap::new(),
+                0,
+                crate::codegen::symbol::SymbolName::from(
+                    None,
+                    None,
+                    &self.function_name.value,
+                    None,
+                ),
+                current_module,
+                None,
+                None,
+            );
+            template.generic_typenames = self.generic_types.clone();
+            template.source_function = Some(self_reference);
             codegen_context
                 .module_context
                 .current_module()
                 .write()
                 .unwrap()
-                .get_function_generics_mut()
+                .get_functions_mut()
                 .insert(
                     self.function_name.value.clone(),
-                    Arc::new(RwLock::new(CodegenFunctionGeneric::new(
-                        self.visibility.clone(),
-                        self.generic_types.clone(),
-                        self_reference,
-                        current_module,
-                        current_file,
-                        None,
-                    ))),
+                    vec![Arc::new(RwLock::new(template))],
                 );
 
             return codegen_context.create_null_pointer();
@@ -432,13 +578,13 @@ impl PekoValueBuilder for FunctionDeclarationAST {
                     ));
 
                 PekoType::from_string(
-                    format!("standard::Array<{}>", PekoType::error_type()).as_str(),
+                    format!("Array<{}>", PekoType::error_type()).as_str(),
                     codegen_context.get_current_file(),
                 )
             } else {
                 PekoType::from_string(
                     format!(
-                        "standard::Array<{}>",
+                        "Array<{}>",
                         codegen_context.expand_type(varargs_type).unwrap()
                     )
                     .as_str(),
@@ -452,8 +598,9 @@ impl PekoValueBuilder for FunctionDeclarationAST {
             );
         }
 
-        // `OnStart` in the `main` module is the program entry point and
-        // is force-exported via the extern module.
+        // The `on_start` function in the `main` module is the program entry
+        // hook and is force-exported via the extern module, so the runtime's
+        // `main` resolves it by its bare symbol name.
         let is_onstart = codegen_context
             .module_context
             .current_module()
@@ -461,7 +608,7 @@ impl PekoValueBuilder for FunctionDeclarationAST {
             .unwrap()
             .get_name()
             == "main"
-            && self.function_name.value == "OnStart";
+            && self.function_name.value == "on_start";
 
         let function_qualified_name = if self.visibility.external || is_onstart {
             self.function_name.value.clone()
@@ -619,8 +766,11 @@ impl PekoValueBuilder for FunctionDeclarationAST {
         let function_value =
             peko_function.function_value[&codegen_context.get_owning_module_uuid()].clone();
 
-        // Pure declarations and declarations-only mode stop here.
+        // Pure declarations, declarations-only mode, and the signature pass all
+        // stop here. The signature pass has registered this function, so the
+        // later body pass finds it and reuses this same function value.
         if self.function_body.is_none()
+            || codegen_context.declaring_signatures_only
             || (codegen_context.outside_declarations_only && codegen_context.outside_primary_module)
         {
             codegen_context.scoped_variables.clear();
@@ -1183,7 +1333,7 @@ impl PekoValueBuilder for EnumDeclarationAST {
             .map(|variant| variant.value.clone())
             .collect();
 
-        codegen_context.register_enum(self.enum_name.value.clone(), variant_names);
+        codegen_context.register_enum(self.enum_name.value.clone(), variant_names, self.visibility.private);
 
         codegen_context.create_error_value()
     }
@@ -1222,6 +1372,7 @@ impl PekoValueBuilder for TraitDeclarationAST {
                 argument_types,
                 return_type,
                 has_default: method.function_body.is_some(),
+                is_static: method.is_static,
             });
         }
 
@@ -1243,27 +1394,16 @@ impl PekoValueBuilder for ClassAST {
     fn declare(&self, codegen_context: &mut PekoCodegenContext) {
         // Generic classes register as generics, exactly as build_value does.
         if !self.generics.is_empty() {
-            let mut self_reference = self.clone();
-            self_reference.generics.clear();
-
-            let current_module = codegen_context.module_context.current_module().clone();
-            let current_file = codegen_context.get_current_file().to_path_buf();
+            let template = build_generic_class_template(codegen_context, self);
             codegen_context
                 .module_context
                 .current_module()
                 .write()
                 .unwrap()
-                .get_class_generics_mut()
+                .get_classes_mut()
                 .insert(
                     self.class_name.value.clone(),
-                    Arc::new(RwLock::new(CodegenClassGeneric::new(
-                        self.visibility.clone(),
-                        self.generics.clone(),
-                        self_reference,
-                        current_module,
-                        current_file,
-                        None,
-                    ))),
+                    Arc::new(RwLock::new(template)),
                 );
             return;
         }
@@ -1280,10 +1420,11 @@ impl PekoValueBuilder for ClassAST {
             return;
         }
 
-        let mut class_type = PekoType::from_string(
-            self.class_name.value.as_str(),
-            codegen_context.get_current_file(),
-        );
+        // Register an empty shell carrying only the class's named struct types,
+        // so the class resolves as a type from any other declaration's
+        // signature (forward references) before the signature pass lays it out.
+        let mut class_type =
+            PekoType::from_string(self.class_name.value.as_str(), codegen_context.get_current_file());
         let mut next_module = codegen_context.module_context.current_module().clone();
         loop {
             class_type
@@ -1319,30 +1460,30 @@ impl PekoValueBuilder for ClassAST {
             .insert(self.class_name.value.clone(), Arc::new(RwLock::new(shell)));
     }
 
+    fn declare_signatures(&self, codegen_context: &mut PekoCodegenContext) {
+        // A generic class is materialized per instantiation, not here.
+        if !self.generics.is_empty() {
+            return;
+        }
+        let previously_building_signatures = codegen_context.building_class_signatures;
+        codegen_context.building_class_signatures = true;
+        self.build_value(codegen_context);
+        codegen_context.building_class_signatures = previously_building_signatures;
+    }
+
     fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
         // Generic class declarations are tracked, not emitted.
         if !self.generics.is_empty() {
-            let mut self_reference = self.clone();
-            self_reference.generics.clear();
-
-            let current_module = codegen_context.module_context.current_module().clone();
-            let current_file = codegen_context.get_current_file().to_path_buf();
+            let template = build_generic_class_template(codegen_context, self);
             codegen_context
                 .module_context
                 .current_module()
                 .write()
                 .unwrap()
-                .get_class_generics_mut()
+                .get_classes_mut()
                 .insert(
                     self.class_name.value.clone(),
-                    Arc::new(RwLock::new(CodegenClassGeneric::new(
-                        self.visibility.clone(),
-                        self.generics.clone(),
-                        self_reference,
-                        current_module,
-                        current_file,
-                        None,
-                    ))),
+                    Arc::new(RwLock::new(template)),
                 );
             return codegen_context.create_null_pointer();
         }
@@ -1377,6 +1518,28 @@ impl PekoValueBuilder for ClassAST {
                 None => break,
             }
         }
+
+        // The header pass (`declare`) materializes the class's layout, method
+        // signatures, and static data once; the body pass reuses them. When the
+        // signatures already exist, recover the method function declarations and
+        // the parent class and skip straight to building the bodies.
+        let signatures_done = codegen_context
+            .class_function_values
+            .contains_key(&class_type.to_string());
+
+        let (function_values, parent_class) = if signatures_done {
+            let function_values =
+                codegen_context.class_function_values[&class_type.to_string()].clone();
+            let parent_class = codegen_context
+                .module_context
+                .current_module()
+                .read()
+                .unwrap()
+                .get_classes()
+                .get(&self.class_name.value)
+                .and_then(|class| class.read().unwrap().parent_class.clone());
+            (function_values, parent_class)
+        } else {
 
         let mut virtual_table_methods = IndexMap::new();
         let mut class_attributes = IndexMap::new();
@@ -1471,7 +1634,7 @@ impl PekoValueBuilder for ClassAST {
             Some(shell) => shell.read().unwrap().struct_type,
             None => codegen_context.create_named_struct(class_type.to_string()),
         };
-        let class = CodegenClass::new(
+        let mut class = CodegenClass::new(
             class_type.clone(),
             parent_class.clone(),
             class_attributes.clone(),
@@ -1484,6 +1647,11 @@ impl PekoValueBuilder for ClassAST {
             // empty.
             HashMap::new(),
         );
+        class.implements = self
+            .implements
+            .iter()
+            .map(|implemented| implemented.name().to_string())
+            .collect();
         codegen_context
             .module_context
             .current_module()
@@ -1596,6 +1764,25 @@ impl PekoValueBuilder for ClassAST {
         let mut function_values = Vec::new();
 
         for class_method in &self.methods {
+            // Bind the method's own generic parameters as bare carriers, on top
+            // of the class parameters already in scope, so its argument and
+            // return types resolve while erased. Restored after this method's
+            // signature is declared.
+            let previous_generic_types = codegen_context.generic_types.clone();
+            for type_name in class_method.get_generic_types() {
+                codegen_context.generic_types.insert(
+                    type_name.value.clone(),
+                    PekoType::generic_type(
+                        type_name.value.clone(),
+                        class_method
+                            .get_generic_bounds()
+                            .get(&type_name.value)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
+                );
+            }
+
             // Initialize the method's overload list when it is first seen.
             if !stored_class
                 .read()
@@ -1612,26 +1799,36 @@ impl PekoValueBuilder for ClassAST {
                     .insert(class_method.get_info().name.value.clone(), Vec::new());
             }
 
-            // The first method argument is always `this` of class type.
+            // An instance method's first argument is always `this` of class
+            // type. A static method has no receiver.
+            let is_static = class_method.get_info().is_static;
             let mut method_arguments = IndexMap::new();
-            method_arguments.insert(
-                "this".to_string(),
-                CodegenArg::new(VisibilityData::open_visibility(), class_type.clone(), None),
-            );
+            if !is_static {
+                method_arguments.insert(
+                    "this".to_string(),
+                    CodegenArg::new(VisibilityData::open_visibility(), class_type.clone(), None),
+                );
+            }
 
             for (argument_name, argument_declaration) in &class_method.get_info().arguments {
-                let argument_expanded =
-                    codegen_context.expand_type(&argument_declaration.argument_type);
+                // A static method's signature may name `Self`; bind it to the
+                // owning class before expanding.
+                let declared_argument_type = if is_static {
+                    crate::codegen::context::substitute_self(&argument_declaration.argument_type, &class_type)
+                } else {
+                    argument_declaration.argument_type.clone()
+                };
+                let argument_expanded = codegen_context.expand_type(&declared_argument_type);
                 let argument_type = match argument_expanded {
                     Some(t) => t,
                     None => {
                         codegen_context.diagnostics.report_diagnostic(
                             diagnostics::PekoDiagnostic::new(
-                                argument_declaration.argument_type.start_position.clone(),
-                                argument_declaration.argument_type.end_position.clone(),
+                                declared_argument_type.start_position.clone(),
+                                declared_argument_type.end_position.clone(),
                                 format!(
                                     "type `{}` is not defined. Check the type name and that the type is in scope",
-                                    argument_declaration.argument_type,
+                                    declared_argument_type,
                                 ),
                                 diagnostics::DiagnosticType::Error,
                                 codegen_context.get_current_file().to_path_buf(),
@@ -1679,18 +1876,23 @@ impl PekoValueBuilder for ClassAST {
                 .map(|(_, arg)| arg.argument_type.clone())
                 .collect_vec();
 
-            let class_return_type = codegen_context.expand_type(&class_method.get_return_type());
+            let declared_return_type = if is_static {
+                crate::codegen::context::substitute_self(&class_method.get_return_type(), &class_type)
+            } else {
+                class_method.get_return_type()
+            };
+            let class_return_type = codegen_context.expand_type(&declared_return_type);
             let class_return_type = match class_return_type {
                 Some(t) => t,
                 None => {
                     codegen_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                            class_method.get_return_type().start_position.clone(),
-                            class_method.get_return_type().end_position.clone(),
+                            declared_return_type.start_position.clone(),
+                            declared_return_type.end_position.clone(),
                             format!(
                                 "type `{}` is not defined. Check the type name and that the type is in scope",
-                                class_method.get_return_type(),
+                                declared_return_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -1757,7 +1959,7 @@ impl PekoValueBuilder for ClassAST {
                 }
             }
 
-            let codegen_function = CodegenFunction::new(
+            let mut codegen_function = CodegenFunction::new(
                 class_method.get_info().visibility.clone(),
                 class_return_type,
                 method_arguments,
@@ -1800,6 +2002,9 @@ impl PekoValueBuilder for ClassAST {
                     codegen_context.module_context.current_module().clone(),
                 )),
             );
+            codegen_function.method_generic_typenames =
+                class_method.get_generic_types().clone();
+            codegen_function.is_static = is_static;
 
             // Install the method either as an override or as a new
             // entry on the overload list. An override replaces the
@@ -1825,6 +2030,9 @@ impl PekoValueBuilder for ClassAST {
             }
 
             function_values.push(codegen_function);
+
+            // Remove the method's own generic bindings; keep the class's.
+            codegen_context.generic_types = previous_generic_types;
         }
 
         // Materialize the vtable struct body from the function types.
@@ -1956,7 +2164,7 @@ impl PekoValueBuilder for ClassAST {
             .write()
             .unwrap()
             .type_descriptor
-            .insert(owning_uuid.clone(), descriptor);
+            .insert(owning_uuid.clone(), descriptor.clone());
 
         // Emit the class's static vtable: one constant per class holding the
         // method function pointers in virtual-table-slot order. The vtable is
@@ -1968,6 +2176,7 @@ impl PekoValueBuilder for ClassAST {
             .main_virtual_table
             .methods
             .clone();
+        let mut class_vtable: Option<CodegenValue> = None;
         if !vtable_methods.is_empty() {
             let mut method_pointers = Vec::new();
             for (_, functions) in &vtable_methods {
@@ -1978,18 +2187,20 @@ impl PekoValueBuilder for ClassAST {
                     }
                 }
             }
-            codegen_context.emit_class_vtable(
+            class_vtable = Some(codegen_context.emit_class_vtable(
                 &class_type.to_mangled_string(),
                 main_virtual_table_struct_type,
                 method_pointers,
-            );
+            ));
         }
 
         // Emit a witness table per implemented trait: an [N x i32] array
         // mapping each trait slot to this class's vtable index for that method.
         // Trait dispatch loads witness[k] and indexes the object's runtime
         // vtable, so a child override is always reached. A slot the class does
-        // not provide (a kept default) gets index -1.
+        // not provide (a kept default) gets index -1. The witnesses also become
+        // this class's itable entries.
+        let mut itable_entries: Vec<(i32, CodegenValue)> = Vec::new();
         for implemented in &self.implements {
             let trait_name = implemented.name().to_string();
             let Some(trait_definition) = codegen_context.get_trait(&trait_name) else {
@@ -2013,18 +2224,68 @@ impl PekoValueBuilder for ClassAST {
                 slot_indices.push(index);
             }
 
-            codegen_context.emit_witness_table(
+            let witness = codegen_context.emit_witness_table(
                 &class_type.to_mangled_string(),
                 &implemented.to_mangled_string(),
                 slot_indices,
             );
+            itable_entries.push((
+                crate::codegen::builders::llvm_constants::trait_dispatch_id(implemented),
+                witness,
+            ));
         }
 
+        // Emit the class's static TypeInfo record: the runtime-reachable handle
+        // (type_id, parent, descriptor, vtable, itable) erased generics dispatch
+        // through. This emits the data; dispatch through it is wired separately.
+        let parent_mangled = stored_class
+            .read()
+            .unwrap()
+            .parent_class
+            .as_ref()
+            .map(|parent| parent.class_type.to_mangled_string());
+        codegen_context.emit_type_info(
+            &class_type.to_mangled_string(),
+            parent_mangled.as_deref(),
+            &descriptor,
+            class_vtable.as_ref(),
+            itable_entries,
+        );
+
+            codegen_context
+                .class_function_values
+                .insert(class_type.to_string(), function_values.clone());
+            (function_values, parent_class)
+        };
+
         // --- Generate method bodies ---
+        //
+        // Skipped during the header (signature) pass; emitted by the body pass,
+        // by which time every class's method functions are declared, so a
+        // method that dispatches on another class resolves.
+        if !codegen_context.building_class_signatures {
 
         for (class_method, method_value) in self.methods.iter().zip(function_values) {
             if codegen_context.outside_declarations_only && codegen_context.outside_primary_module {
                 break;
+            }
+
+            // Bind the method's own generic parameters as bare carriers, on top
+            // of the class parameters, so its body resolves references to them
+            // while erased. Restored at the end of this method's body.
+            let previous_generic_types = codegen_context.generic_types.clone();
+            for type_name in class_method.get_generic_types() {
+                codegen_context.generic_types.insert(
+                    type_name.value.clone(),
+                    PekoType::generic_type(
+                        type_name.value.clone(),
+                        class_method
+                            .get_generic_bounds()
+                            .get(&type_name.value)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
+                );
             }
 
             let previous_scoped_variables = codegen_context.scoped_variables.clone();
@@ -2037,16 +2298,24 @@ impl PekoValueBuilder for ClassAST {
             let previous_entry_block = codegen_context.current_entry_block;
             let previous_function = codegen_context.current_llvm_function;
 
-            codegen_context.current_llvm_function = Some(
-                method_value.function_value[&codegen_context.get_owning_module_uuid()].llvm_value,
-            );
+            // The current module may not hold a declaration of this method (an
+            // erased generic class first instantiated while compiling a
+            // late-importing module builds its bodies here, but its methods were
+            // declared under the defining module). Declare it on demand,
+            // mirroring the import path.
+            let owning_uuid = codegen_context.get_owning_module_uuid();
+            let method_codegen_value = match method_value.function_value.get(&owning_uuid) {
+                Some(value) => value.clone(),
+                None => {
+                    let owner = method_value.parent.clone();
+                    codegen_context.declare_function_in_current(&method_value, &owner)
+                }
+            };
+            codegen_context.current_llvm_function = Some(method_codegen_value.llvm_value);
 
             let entry_block = codegen_context.create_new_block(Some("entry".to_string()));
             codegen_context.current_entry_block = Option::Some(entry_block);
             codegen_context.goto_block_end(entry_block);
-
-            let method_codegen_value =
-                method_value.function_value[&codegen_context.get_owning_module_uuid()].clone();
 
             let previous_return_type = codegen_context.current_return_type.clone();
             codegen_context.current_return_type =
@@ -2056,35 +2325,50 @@ impl PekoValueBuilder for ClassAST {
                     None
                 };
 
-            // `this` is always the first allocated argument.
-            let this_argument =
-                codegen_context.get_allocated_function_argument(&method_codegen_value, 0);
-
-            let this_variable = CodegenVariable::new(
-                VisibilityData::open_visibility(),
-                class_type.clone(),
-                codegen_context.qualify_value_to_current(this_argument.clone()),
-                None,
-                codegen_context.module_context.current_module().clone(),
-                None,
-            );
-
-            codegen_context
-                .scoped_variables
-                .insert(String::from("this"), this_variable.clone());
-
+            // An instance method binds `this` as the first allocated argument;
+            // its explicit parameters follow at index 1. A static method has no
+            // receiver, so its explicit parameters start at index 0.
+            let is_static = class_method.get_info().is_static;
             let previous_current_this = codegen_context.current_this.clone();
-            codegen_context.current_this = Some(this_variable);
+            let argument_base = if is_static {
+                codegen_context.current_this = None;
+                0
+            } else {
+                let this_argument =
+                    codegen_context.get_allocated_function_argument(&method_codegen_value, 0);
+
+                let this_variable = CodegenVariable::new(
+                    VisibilityData::open_visibility(),
+                    class_type.clone(),
+                    codegen_context.qualify_value_to_current(this_argument.clone()),
+                    None,
+                    codegen_context.module_context.current_module().clone(),
+                    None,
+                );
+
+                codegen_context
+                    .scoped_variables
+                    .insert(String::from("this"), this_variable.clone());
+
+                codegen_context.current_this = Some(this_variable);
+                1
+            };
 
             // Bind the remaining positional arguments.
             for (idx, (argument_name, argument_info)) in
                 class_method.get_info().arguments.iter().enumerate()
             {
-                let argument_type = if !codegen_context.type_exists(&argument_info.argument_type) {
+                // Resolve a static method's `Self` argument to the owning class.
+                let declared_argument_type = if is_static {
+                    crate::codegen::context::substitute_self(&argument_info.argument_type, &class_type)
+                } else {
+                    argument_info.argument_type.clone()
+                };
+                let argument_type = if !codegen_context.type_exists(&declared_argument_type) {
                     codegen_context.diagnostics.report_diagnostic(
                         diagnostics::PekoDiagnostic::new(
-                            argument_info.argument_type.start_position.clone(),
-                            argument_info.argument_type.end_position.clone(),
+                            declared_argument_type.start_position.clone(),
+                            declared_argument_type.end_position.clone(),
                             "argument type doesn't exist".to_string(),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
@@ -2093,12 +2377,12 @@ impl PekoValueBuilder for ClassAST {
                     PekoType::error_type()
                 } else {
                     codegen_context
-                        .expand_type(&argument_info.argument_type)
+                        .expand_type(&declared_argument_type)
                         .unwrap()
                 };
 
-                let current_argument =
-                    codegen_context.get_allocated_function_argument(&method_codegen_value, idx + 1);
+                let current_argument = codegen_context
+                    .get_allocated_function_argument(&method_codegen_value, idx + argument_base);
 
                 let qualified_argument = codegen_context.qualify_value_to_current(current_argument);
                 codegen_context.scoped_variables.insert(
@@ -2343,6 +2627,10 @@ impl PekoValueBuilder for ClassAST {
             codegen_context.local_scope = previous_local_scope;
             codegen_context.current_return_type = previous_return_type;
             codegen_context.in_constructor = previous_in_constructor;
+
+            // Remove the method's own generic bindings; keep the class's.
+            codegen_context.generic_types = previous_generic_types;
+        }
         }
 
         codegen_context.create_null_pointer()

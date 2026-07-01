@@ -1,0 +1,772 @@
+//! std::core: the root object model, the operator and iteration traits, and
+//! the fundamental value types.
+//!
+//! Operator overloading is done by implementing the core traits declared here
+//! (Plus, Equals, Hash, and so on); an operator on objects routes to the
+//! matching trait method, while an operator on a raw FFI scalar lowers to
+//! direct machine arithmetic. Auto-imported and used bare.
+
+// The GC allocation ABI. core allocates (every object construction, including
+// the string literals its own methods build), so it declares the compiler GC
+// ABI itself rather than depending on std::runtime, which in turn depends on
+// core.
+import c::runtime::gc;
+import c::core::hash as hashing;
+import c::core::conversions as conversions;
+
+// --- Operator traits -------------------------------------------------------
+//
+// Each arithmetic and comparison operator maps to one trait method. The traits
+// are generic over the right-hand operand type so a type can define how it
+// combines with another.
+
+/// `left + right` routes to `left.plus(right)`.
+[public] trait Plus<T> {
+    fn plus(other: T) => T;
+}
+
+/// `left - right` routes to `left.minus(right)`.
+[public] trait Minus<T> {
+    fn minus(other: T) => T;
+}
+
+/// `left * right` routes to `left.multiply(right)`.
+[public] trait Multiply<T> {
+    fn multiply(other: T) => T;
+}
+
+/// `left / right` routes to `left.divide(right)`.
+[public] trait Divide<T> {
+    fn divide(other: T) => T;
+}
+
+/// `left ** right` routes to `left.exp(right)`.
+[public] trait Exp<T> {
+    fn exp(other: T) => T;
+}
+
+/// `left % right` routes to `left.modulo(right)`.
+[public] trait Mod<T> {
+    fn modulo(other: T) => T;
+}
+
+// --- Comparison traits -----------------------------------------------------
+
+/// `left == right` routes to `left.equals(right)`.
+[public] trait Equals<T> {
+    fn equals(other: T) => bool;
+}
+
+/// `left != right` routes to `left.not_equals(right)`.
+[public] trait NotEquals<T> {
+    fn not_equals(other: T) => bool;
+}
+
+/// `left > right` routes to `left.greater_than(right)`.
+[public] trait GreaterThan<T> {
+    fn greater_than(other: T) => bool;
+}
+
+/// `left < right` routes to `left.less_than(right)`.
+[public] trait LessThan<T> {
+    fn less_than(other: T) => bool;
+}
+
+/// `left >= right` routes to `left.greater_than_equals(right)`.
+[public] trait GreaterThanEquals<T> {
+    fn greater_than_equals(other: T) => bool;
+}
+
+/// `left <= right` routes to `left.less_than_equals(right)`.
+[public] trait LessThanEquals<T> {
+    fn less_than_equals(other: T) => bool;
+}
+
+// --- Logical traits --------------------------------------------------------
+
+/// `left && right` routes to `left.and(right)`. A raw i1 short-circuits in
+/// machine code; an object dispatches here and evaluates both operands.
+[public] trait And<T> {
+    fn and(other: T) => bool;
+}
+
+/// `left || right` routes to `left.or(right)`.
+[public] trait Or<T> {
+    fn or(other: T) => bool;
+}
+
+/// `!value` routes to `value.not()`.
+[public] trait Not {
+    fn not() => bool;
+}
+
+// --- Hashing ---------------------------------------------------------------
+
+/// A type that can produce a hash of itself. The hash is a `number` so it
+/// composes with the arithmetic traits a map uses to pick a bucket. The
+/// reference algorithm is djb2 over the value's bytes.
+[public] trait Hash {
+    fn hash() => number;
+}
+
+// --- Indexing --------------------------------------------------------------
+
+/// `value[index]` (read) routes to `value.index(index)`, producing an element
+/// of type `R`.
+[public] trait Index<I, R> {
+    fn index(index: I) => R;
+}
+
+/// `value[index] = ...` (write) routes to `value.index_ref(index)`, producing
+/// a reference to the element slot of type `R`.
+[public] trait IndexRef<I, R> {
+    fn index_ref(index: I) => &R;
+}
+
+// --- Iteration -------------------------------------------------------------
+
+/// An iterator over values of type `T`. `next` advances and yields the next
+/// value, or `None` when the sequence is exhausted; `check` reports whether a
+/// further value is available without advancing.
+[public] trait Iter<T> {
+    fn next() => T?;
+    fn check() => bool;
+}
+
+// --- Serialization ---------------------------------------------------------
+//
+// Serialization is split into two sides. A value describes itself through the
+// Serialize and Deserialize traits without ever naming a concrete format. A
+// format (JSON, and others) implements the Serializer and Deserializer traits
+// once. So one Serialize implementation on a type works for every format, and
+// one format implementation works for every serializable type.
+
+/// A sink that a Serialize implementation writes itself into. The methods
+/// describe a value as a stream of events: open a container, name a field,
+/// put a scalar, close the container. A format implements this once.
+[public] trait Serializer {
+    /// Begin an object (a set of named fields).
+    fn begin_object();
+    /// End the current object.
+    fn end_object();
+    /// Name the next value written. Used inside an object.
+    fn field(name: string);
+    /// Begin an array (an ordered list of values).
+    fn begin_array();
+    /// End the current array.
+    fn end_array();
+    /// Write a numeric scalar at the current position.
+    fn put_number(value: number);
+    /// Write a string scalar at the current position.
+    fn put_string(value: string);
+    /// Write a boolean scalar at the current position.
+    fn put_bool(value: bool);
+    /// Write a null at the current position.
+    fn put_null();
+}
+
+/// A source a Deserialize implementation reads itself from. It is a cursor over
+/// the encoded data: enter a named field or an array index, read a scalar at
+/// the cursor, then leave. A read returns None when the value is absent or has
+/// the wrong shape. A format implements this once.
+[public] trait Deserializer {
+    /// Enter the object field named `name`. Returns false when the current
+    /// value is not an object or has no such field, leaving the cursor put.
+    fn enter_field(name: string) => bool;
+    /// Leave the field entered by the matching enter_field.
+    fn exit_field();
+    /// The number of elements when the current value is an array, else None.
+    fn length() => number?;
+    /// Enter array element `index`. Returns false when out of range.
+    fn enter_index(index: number) => bool;
+    /// Leave the element entered by the matching enter_index.
+    fn exit_index();
+    /// The current value as a number, or None when it is not a number.
+    fn get_number() => number?;
+    /// The current value as a string, or None when it is not a string.
+    fn get_string() => string?;
+    /// The current value as a boolean, or None when it is not a boolean.
+    fn get_bool() => bool?;
+    /// True when the current value is null.
+    fn is_null() => bool;
+    /// The current value as an identifier string, used for enum variants.
+    fn get_identifier() => string?;
+}
+
+/// A value that can write itself into any Serializer.
+[public] trait Serialize {
+    /// Write this value into `serializer`.
+    fn serialize(serializer: Serializer);
+}
+
+/// A type that can read a fresh value of itself from any Deserializer. The
+/// method is static: it has no receiver and builds a new value. It returns
+/// None when the data is missing, and an Error when the data is malformed.
+[public] trait Deserialize {
+    /// Read a new value of this type from `deserializer`.
+    [static] fn deserialize(deserializer: Deserializer) => Self?;
+}
+
+// --- The root object -------------------------------------------------------
+
+/// The root type every class inherits from. It provides string, numeric,
+/// boolean, and character renderings, a mutation hook, and a default hash so
+/// any value is hashable. The conversions return optionals because not every
+/// value has a meaningful rendering; the default is None, and a type that does
+/// convert overrides the relevant method. Object is defined first so the value
+/// types and every other class can inherit it during the single-pass build.
+[public] class Object impl Hash {
+    /// A human-readable rendering of the value.
+    [public] fn to_string() => string {
+        return "Object"
+    }
+
+    /// A numeric rendering of the value, or None when there is none.
+    [public] fn to_number() => number? {
+        return None
+    }
+
+    /// A boolean rendering of the value, or None when there is none.
+    [public] fn to_bool() => bool? {
+        return None
+    }
+
+    /// A character rendering of the value, or None when there is none.
+    [public] fn to_char() => char? {
+        return None
+    }
+
+    /// Called whenever an attribute of the value is modified, by reassignment
+    /// or by a [mutates] method. Overridable per class.
+    [public] fn on_state_changed(name: string) {
+    }
+
+    /// A default hash. A class with identity or content semantics overrides
+    /// this; the value types override it with a value-based hash.
+    [public] fn hash() => number {
+        return new number(constant<f64>(0))
+    }
+}
+
+// --- The fundamental value types -------------------------------------------
+//
+// These wrap a raw FFI scalar. Their operator conformances do the arithmetic
+// and comparisons on the raw scalar and box the result. An operator on a raw
+// scalar lowers to machine code; only an operator on one of these objects
+// routes through the trait method. Literal boxing (routing a `5` literal into
+// a number object) is wired separately.
+
+/// The boxed numeric value type. Wraps a raw 64-bit float.
+[public] class number impl Plus<number>, Minus<number>, Multiply<number>,
+    Divide<number>, Mod<number>, Equals<number>, NotEquals<number>,
+    GreaterThan<number>, LessThan<number>, GreaterThanEquals<number>,
+    LessThanEquals<number>, Hash, Serialize, Deserialize {
+    raw: f64
+
+    [public] fn plus(other: number) => number {
+        return new number(this.raw + other.raw)
+    }
+    [public] fn minus(other: number) => number {
+        return new number(this.raw - other.raw)
+    }
+    [public] fn multiply(other: number) => number {
+        return new number(this.raw * other.raw)
+    }
+    [public] fn divide(other: number) => number {
+        return new number(this.raw / other.raw)
+    }
+    [public] fn modulo(other: number) => number {
+        return new number(this.raw % other.raw)
+    }
+
+    [public] fn equals(other: number) => bool {
+        return this.raw == other.raw
+    }
+    [public] fn not_equals(other: number) => bool {
+        return this.raw != other.raw
+    }
+    [public] fn greater_than(other: number) => bool {
+        return this.raw > other.raw
+    }
+    [public] fn less_than(other: number) => bool {
+        return this.raw < other.raw
+    }
+    [public] fn greater_than_equals(other: number) => bool {
+        return this.raw >= other.raw
+    }
+    [public] fn less_than_equals(other: number) => bool {
+        return this.raw <= other.raw
+    }
+
+    /// The raw machine float behind this number. Used at FFI boundaries and
+    /// wherever a raw scalar is needed.
+    [public] fn to_raw() => f64 {
+        return this.raw
+    }
+
+    /// A number hashes by its full 64-bit pattern, so two equal numbers
+    /// (including their decimals) hash equally.
+    [public] fn hash() => number {
+        let h: i64 = hashing::peko_hash_f64(this.raw)
+        return new number(danger_cast<f64>(h))
+    }
+
+    /// The shortest decimal that round-trips this number.
+    [public] fn to_string() => string {
+        let buffer: pointer<i8> = conversions::peko_float_to_cstr(this.raw)
+        let length: i64 = conversions::peko_buffer_length(buffer)
+        return new string(buffer, length)
+    }
+
+    [public] fn to_number() => number? {
+        return this
+    }
+    /// Zero is false, every other value is true.
+    [public] fn to_bool() => bool? {
+        let zero: f64 = constant<f64>(0)
+        return this.raw != zero
+    }
+
+    /// Write this number as a numeric scalar.
+    [public] fn serialize(serializer: Serializer) {
+        serializer.put_number(this)
+    }
+
+    /// Read a number from the current cursor position.
+    [public static] fn deserialize(deserializer: Deserializer) => Self? {
+        return deserializer.get_number()
+    }
+}
+
+/// The boxed boolean value type.
+[public] class bool impl Equals<bool>, NotEquals<bool>, And<bool>, Or<bool>, Not, Hash, Serialize, Deserialize {
+    raw: i1
+
+    [public] fn equals(other: bool) => bool {
+        return this.raw == other.raw
+    }
+    [public] fn not_equals(other: bool) => bool {
+        return this.raw != other.raw
+    }
+    [public] fn and(other: bool) => bool {
+        return this.raw && other.raw
+    }
+    [public] fn or(other: bool) => bool {
+        return this.raw || other.raw
+    }
+    [public] fn not() => bool {
+        return !this.raw
+    }
+    [public] fn hash() => number {
+        return new number(danger_cast<f64>(this.raw))
+    }
+
+    /// The raw machine i1 behind this bool. Conditions unbox through this.
+    [public] fn to_raw() => i1 {
+        return this.raw
+    }
+
+    /// `"true"` or `"false"`.
+    [public] fn to_string() => string {
+        let buffer: pointer<i8> = conversions::peko_bool_to_cstr(this.raw)
+        let length: i64 = conversions::peko_buffer_length(buffer)
+        return new string(buffer, length)
+    }
+
+    [public] fn to_bool() => bool? {
+        return this
+    }
+    [public] fn to_number() => number? {
+        return new number(danger_cast<f64>(this.raw))
+    }
+
+    /// Write this bool as a boolean scalar.
+    [public] fn serialize(serializer: Serializer) {
+        serializer.put_bool(this)
+    }
+
+    /// Read a bool from the current cursor position.
+    [public static] fn deserialize(deserializer: Deserializer) => Self? {
+        return deserializer.get_bool()
+    }
+}
+
+/// The boxed character value type. One scalar code point.
+[public] class char impl Equals<char>, NotEquals<char>, Hash {
+    raw: i8
+
+    [public] fn equals(other: char) => bool {
+        return this.raw == other.raw
+    }
+    [public] fn not_equals(other: char) => bool {
+        return this.raw != other.raw
+    }
+    [public] fn hash() => number {
+        return new number(danger_cast<f64>(this.raw))
+    }
+
+    /// The raw machine i8 behind this char.
+    [public] fn to_raw() => i8 {
+        return this.raw
+    }
+
+    /// A one-character string holding this code point.
+    [public] fn to_string() => string {
+        let buffer: pointer<i8> = conversions::peko_char_to_cstr(this.raw)
+        let length: i64 = conversions::peko_buffer_length(buffer)
+        return new string(buffer, length)
+    }
+
+    /// True when this character is an ASCII decimal digit.
+    [public] fn is_digit() => bool {
+        let zero: i8 = '0'.to_raw()
+        let nine: i8 = '9'.to_raw()
+        return this.raw >= zero && this.raw <= nine
+    }
+
+    /// True when this character is an ASCII letter.
+    [public] fn is_alpha() => bool {
+        let lower_a: i8 = 'a'.to_raw()
+        let lower_z: i8 = 'z'.to_raw()
+        let upper_a: i8 = 'A'.to_raw()
+        let upper_z: i8 = 'Z'.to_raw()
+        let is_lower: bool = this.raw >= lower_a && this.raw <= lower_z
+        let is_upper: bool = this.raw >= upper_a && this.raw <= upper_z
+        return is_lower || is_upper
+    }
+
+    /// True when this character is an ASCII letter or digit.
+    [public] fn is_alphanumeric() => bool {
+        let alpha: bool = this.is_alpha()
+        let digit: bool = this.is_digit()
+        return alpha || digit
+    }
+
+    /// True when this character is ASCII whitespace (space, tab, newline, CR).
+    [public] fn is_whitespace() => bool {
+        let space: i8 = ' '.to_raw()
+        let tab: i8 = constant<i8>(9)
+        let newline: i8 = constant<i8>(10)
+        let carriage: i8 = constant<i8>(13)
+        let c: i8 = this.raw
+        return c == space || c == tab || c == newline || c == carriage
+    }
+
+    [public] fn to_char() => char? {
+        return this
+    }
+    [public] fn to_number() => number? {
+        return new number(danger_cast<f64>(this.raw))
+    }
+}
+
+/// The boxed string value type. A GC-managed byte buffer with a length. The
+/// content hash and concatenation bodies arrive with the byte-iteration
+/// helpers; for now a string hashes by length.
+[public] class string impl Hash, Equals<string>, NotEquals<string>, Index<number, char>, Serialize, Deserialize {
+    data: pointer<i8>
+    length: i64
+
+    /// Wrap an existing managed byte buffer and its length. The buffer must be
+    /// a GC-managed `pointer<i8>` the string takes ownership of. String
+    /// literals are built by the compiler directly; this is for the runtime
+    /// helpers that produce strings from raw bytes.
+    constructor(data: pointer<i8>, length: i64) {
+        this.data = data
+        this.length = length
+    }
+
+    /// Two strings are equal when their bytes are equal, regardless of
+    /// identity.
+    [public] fn equals(other: string) => bool {
+        return hashing::peko_bytes_equal(this.data, this.length, other.data, other.length)
+    }
+
+    /// The negation of `equals`.
+    [public] fn not_equals(other: string) => bool {
+        let same: bool = this.equals(other)
+        return same.not()
+    }
+
+    [public] fn to_string() => string {
+        return this
+    }
+    /// The raw GC byte buffer behind this string.
+    [public] fn to_raw() => pointer<i8> {
+        return this.data
+    }
+    /// The number of bytes in the string.
+    [public] fn size() => number {
+        return new number(danger_cast<f64>(this.length))
+    }
+    /// A string hashes by its bytes (FNV-1a), so equal strings hash equally.
+    [public] fn hash() => number {
+        let h: i64 = hashing::peko_hash_bytes(this.data, this.length)
+        return new number(danger_cast<f64>(h))
+    }
+
+    /// The character at byte index `i`.
+    [public] fn index(i: number) => char {
+        let offset: i64 = danger_cast<i64>(i.to_raw())
+        return new char(this.data[offset])
+    }
+
+    /// Parses the leading number in this string. Non-numeric text yields zero.
+    [public] fn to_number() => number {
+        let value: f64 = conversions::peko_cstr_to_float(this.data)
+        return new number(value)
+    }
+
+    /// A new string holding the bytes in the half-open range [start, end).
+    /// The bounds are clamped to the string, so out-of-range values are safe.
+    [public] fn substring(start: number, end: number) => string {
+        let len: i64 = this.length
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let s: i64 = danger_cast<i64>(start.to_raw())
+        let e: i64 = danger_cast<i64>(end.to_raw())
+        if s < zero {
+            s = zero
+        }
+        if e > len {
+            e = len
+        }
+        if e < s {
+            e = s
+        }
+
+        let count: i64 = e - s
+        let buffer: pointer<i8> = __rt_peko_alloc<i8>(danger_cast<i32>(count + one))
+        let i: i64 = zero
+        while i < count {
+            buffer[i] = this.data[s + i]
+            i = i + one
+        }
+        let terminator: i8 = constant<i8>(0)
+        buffer[count] = terminator
+        return new string(buffer, count)
+    }
+
+    /// The byte index of the first occurrence of `needle`, or -1 when `needle`
+    /// is not present. An empty needle matches at index 0.
+    [public] fn index_of(needle: string) => number {
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let needle_len: i64 = needle.length
+        let len: i64 = this.length
+
+        if needle_len == zero {
+            return new number(danger_cast<f64>(zero))
+        }
+
+        let limit: i64 = len - needle_len
+        let i: i64 = zero
+        while i <= limit {
+            let j: i64 = zero
+            let found: bool = true
+            while j < needle_len {
+                if this.data[i + j] != needle.data[j] {
+                    found = false
+                    break
+                }
+                j = j + one
+            }
+            if found {
+                return new number(danger_cast<f64>(i))
+            }
+            i = i + one
+        }
+
+        let missing: i64 = zero - one
+        return new number(danger_cast<f64>(missing))
+    }
+
+    /// True when `needle` occurs anywhere in this string.
+    [public] fn contains(needle: string) => bool {
+        let zero: number = 0
+        return this.index_of(needle) >= zero
+    }
+
+    /// True when this string begins with `prefix`.
+    [public] fn starts_with(prefix: string) => bool {
+        let prefix_len: i64 = prefix.length
+        if prefix_len > this.length {
+            return false
+        }
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let i: i64 = zero
+        while i < prefix_len {
+            if this.data[i] != prefix.data[i] {
+                return false
+            }
+            i = i + one
+        }
+        return true
+    }
+
+    /// True when this string ends with `suffix`.
+    [public] fn ends_with(suffix: string) => bool {
+        let suffix_len: i64 = suffix.length
+        let len: i64 = this.length
+        if suffix_len > len {
+            return false
+        }
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let offset: i64 = len - suffix_len
+        let i: i64 = zero
+        while i < suffix_len {
+            if this.data[offset + i] != suffix.data[i] {
+                return false
+            }
+            i = i + one
+        }
+        return true
+    }
+
+    /// Write this string as a string scalar.
+    [public] fn serialize(serializer: Serializer) {
+        serializer.put_string(this)
+    }
+
+    /// Read a string from the current cursor position.
+    [public static] fn deserialize(deserializer: Deserializer) => Self? {
+        return deserializer.get_string()
+    }
+}
+
+// --- Option ----------------------------------------------------------------
+
+/// A compiler-native cell that holds a single value of any type, including a
+/// raw FFI value, as a mutable reference. Box is the one generic the compiler
+/// monomorphizes: each Box<T> is laid out with T's real representation, and its
+/// type descriptor marks the held value for the collector when T is managed.
+/// Use a Box to carry a raw FFI value (an opaque handle, a pointer<X>, a
+/// machine scalar) inside an erased generic, such as Array<Box<opaque>>.
+[public] class Box<T> {
+    value: T
+
+    /// A box holding `value`.
+    constructor(value: T) {
+        this.value = value
+    }
+
+    /// The held value.
+    [public] fn get() => T {
+        return this.value
+    }
+
+    /// Replaces the held value.
+    [mutates] fn set(value: T) {
+        this.value = value
+    }
+}
+
+/// One frame in an optional's failure backtrace: a site where a None or Error
+/// was born or propagated through a `?`. Frames link newest first. The link is
+/// a raw managed pointer (null terminates the chain) rather than an optional,
+/// so the Option type does not carry an optional of itself.
+[public] class ContextFrame {
+    file: string
+    line: i32
+    character: i32
+    next: pointer<ContextFrame>
+
+    constructor(file: string, line: i32, character: i32, next: pointer<ContextFrame>) {
+        this.file = file
+        this.line = line
+        this.character = character
+        this.next = next
+    }
+}
+
+/// An optional value with three states: a value, None, or Error.
+[public] class Option<T> {
+    /// `true` when this option holds a value.
+    has_value: bool
+
+    /// `true` when this option carries an error rather than a plain None.
+    is_error_state: bool
+
+    /// The held value. Only meaningful when `has_value` is true. For an Error
+    /// it holds the message.
+    value: T
+
+    /// The head of the failure backtrace, newest first. A null pointer until
+    /// the first add_context. A raw managed pointer, not an optional, so the
+    /// Option type does not hold an optional of itself.
+    context: pointer<ContextFrame>
+
+    /// An empty optional (None). The held value is never read while
+    /// `has_value` is false, so it is left as a null reference.
+    constructor() {
+        this.has_value = false
+        this.is_error_state = false
+        this.value = danger_cast<T>(null)
+        this.context = danger_cast<pointer<ContextFrame>>(null)
+    }
+
+    /// An optional holding `inner`.
+    constructor(inner: T) {
+        this.has_value = true
+        this.is_error_state = false
+        this.value = inner
+        this.context = danger_cast<pointer<ContextFrame>>(null)
+    }
+
+    /// An error or value optional. is_error true builds an Error carrying
+    /// `payload` as its message; false builds a held value.
+    constructor(payload: T, is_error: bool) {
+        this.has_value = !is_error
+        this.is_error_state = is_error
+        this.value = payload
+        this.context = danger_cast<pointer<ContextFrame>>(null)
+    }
+
+    /// `true` when this option holds a value.
+    [public] fn is_value() => bool {
+        return has_value
+    }
+
+    /// `true` when this option is empty and not an error.
+    [public] fn is_none() => bool {
+        return !has_value
+    }
+
+    /// `true` when this option carries an error.
+    [public] fn is_error() => bool {
+        return is_error_state
+    }
+
+    /// The held value. Halts with the failure backtrace when the option holds
+    /// no value, so unwrapping a None or Error is caught rather than silently
+    /// reading a null.
+    [public] fn unwrap() => T {
+        if !has_value {
+            this.halt()
+        }
+        return value
+    }
+
+    /// Records a failure site for the backtrace, newest first. The `?` operator
+    /// calls this where a None or Error is born and at each propagation hop.
+    [mutates] fn add_context(file: string, line: i32, character: i32) {
+        let frame: ContextFrame = new ContextFrame(file, line, character, this.context)
+        this.context = danger_cast<pointer<ContextFrame>>(frame)
+    }
+
+    /// Prints the failure backtrace and terminates the program. The `?`
+    /// operator calls this when it unwraps a None or Error in a function that
+    /// does not return an optional.
+    [public] fn halt() {
+        conversions::peko_halt_begin(this.is_error_state.to_raw())
+        let frame: pointer<ContextFrame> = this.context
+        while frame != null {
+            let f: ContextFrame = danger_cast<ContextFrame>(frame)
+            conversions::peko_halt_frame(f.file.to_raw(), f.line, f.character)
+            frame = f.next
+        }
+        conversions::peko_halt_end()
+    }
+}

@@ -1,0 +1,35 @@
+# Toolchain description for macOS on arm64.
+#
+# Paths are relative to this file's directory.
+
+[toolchain]
+id = "macos-arm64"
+target = "macos"
+arch = "arm"
+triple = "aarch64-apple-macosx"
+
+[build]
+cxx_std = "c++17"
+# Applied to every C-family compile (the SDK is found via -isysroot).
+c_flags = ["-isysroot", "MacOSX.sdk"]
+objc_flags = []
+# clang finds the system headers through the SDK, so no extra -I dirs.
+include = []
+
+[link]
+driver = "ld64.lld"
+lib_paths = []
+libs = ["objc", "c", "z", "resolv", "c++", "System", "dl"]
+frameworks = ["Security", "WebKit", "Foundation"]
+# Extra archives linked in alongside the project objects.
+objects = ["openssl_libs/libssl.a", "openssl_libs/libcrypto.a"]
+# Raw driver arguments. The two 11.0.0 values are the minimum and SDK
+# platform versions passed to -platform_version.
+flags = [
+  "-w",
+  "-dynamic",
+  "-arch", "arm64",
+  "-demangle",
+  "-platform_version", "macos", "11.0.0", "11.0.0",
+  "-syslibroot", "MacOSX.sdk",
+]

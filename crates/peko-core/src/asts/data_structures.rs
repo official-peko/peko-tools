@@ -249,6 +249,14 @@ pub struct VisibilityData {
     /// gc-leaf treatment. Set by the `.peko.h` import path and is not written
     /// in source, so it has no rendered modifier name.
     pub scoped: bool,
+
+    /// `[static]` -- class-method or trait-slot only; the method has no implicit
+    /// `this` and is called at the type level (`Type::method(args)`).
+    pub is_static: bool,
+
+    /// `[serial]` -- class only; the compiler derives Serialize and Deserialize
+    /// implementations that walk the class's attributes.
+    pub is_serial: bool,
 }
 
 type VisibilityFlagInfo<'a> = &'a [(fn(&VisibilityData) -> bool, &'a str)];
@@ -270,6 +278,8 @@ const VISIBILITY_FLAG_ORDER: VisibilityFlagInfo = &[
     (|v| v.state, "state"),
     (|v| v.mutates, "mutates"),
     (|v| v.gc_safepoint, "gcsafe"),
+    (|v| v.is_static, "static"),
+    (|v| v.is_serial, "serial"),
 ];
 
 impl fmt::Display for VisibilityData {
@@ -311,6 +321,8 @@ impl VisibilityData {
             mutates: false,
             gc_safepoint: false,
             scoped: false,
+            is_static: false,
+            is_serial: false,
         }
     }
 }
@@ -462,6 +474,18 @@ pub struct ClassMethodInfo {
     pub varargs_type: Option<types::PekoType>,
     pub varargs_name: PositionedValue<String>,
     pub name: PositionedValue<String>,
+    /// Generic type-parameter names the method itself declares (`fn map<U>`),
+    /// distinct from the class's own parameters. Empty for a non-generic
+    /// method.
+    #[new(default)]
+    pub generic_types: Vec<PositionedValue<String>>,
+    /// Trait and inheritance bounds per method-declared generic parameter.
+    #[new(default)]
+    pub generic_bounds: IndexMap<String, Vec<types::TypeRestraint>>,
+    /// A `static fn` method: no implicit `this`, called as `Type::method(args)`.
+    /// Never set on a constructor. Defaults to false.
+    #[new(default)]
+    pub is_static: bool,
 }
 
 /// One method declared on a class.
@@ -486,6 +510,19 @@ impl ClassMethod {
         match self {
             Self::Constructor(info, _) | Self::Method(info, _) => info,
         }
+    }
+
+    /// The generic type-parameter names the method declares itself, distinct
+    /// from the owning class's parameters. Empty for a non-generic method.
+    #[must_use]
+    pub fn get_generic_types(&self) -> &Vec<PositionedValue<String>> {
+        &self.get_info().generic_types
+    }
+
+    /// The trait and inheritance bounds per method-declared generic parameter.
+    #[must_use]
+    pub fn get_generic_bounds(&self) -> &IndexMap<String, Vec<types::TypeRestraint>> {
+        &self.get_info().generic_bounds
     }
 
     /// Returns the method's declared return type, or `void` if none was

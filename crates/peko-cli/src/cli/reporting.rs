@@ -140,11 +140,11 @@ impl IndicatifSink {
     const TEMPLATE: &'static str =
         "[{elapsed_precise}] {bar:30.cyan/white.dim} {pos:>4}/{len:<4} {wide_msg}";
     const SPINNER_TEMPLATE: &'static str = "[{elapsed_precise}] {spinner:.cyan} {wide_msg}";
-    /// Filled / current / empty characters used by the progress bar.
-    /// `█` is a solid Unicode block for the filled portion; `▌` marks
-    /// the transition character (the half-filled cell at the edge of
-    /// progress); `-` is a plain ASCII dash for the still-to-go
-    /// portion, so the empty space reads as `----...` in dim white.
+    /// Filled, current, and empty characters used by the progress bar.
+    /// The first is a solid Unicode full block for the filled portion; the
+    /// second is a Unicode left-half block that marks the transition cell at
+    /// the edge of progress; the third is a plain ASCII dash for the
+    /// still-to-go portion, so the empty space reads as `----...` in dim white.
     const PROGRESS_CHARS: &'static str = "█▌-";
 
     /// Build a new sink with a hidden bar that will be revealed once a phase

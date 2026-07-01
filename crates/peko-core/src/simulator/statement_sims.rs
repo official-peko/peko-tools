@@ -882,11 +882,13 @@ impl PekoValueSimulator for ForLoopAST {
             return simulator_context.create_error_value();
         }
 
-        // Get the iterator via the `[operator iterator]` overload.
+        // Resolve the iterable to its iterator via the `iter` method, matching
+        // the codegen. A type is iterable when `iter` returns an iterator whose
+        // `next` yields `T?`; the loop runs until `next` yields None.
         let iterable = self.iterator.simulate(simulator_context);
         let get_iterator = simulator_context.call_object_method(
             &iterable,
-            String::from("[operator iterator]"),
+            String::from("iter"),
             Vec::new(),
             None,
         );
@@ -900,7 +902,7 @@ impl PekoValueSimulator for ForLoopAST {
                         self.iterator.get_start().clone(),
                         self.iterator.get_end().clone(),
                         format!(
-                            "value of type `{}` is not iterable. The type does not implement the `[operator iterator]` overload, which is required for `for` loops",
+                            "value of type `{}` is not iterable. The type does not implement `iter`, which is required for `for` loops",
                             iterable.get_type(),
                         ),
                         diagnostics::DiagnosticType::Error,
@@ -913,39 +915,16 @@ impl PekoValueSimulator for ForLoopAST {
         let previous_loop_finish = simulator_context.current_loop_finish;
         simulator_context.current_loop_finish = true;
 
-        // Verify the iterator has an `inrange` method (called every
-        // iteration to test loop termination).
-        let inrange_call = simulator_context.call_object_method(
-            &iterator,
-            String::from("inrange"),
-            Vec::new(),
-            None,
-        );
-
-        if inrange_call.is_err() {
-            simulator_context
-                .diagnostics
-                .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                    self.iterator.get_start().clone(),
-                    self.iterator.get_end().clone(),
-                    format!(
-                        "iterator of type `{}` does not have a valid `inrange` method. Iterators must declare `inrange(): bool` to be usable in `for` loops",
-                        iterable.get_type(),
-                    ),
-                    diagnostics::DiagnosticType::Error,
-                    simulator_context.get_current_file(),
-                ));
-        }
-
         simulator_context
             .previous_scoped_variables
             .push(simulator_context.scoped_variables.clone());
 
-        // Get the iterator item type via the iterator's `next` method.
-        let get_next =
+        // Pull the next optional (`T?`) from the iterator, then unwrap it to the
+        // loop item type, matching the codegen's `next`/`is_value`/`unwrap`.
+        let next_optional =
             simulator_context.call_object_method(&iterator, String::from("next"), Vec::new(), None);
 
-        let get_next = match get_next {
+        let next_optional = match next_optional {
             Ok(next) => next,
             Err(_) => {
                 simulator_context
@@ -954,7 +933,7 @@ impl PekoValueSimulator for ForLoopAST {
                         self.iterator.get_start().clone(),
                         self.iterator.get_end().clone(),
                         format!(
-                            "iterator of type `{}` does not have a valid `next` method. Iterators must declare `next(): T` to be usable in `for` loops",
+                            "iterator of type `{}` does not have a valid `next` method. Iterators must declare `next(): T?` to be usable in `for` loops",
                             iterable.get_type(),
                         ),
                         diagnostics::DiagnosticType::Error,
@@ -963,6 +942,10 @@ impl PekoValueSimulator for ForLoopAST {
                 simulator_context.create_error_value()
             }
         };
+
+        let get_next = simulator_context
+            .call_object_method(&next_optional, String::from("unwrap"), Vec::new(), None)
+            .unwrap_or_else(|_| simulator_context.create_error_value());
 
         // Create the loop scope, pre-populated with the iterator item
         // binding.
@@ -1181,12 +1164,28 @@ impl PekoValueSimulator for ImportStatementAST {
             return simulator_context.create_error_value();
         }
 
-        let module_to_import = if simulator_context
-            .module_context
-            .top_level_modules
-            .contains_key(&import_as_module_name)
-        {
-            simulator_context.module_context.top_level_modules[&import_as_module_name].clone()
+        // Reuse an already-loaded module for the SAME source file (under any
+        // name), so a file imported under two names is compiled once and
+        // shares one identity. The local alias is bound separately into the
+        // importing module (module_aliases), so two modules may import
+        // different files under the same alias without colliding.
+        let already_compiled_for_file = {
+            let target_file = module_entry_file_path
+                .canonicalize()
+                .unwrap_or_else(|_| module_entry_file_path.clone());
+            simulator_context
+                .module_context
+                .top_level_modules
+                .values()
+                .find(|module| {
+                    let module_file = module.read().unwrap().file.clone();
+                    module_file.canonicalize().unwrap_or(module_file) == target_file
+                })
+                .cloned()
+        };
+
+        let module_to_import = if let Some(existing) = already_compiled_for_file {
+            existing
         } else {
             // Read the source file. If it can't be read (e.g. the file
             // disappeared between the .exists() check and now), report
@@ -1255,8 +1254,9 @@ impl PekoValueSimulator for ImportStatementAST {
                 None
             };
 
-            while parser.tokens.length() != 0
-                && parser.tokens.get_index() != parser.tokens.length() - 1
+            while (parser.tokens.length() != 0
+                && parser.tokens.get_index() != parser.tokens.length() - 1)
+                || parser.has_pending()
             {
                 loop {
                     if parser.tokens.finished() {
@@ -1279,7 +1279,7 @@ impl PekoValueSimulator for ImportStatementAST {
                     }
                 }
 
-                if parser.tokens.finished() {
+                if parser.tokens.finished() && !parser.has_pending() {
                     break;
                 }
 
@@ -1344,6 +1344,20 @@ impl PekoValueSimulator for ImportStatementAST {
                     );
             }
 
+            // When the local alias is already taken by a different file, name
+            // this module by its canonical id so its name-mangled symbols (the
+            // globals initializer) stay unique. The alias resolves through
+            // module_aliases regardless.
+            let module_local_name = if simulator_context
+                .module_context
+                .top_level_modules
+                .contains_key(&import_as_module_name)
+            {
+                resolved.module_id.clone()
+            } else {
+                import_as_module_name.clone()
+            };
+
             // Build the SimulatorModule for the import.
             let new_module = Arc::new(RwLock::new(SimulatorModule::new(
                 self.start.clone(),
@@ -1351,9 +1365,7 @@ impl PekoValueSimulator for ImportStatementAST {
                 module_entry_file_path.clone(),
                 module_docinfo.clone(),
                 None,
-                import_as_module_name.clone(),
-                IndexMap::new(),
-                IndexMap::new(),
+                module_local_name.clone(),
                 IndexMap::new(),
                 IndexMap::new(),
                 IndexMap::new(),
@@ -1370,10 +1382,13 @@ impl PekoValueSimulator for ImportStatementAST {
             simulator_context
                 .module_context
                 .move_to_module(Arc::clone(&new_module), false, false);
+            // The global registry is keyed by the module's local name, which
+            // is the canonical id when the alias collided. Resolution goes
+            // through the per-module alias binding regardless.
             simulator_context
                 .module_context
                 .top_level_modules
-                .insert_before(1, import_as_module_name.clone(), Arc::clone(&new_module));
+                .insert_before(1, module_local_name.clone(), Arc::clone(&new_module));
 
             // Every imported module gets the standard library imports
             // baked in (unless it *is* one of those libraries).
@@ -1465,6 +1480,19 @@ impl PekoValueSimulator for ImportStatementAST {
 
         // Restore the root folder now that the imported module is loaded.
         simulator_context.root_folder = previous_root_folder;
+
+        // Bind the alias in the importing module so qualified access resolves
+        // per-module. Two modules may then import different files under the
+        // same alias without colliding in the global registry.
+        if !has_unpack_list {
+            simulator_context
+                .module_context
+                .current_module()
+                .write()
+                .unwrap()
+                .module_aliases
+                .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+        }
 
         simulator_context.import_module(module_to_import, self.symbols_to_unpack.clone());
 

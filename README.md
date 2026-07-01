@@ -10,6 +10,10 @@ generator, the command line interface, and the language server. This is a
 Cargo workspace that holds the four crates together so they share a single
 dependency graph, a single lockfile, and one release cadence.
 
+Alongside the Rust crates, the repository carries the runtime assets the CLI
+uses to build and link user programs: the Pekoscript standard library and the
+per-platform native toolchains, both under [`toolkit/`](#standard-library-and-toolchains).
+
 ## Crates
 
 | Crate | Role |
@@ -21,6 +25,28 @@ dependency graph, a single lockfile, and one release cadence.
 
 Each crate documents its own internals in its own README. This file covers the
 workspace as a whole.
+
+## Standard library and toolchains
+
+The `toolkit/` directory holds the assets the compiler ships with, distinct
+from the Rust crates that build the toolchain itself:
+
+| Path | Contents |
+|---|---|
+| `toolkit/std` | The Pekoscript standard library, written in Pekoscript with C interop: `core`, `collections`, `io`, `fs`, `random`, `crypto`, `threads`, `sockets`, `json`, `xml`, `lexer`, `runtime`, and `webview`. |
+| `toolkit/toolchains` | The per-platform clang and lld toolchains, one directory each for `macos`, `linux`, `windows`, `ios`, and `android`. |
+| `toolkit/peko.h` | The FFI umbrella header the standard library's C sources compile against. |
+
+Each standard library module pairs Pekoscript with native C under
+`toolkit/std/c`. `std::webview`, for example, wraps a native webview on every
+platform: WKWebView on macOS, WebKitGTK on Linux, and WebView2 on Windows for
+the desktop, UIKit and WebKit on iOS, and an `android.webkit.WebView` driven
+through JNI on Android. A single JavaScript-to-native binding protocol is shared
+across all of them.
+
+Peko programs compile to native code for both the desktop platforms and the
+mobile platforms, iOS and Android; the CLI drives the C compilation and the
+final link through the matching toolchain.
 
 ## Architecture
 
@@ -40,9 +66,11 @@ front end and the code generator end to end and adds the project and package
 workflows. `peko_lsp` reuses the same analysis engine so editor diagnostics
 match the compiler.
 
-## Supported targets
+## Toolchain host platforms
 
-Native builds are produced for five targets:
+The toolchain binaries themselves are built for five host platforms (distinct
+from the platforms Peko programs compile to, which also include iOS and
+Android):
 
 | Platform | Architecture | Target triple |
 |---|---|---|

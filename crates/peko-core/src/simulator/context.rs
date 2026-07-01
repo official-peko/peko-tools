@@ -10,7 +10,7 @@
 //! 1. [`PekoSimulatorContext`] itself and its inherent methods (module
 //!    import, scope queries, snapshot/restore around generic
 //!    instantiation, and a small set of helpers).
-//! 2. [`SimulatorContextSnapshot`] — a named bundle of the seven fields
+//! 2. [`SimulatorContextSnapshot`] - a named bundle of the seven fields
 //!    that need to be saved and restored around generic instantiation,
 //!    replacing the prior 7-tuple.
 //! 3. The [`ExecutionContextAlgorithms`] trait impl that plugs the
@@ -34,8 +34,8 @@ use crate::types::{self, PekoType};
 
 use super::data_structures::{
     DefinedObject, Scope, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,
-    SimulatorClass, SimulatorClassAttribute, SimulatorClassGeneric, SimulatorClassVirtualTable,
-    SimulatorFunction, SimulatorFunctionGeneric, SimulatorModule, SimulatorVariable,
+    SimulatorClass, SimulatorClassAttribute, SimulatorClassVirtualTable, SimulatorFunction,
+    SimulatorModule, SimulatorVariable,
 };
 use super::value::SimulatorValue;
 
@@ -78,16 +78,16 @@ pub struct SimulatorContextSnapshot {
 /// through every AST node's `simulate(&mut self, &mut context)` call. The
 /// fields fall into a handful of categories:
 ///
-/// * **Diagnostics / target** — what we're compiling for and what's gone
+/// * **Diagnostics / target** - what we're compiling for and what's gone
 ///   wrong so far.
-/// * **Module / scope state** — which module and scope is currently
+/// * **Module / scope state** - which module and scope is currently
 ///   active, plus the lookup tables for symbols visible to tooling.
-/// * **Type-inference state** — running expected types, return types,
+/// * **Type-inference state** - running expected types, return types,
 ///   and generic substitutions in scope.
-/// * **Object-access state** — `this` binding, attributes pending
+/// * **Object-access state** - `this` binding, attributes pending
 ///   initialization, and "previous expression was `this`" used to
 ///   resolve method calls.
-/// * **Trace bookkeeping** — function-call traces and defined-object
+/// * **Trace bookkeeping** - function-call traces and defined-object
 ///   spans surfaced to IDE clients.
 #[derive(Clone)]
 pub struct PekoSimulatorContext {
@@ -132,7 +132,7 @@ pub struct PekoSimulatorContext {
     /// `&` references, etc.).
     pub return_references: bool,
 
-    /// In-scope generic-type substitutions (e.g. `T` → `String`).
+    /// In-scope generic-type substitutions (e.g. `T` -> `String`).
     pub generic_types: HashMap<String, types::PekoType>,
 
     /// Declared return type of the function we're currently inside.
@@ -140,9 +140,19 @@ pub struct PekoSimulatorContext {
     /// the surrounding function expects.
     pub current_return_type: Option<types::PekoType>,
 
-    /// Expected type(s) at the current expression position — typically
+    /// Expected type(s) at the current expression position - typically
     /// set by variable declarations to inform inference of the RHS.
     pub current_expected_type_options: Option<Vec<types::PekoType>>,
+
+    /// Counter for fresh backward-inference variables (`?0`, `?1`, ...). A
+    /// `new Class()` whose type arguments cannot be inferred forward binds one
+    /// of these per missing argument; a later constraining call resolves it.
+    pub inference_counter: usize,
+
+    /// Bindings (`?N` -> concrete type) discovered by the most recent method
+    /// call, for the caller to back-patch into the receiver variable's type.
+    /// Cleared at the start of each `call_object_method`.
+    pub last_call_inference: HashMap<String, types::PekoType>,
 
     /// `true` when the value at the current position is consumed (a variable
     /// initializer, a call argument, a return value, ...). A construct that
@@ -263,8 +273,6 @@ impl PekoSimulatorContext {
             IndexMap::new(),
             IndexMap::new(),
             IndexMap::new(),
-            IndexMap::new(),
-            IndexMap::new(),
             Arc::clone(&main_scope),
             Vec::new(),
             IndexMap::new(),
@@ -296,8 +304,6 @@ impl PekoSimulatorContext {
             IndexMap::new(),
             IndexMap::new(),
             IndexMap::new(),
-            IndexMap::new(),
-            IndexMap::new(),
             Arc::clone(&extern_scope),
             Vec::new(),
             IndexMap::new(),
@@ -318,6 +324,8 @@ impl PekoSimulatorContext {
             return_references: false,
             current_return_type: None,
             current_expected_type_options: None,
+            inference_counter: 0,
+            last_call_inference: HashMap::new(),
             expecting_value: false,
             current_method_mutates: false,
             last_called_method_mutates: false,
@@ -491,55 +499,6 @@ impl PekoSimulatorContext {
             };
         }
 
-        // Import generic-function declarations.
-        for (function_name, function) in from.read().unwrap().function_generics.clone() {
-            if !unpacked_symbols.is_empty()
-                && !unpack_all
-                && !current_symbols
-                    .contains(&PositionedValue::create_no_position(function_name.clone()))
-            {
-                continue;
-            }
-
-            if !current_symbols.is_empty() {
-                current_symbols.remove(
-                    current_symbols
-                        .iter()
-                        .find_position(|symbol_name| {
-                            symbol_name
-                                == &&PositionedValue::create_no_position(function_name.clone())
-                        })
-                        .unwrap()
-                        .0,
-                );
-            }
-
-            to.write()
-                .unwrap()
-                .function_generics
-                .insert(function_name.clone(), function);
-
-            match from
-                .read()
-                .unwrap()
-                .scope
-                .read()
-                .unwrap()
-                .symbols
-                .get(&function_name)
-            {
-                Some(function_symbol) => to
-                    .write()
-                    .unwrap()
-                    .scope
-                    .write()
-                    .unwrap()
-                    .symbols
-                    .insert(function_name.clone(), function_symbol.clone()),
-                None => continue,
-            };
-        }
-
         // Import classes.
         for (class_name, class) in from.read().unwrap().classes.clone() {
             if !unpacked_symbols.is_empty()
@@ -611,50 +570,26 @@ impl PekoSimulatorContext {
                 .insert(trait_name.clone(), trait_definition);
         }
 
-        // Import generic-class declarations.
-        for (class_name, class) in from.read().unwrap().class_generics.clone() {
+        // Import enums. Like traits, an enum is stored by value and resolved by
+        // name; copy each entry so an enum an imported module declares resolves
+        // and compares here.
+        for (enum_name, variants) in from.read().unwrap().enums.clone() {
             if !unpacked_symbols.is_empty()
                 && !unpack_all
                 && !current_symbols
-                    .contains(&PositionedValue::create_no_position(class_name.clone()))
+                    .contains(&PositionedValue::create_no_position(enum_name.clone()))
             {
                 continue;
             }
-            if !current_symbols.is_empty() {
-                current_symbols.remove(
-                    current_symbols
-                        .iter()
-                        .find_position(|symbol_name| {
-                            symbol_name == &&PositionedValue::create_no_position(class_name.clone())
-                        })
-                        .unwrap()
-                        .0,
-                );
+            if !current_symbols.is_empty()
+                && let Some((index, _)) = current_symbols.iter().find_position(|symbol_name| {
+                    symbol_name == &&PositionedValue::create_no_position(enum_name.clone())
+                })
+            {
+                current_symbols.remove(index);
             }
 
-            to.write()
-                .unwrap()
-                .class_generics
-                .insert(class_name.clone(), class);
-            match from
-                .read()
-                .unwrap()
-                .scope
-                .read()
-                .unwrap()
-                .symbols
-                .get(&class_name)
-            {
-                Some(class_symbol) => to
-                    .write()
-                    .unwrap()
-                    .scope
-                    .write()
-                    .unwrap()
-                    .symbols
-                    .insert(class_name.clone(), class_symbol.clone()),
-                None => continue,
-            };
+            to.write().unwrap().enums.insert(enum_name.clone(), variants);
         }
 
         // Lastly, import each submodule. This branch is more involved
@@ -698,8 +633,6 @@ impl PekoSimulatorContext {
                     IndexMap::new(),
                     IndexMap::new(),
                     IndexMap::new(),
-                    submodule.read().unwrap().class_generics.clone(),
-                    submodule.read().unwrap().function_generics.clone(),
                     submodule.read().unwrap().scope.clone(),
                     Vec::new(),
                     IndexMap::new(),
@@ -902,7 +835,7 @@ impl PekoSimulatorContext {
     ///
     /// Looks up the [`DefinedObject`] whose `ending_position` matches
     /// `position`, finds the object's class, and returns the class's
-    /// methods and attributes as a list of [`ScopeSymbol`]s — filtered
+    /// methods and attributes as a list of [`ScopeSymbol`]s - filtered
     /// by visibility (private members are hidden unless the object is
     /// `this`).
     pub fn get_symbols_from_object_at_position(
@@ -931,7 +864,7 @@ impl PekoSimulatorContext {
 
         // Surface every accessible method.
         for (method_name, method_functions) in &object_class.main_virtual_table.methods {
-            // Only take the first overload — completion just needs the
+            // Only take the first overload - completion just needs the
             // name and a representative signature.
             let first_function = method_functions[0].read().unwrap().clone();
 
@@ -1152,7 +1085,7 @@ impl PekoSimulatorContext {
         available_symbols
     }
 
-    /// Returns every symbol visible at `position` — globals, plus every
+    /// Returns every symbol visible at `position` - globals, plus every
     /// scope-tree symbol on the path from main down to the innermost
     /// scope containing the position.
     ///
@@ -1463,7 +1396,7 @@ impl PekoSimulatorContext {
     /// Simulator-side counterpart of the codegen's GC allocation
     /// primitive.
     ///
-    /// The simulator doesn't actually allocate anything — it just
+    /// The simulator doesn't actually allocate anything - it just
     /// produces a [`SimulatorValue::Value`] of the requested type. The
     /// method exists for one-to-one parity with `peko_llvm`'s
     /// codegen-context API so that AST simulators and code generators
@@ -1479,7 +1412,7 @@ impl PekoSimulatorContext {
     /// * **Always returns `Some`** when given a non-empty `function_choices`
     ///   list. The trait version returns `None` when no candidate is a
     ///   real match; this one falls back to the highest-scoring
-    ///   *partial* match — or, failing that, the first choice.
+    ///   *partial* match - or, failing that, the first choice.
     /// * **Does not reset the score on a dissimilar-type argument.**
     ///   Wrong-type arguments simply don't contribute points; right-type
     ///   ones do.
@@ -1536,7 +1469,7 @@ impl PekoSimulatorContext {
                             current_type_match_score += 1;
                         }
                         // Note: unlike the strict choose_function, no
-                        // score-reset happens on a non-similar type —
+                        // score-reset happens on a non-similar type -
                         // wrong-type arguments simply don't contribute.
                     }
                 }
@@ -1580,7 +1513,7 @@ impl PekoSimulatorContext {
                 }
             }
 
-            // Pick this candidate if it beat the running best — but only
+            // Pick this candidate if it beat the running best - but only
             // if it could plausibly be called at all (right arg count or
             // a variadic / all-keywords escape hatch).
             if current_type_match_score > max_type_match_score
@@ -1596,13 +1529,205 @@ impl PekoSimulatorContext {
             }
         }
 
-        // Always return *something* — fall back to the first candidate
+        // Always return *something* - fall back to the first candidate
         // if no partial match scored above zero. This is what makes the
         // method useful for diagnostic recovery.
         if max_type_match_score == 0 {
             Some(function_choices[0].clone())
         } else {
             Some(closest_function)
+        }
+    }
+}
+
+// ----- Generic bound checking ----------------------------------------------
+
+impl PekoSimulatorContext {
+    /// Verify each concrete type argument satisfies its generic parameter's
+    /// declared bounds. `impl Trait` requires the argument's class (or an
+    /// ancestor) to implement the trait; `from Class` requires it to be that
+    /// class or a descendant. A violated bound is reported as an error. Bound
+    /// checking is compile-time only and is identical under monomorphization
+    /// and erasure (the type arguments do compile-time checking only).
+    fn check_generic_bounds(
+        &mut self,
+        generic_typenames: &[PositionedValue<String>],
+        generic_bounds: &IndexMap<String, Vec<types::TypeRestraint>>,
+        concrete_types: &[types::PekoType],
+    ) {
+        for (typename, concrete) in generic_typenames.iter().zip(concrete_types.iter()) {
+            let Some(bounds) = generic_bounds.get(&typename.value) else {
+                continue;
+            };
+
+            for bound in bounds {
+                match bound {
+                    types::TypeRestraint::Impl(trait_type) => {
+                        if !self.concrete_satisfies_impl(concrete, trait_type.name()) {
+                            self.diagnostics.report_diagnostic(diagnostics::PekoDiagnostic::new(
+                                concrete.start_position.clone(),
+                                concrete.end_position.clone(),
+                                format!(
+                                    "type `{concrete}` does not satisfy the bound `{}: impl {trait_type}`. The type must implement trait `{trait_type}`",
+                                    typename.value,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                self.get_current_file(),
+                            ));
+                        }
+                    }
+                    types::TypeRestraint::From(parent_type) => {
+                        if !self.concrete_satisfies_from(concrete, parent_type.name()) {
+                            self.diagnostics.report_diagnostic(diagnostics::PekoDiagnostic::new(
+                                concrete.start_position.clone(),
+                                concrete.end_position.clone(),
+                                format!(
+                                    "type `{concrete}` does not satisfy the bound `{}: from {parent_type}`. The type must be `{parent_type}` or inherit from it",
+                                    typename.value,
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                self.get_current_file(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk the concrete type's class hierarchy; satisfied when any level lists
+    /// the trait in its `impl` clause.
+    fn concrete_satisfies_impl(&mut self, concrete: &types::PekoType, trait_name: &str) -> bool {
+        // A value already typed as the trait itself (a trait object, or the
+        // erased carrier used to type-check a generic body) satisfies the bound.
+        if concrete.name() == trait_name {
+            return true;
+        }
+
+        // An erased carrier satisfies a bound when the trait is among the
+        // restraints it carries (a `KT: impl Hash, impl Equals` carrier
+        // satisfies both Hash and Equals).
+        if concrete.is_generic_param()
+            && concrete.restraints().iter().any(|restraint| {
+                matches!(restraint, types::TypeRestraint::Impl(trait_type) if trait_type.name() == trait_name)
+            })
+        {
+            return true;
+        }
+
+        let mut class = self.get_class_by_type(concrete);
+        while let Some(current) = class {
+            if current.implements.iter().any(|name| name == trait_name) {
+                return true;
+            }
+            class = current.parent_class.map(|boxed| *boxed);
+        }
+        false
+    }
+
+    /// Walk the concrete type's class hierarchy; satisfied when any level's
+    /// class name matches the bound class.
+    fn concrete_satisfies_from(&mut self, concrete: &types::PekoType, parent_name: &str) -> bool {
+        let mut class = self.get_class_by_type(concrete);
+        while let Some(current) = class {
+            if current.class_type.name() == parent_name {
+                return true;
+            }
+            class = current.parent_class.map(|boxed| *boxed);
+        }
+        false
+    }
+
+    /// The type a generic parameter erases to for body type-checking. An
+    /// unbounded parameter erases to the root `Object`; a `from Class` bound
+    /// carries the class (granting its fields and methods); an `impl Trait`
+    /// bound carries the trait (granting its methods). A `from` bound is
+    /// preferred when both are present, since it grants the most access.
+    fn erasure_carrier(
+        &self,
+        typename: &str,
+        bounds: &IndexMap<String, Vec<types::TypeRestraint>>,
+    ) -> types::PekoType {
+        if let Some(restraints) = bounds.get(typename) {
+            // A `from Class` bound grants the class's full surface, so the
+            // carrier is that class.
+            for restraint in restraints {
+                if let types::TypeRestraint::From(class_type) = restraint {
+                    return class_type.clone();
+                }
+            }
+            // Otherwise carry every `impl Trait` bound on a generic carrier, so
+            // each bound trait's methods and operators resolve. Carrying all
+            // bounds (rather than only the first) lets a parameter bound by
+            // several traits, such as `KT: impl Hash, impl Equals`, use every
+            // one.
+            if restraints
+                .iter()
+                .any(|restraint| matches!(restraint, types::TypeRestraint::Impl(_)))
+            {
+                return types::PekoType::generic_type(typename.to_string(), restraints.clone());
+            }
+        }
+
+        types::PekoType::simple_type("Object")
+    }
+
+    /// Type-check every generic in the current module ONCE with each parameter
+    /// erased to its bound carrier. This enforces the erasure invariant that a
+    /// generic body uses only the capabilities its bounds grant, independent of
+    /// any concrete instantiation. It reuses the instantiation path with the
+    /// carrier types as arguments, so misuse of an erased parameter (a method
+    /// or field its bounds do not provide) is reported against the body.
+    pub fn check_generics_erased(&mut self) {
+        let module = self.module_context.current_module();
+        // Function templates: overloads that still hold a source AST.
+        let function_generics: Vec<_> = module
+            .read()
+            .unwrap()
+            .functions
+            .values()
+            .flatten()
+            .filter(|overload| overload.read().unwrap().source_function.is_some())
+            .cloned()
+            .collect();
+        // Class templates: classes that still hold a source AST.
+        let class_generics: Vec<_> = module
+            .read()
+            .unwrap()
+            .classes
+            .values()
+            .filter(|class| class.read().unwrap().source_class.is_some())
+            .cloned()
+            .collect();
+
+        for generic in function_generics {
+            let generic = generic.read().unwrap().clone();
+            let bounds = generic
+                .source_function
+                .as_ref()
+                .map(|ast| ast.generic_bounds.clone())
+                .unwrap_or_default();
+            let carriers: Vec<types::PekoType> = generic
+                .generic_typenames
+                .iter()
+                .map(|name| self.erasure_carrier(&name.value, &bounds))
+                .collect();
+            self.create_generic_function(&generic, carriers);
+        }
+
+        for generic in class_generics {
+            let generic = generic.read().unwrap().clone();
+            let bounds = generic
+                .source_class
+                .as_ref()
+                .map(|ast| ast.generic_bounds.clone())
+                .unwrap_or_default();
+            let carriers: Vec<types::PekoType> = generic
+                .generic_typenames
+                .iter()
+                .map(|name| self.erasure_carrier(&name.value, &bounds))
+                .collect();
+            self.create_generic_class(&generic, carriers);
         }
     }
 }
@@ -1616,11 +1741,9 @@ impl
         SimulatorVariable,
         SimulatorFunction,
         SimulatorArg,
-        SimulatorFunctionGeneric,
         SimulatorClass,
         SimulatorClassVirtualTable,
         SimulatorClassAttribute,
-        SimulatorClassGeneric,
     > for PekoSimulatorContext
 {
     fn get_module_context(&self) -> &ExecutionModuleContext<SimulatorModule> {
@@ -1671,9 +1794,13 @@ impl
     /// function.
     fn create_generic_function(
         &mut self,
-        generic: &SimulatorFunctionGeneric,
+        generic: &SimulatorFunction,
         type_parameters: Vec<types::PekoType>,
     ) -> Option<SimulatorFunction> {
+        // The template carries its source AST; a non-template function cannot be
+        // instantiated.
+        let source = generic.source_function.clone()?;
+
         let mut type_parameters_expanded = Vec::new();
         let mut name_parts: Vec<String> = Vec::new();
 
@@ -1688,16 +1815,23 @@ impl
         self.module_context.step_forward(post_stack);
 
         // Build the qualified generic function name: `Foo<T, U>`.
-        let mut generic_function_name = generic.function.function_name.clone();
+        let mut generic_function_name = source.function_name.clone();
         generic_function_name.value.push('<');
         generic_function_name.value.push_str(&name_parts.join(", "));
         generic_function_name.value.push('>');
 
-        // Arity mismatch — caller asked for the wrong number of type
+        // Arity mismatch - caller asked for the wrong number of type
         // parameters.
         if type_parameters_expanded.len() != generic.generic_typenames.len() {
             return None;
         }
+
+        // Each type argument must satisfy its parameter's `impl`/`from` bounds.
+        self.check_generic_bounds(
+            &generic.generic_typenames,
+            &source.generic_bounds,
+            &type_parameters_expanded,
+        );
 
         // Map each generic typename to its concrete expansion.
         let mut new_generic_types = HashMap::new();
@@ -1718,14 +1852,14 @@ impl
         self.get_generic_types_mut().clear();
         self.get_generic_types_mut().extend(new_generic_types);
 
-        let mut generic_function = generic.function.clone();
+        let mut generic_function = source.clone();
         generic_function.function_name = generic_function_name.clone();
 
         // Snapshot the context before re-simulating, switch to the
         // declaration module, then simulate.
         let context = self.snapshot_context();
         self.module_context
-            .move_to_module(generic.module.clone(), false, true);
+            .move_to_module(generic.parent.clone(), false, true);
 
         let module = self.module_context.current_module();
         generic_function.generic_types.clear();
@@ -1757,23 +1891,43 @@ impl
     /// the class AST, restore, and return the new class.
     fn create_generic_class(
         &mut self,
-        generic: &SimulatorClassGeneric,
+        generic: &SimulatorClass,
         type_parameters: Vec<types::PekoType>,
     ) -> Option<SimulatorClass> {
+        // The template carries its source AST; a non-template class cannot be
+        // instantiated.
+        let source = generic.source_class.clone()?;
+
         let mut type_parameters_expanded = Vec::new();
         let mut name_parts: Vec<String> = Vec::new();
 
         let post_stack = self.module_context.step_back();
 
         for parameter in type_parameters {
-            let type_expanded = self.expand_type(&parameter)?;
+            let mut type_expanded = self.expand_type(&parameter)?;
+
+            // Collapse a deeply nested erased instantiation. A method that
+            // returns a generic of its own parameters (zip returning
+            // Array<Pair<T, U>>) would otherwise instantiate an unbounded tower
+            // (Array<Pair<Pair<..>, U>> ...). Once a carrier-bearing argument
+            // nests two levels deep, canonicalize it to its carrier so the tower
+            // is bounded. Shallow structures such as Pair<T, U> are kept intact
+            // so their shape (for example for destructuring) survives. Concrete
+            // arguments contain no carrier and monomorphize in full.
+            if !type_expanded.is_generic_param()
+                && types::generic_nesting_depth(&type_expanded) >= 2
+                && let Some(carrier) = types::first_generic_param(&type_expanded)
+            {
+                type_expanded = carrier;
+            }
+
             name_parts.push(type_expanded.to_string());
             type_parameters_expanded.push(type_expanded);
         }
 
         self.module_context.step_forward(post_stack);
 
-        let mut generic_class_name = generic.class.class_name.clone();
+        let mut generic_class_name = source.class_name.clone();
         generic_class_name.value.push('<');
         generic_class_name.value.push_str(&name_parts.join(", "));
         generic_class_name.value.push('>');
@@ -1781,6 +1935,30 @@ impl
         if type_parameters_expanded.len() != generic.generic_typenames.len() {
             return None;
         }
+
+        // Already instantiated. The class is registered under its (possibly
+        // collapsed) name once simulated, and pre-registered as a shell before
+        // its bodies run. Returning it serves two purposes: a cache hit that
+        // avoids re-simulating a built class, and a cycle break when a generic
+        // method body constructs the same generic while it is still simulating.
+        // The caller looks up the un-collapsed name, so this in-function check is
+        // what catches the collapsed erased instantiations.
+        if let Some(existing) = generic
+            .parent
+            .read()
+            .unwrap()
+            .classes
+            .get(&generic_class_name.value)
+        {
+            return Some(existing.read().unwrap().clone());
+        }
+
+        // Each type argument must satisfy its parameter's `impl`/`from` bounds.
+        self.check_generic_bounds(
+            &generic.generic_typenames,
+            &source.generic_bounds,
+            &type_parameters_expanded,
+        );
 
         let mut new_generic_types = HashMap::new();
         for (type_name, generic_type) in generic
@@ -1794,18 +1972,41 @@ impl
             );
         }
 
+        // Method-level generics stay erased even under monomorphization: bind
+        // every method-declared parameter to a bare carrier so a method
+        // signature that references it type-checks. The concrete type is
+        // recovered per call.
+        for class_method in &source.methods {
+            for type_name in class_method.get_generic_types() {
+                new_generic_types
+                    .entry(type_name.value.clone())
+                    .or_insert_with(|| {
+                        types::PekoType::generic_type(
+                            type_name.value.clone(),
+                            class_method
+                                .get_generic_bounds()
+                                .get(&type_name.value)
+                                .cloned()
+                                .unwrap_or_default(),
+                        )
+                    });
+            }
+        }
+
         let previous_context_generic_types = self.generic_types.clone();
         self.generic_types.clear();
         self.generic_types.extend(new_generic_types);
 
-        let mut generic_class = generic.class.clone();
+        let mut generic_class = source.clone();
         generic_class.class_name = generic_class_name.clone();
 
         let context = self.snapshot_context();
         self.module_context
-            .move_to_module(generic.module.clone(), false, true);
+            .move_to_module(generic.parent.clone(), false, true);
 
-        self.current_scope = Some(generic.scope.clone());
+        if let Some(scope) = generic.template_scope.clone() {
+            self.current_scope = Some(scope);
+        }
         let module = self.module_context.current_module().clone();
 
         generic_class.simulate(self);
@@ -1866,7 +2067,7 @@ impl
             false,
         )?;
 
-        // Verify argument types one more time at the chosen overload —
+        // Verify argument types one more time at the chosen overload -
         // belt-and-braces against choose_function returning a candidate
         // whose argument types we then need to validate.
         for (argument, (_, arg)) in
@@ -1895,6 +2096,9 @@ impl
         let object_value_type = object.get_type();
         let method_name_str = method_name.to_string();
 
+        // Reset backward-inference bindings; this call may discover some.
+        self.last_call_inference.clear();
+
         // Resolve the object's class.
         let Some(class) = self.get_class_by_type(&object_value_type) else {
             return Err(format!(
@@ -1919,7 +2123,7 @@ impl
             ));
         };
 
-        // Argument types — both positional and keyword.
+        // Argument types - both positional and keyword.
         let argument_types: Vec<PekoType> =
             arguments.iter().map(SimulatorValue::get_type).collect();
 
@@ -1948,6 +2152,25 @@ impl
             ));
         };
 
+        // Backward inference: a parameter that is an inference variable (`?N`,
+        // from a `new Class()` whose type arguments were not inferable) is
+        // constrained to the supplied argument's type. The caller back-patches
+        // these into the receiver variable. `this` is the first parameter, so
+        // it is skipped to align with the explicit argument types.
+        for (param, argument_type) in method
+            .arguments
+            .values()
+            .skip(1)
+            .zip(argument_types.iter())
+        {
+            let param_name = param.argument_type.name();
+            if param_name.starts_with('?') {
+                self.last_call_inference
+                    .entry(param_name.to_string())
+                    .or_insert_with(|| argument_type.clone());
+            }
+        }
+
         // Visibility check: private methods can only be called from
         // within a method on the same class (i.e. when we have a `this`).
         if method.visibility.private && self.current_this.is_none() {
@@ -1967,7 +2190,7 @@ impl
             ));
         }
 
-        // Detect "every argument has a default" — relevant to the
+        // Detect "every argument has a default" - relevant to the
         // keyword-call path below.
         let mut all_args_keywords = !method.arguments.is_empty();
         for (_, arg) in &method.arguments {
@@ -2038,10 +2261,37 @@ impl
         }
         self.module_context.step_forward(post_stack);
 
-        Ok(SimulatorValue::Value(method.return_type.clone()))
+        // Method-level generics: infer each parameter the method declares itself
+        // by unifying its declared argument types against the supplied ones, then
+        // substitute into the result, mirroring the codegen so both observe the
+        // same concrete element type.
+        let mut result_type = method.return_type.clone();
+        if !method.method_generic_typenames.is_empty() {
+            let method_names: std::collections::HashSet<String> = method
+                .method_generic_typenames
+                .iter()
+                .map(|name| name.value.clone())
+                .collect();
+            let mut method_substitution = HashMap::new();
+            for (declared, actual) in
+                method.arguments.values().skip(1).zip(argument_types.iter())
+            {
+                types::infer_generic_bindings(
+                    &declared.argument_type,
+                    actual,
+                    &method_names,
+                    &mut method_substitution,
+                );
+            }
+            if !method_substitution.is_empty() {
+                result_type = types::substitute_generic_params(&result_type, &method_substitution);
+            }
+        }
+
+        Ok(SimulatorValue::Value(result_type))
     }
 
-    /// Constructs a `standard::Array<T>` simulator value.
+    /// Constructs an `Array<T>` simulator value.
     ///
     /// Returns `None` if any element's type is not similar to
     /// `array_type`.
@@ -2056,13 +2306,13 @@ impl
             }
         }
 
-        let mut array_object_type = types::PekoType::from_string("standard::Array", String::new());
+        let mut array_object_type = types::PekoType::from_string("Array", String::new());
         array_object_type.generics_mut().push(array_type.clone());
 
         Some(SimulatorValue::Value(array_object_type))
     }
 
-    /// Constructs a `standard::Map<K, V>` simulator value.
+    /// Constructs a `Map<K, V>` simulator value.
     ///
     /// Returns `None` if any key or value type is not similar to the
     /// declared key or value type.
@@ -2080,7 +2330,7 @@ impl
             }
         }
 
-        let mut map_object_type = types::PekoType::from_string("standard::Map", String::new());
+        let mut map_object_type = types::PekoType::from_string("Map", String::new());
         map_object_type.generics_mut().push(key_type.clone());
         map_object_type.generics_mut().push(value_type.clone());
 
@@ -2100,7 +2350,7 @@ impl
     ) -> Option<SimulatorValue> {
         let class_to_create = self.get_class_by_type(class_type)?;
 
-        // The simulator's "allocation" is just a typed value — see
+        // The simulator's "allocation" is just a typed value - see
         // gc_allocate_type's rustdoc.
         let allocate_object = self.gc_allocate_type(&class_to_create.class_type);
 
@@ -2157,6 +2407,16 @@ impl
         lhs: &SimulatorValue,
         rhs: &SimulatorValue,
     ) -> Option<SimulatorValue> {
+        // Enum-to-enum `==` / `!=`. Checked before expansion because a bare
+        // cross-module enum value does not expand in the importing module. A
+        // qualified enum type and a bare reference to the same enum compare
+        // equal, so the operands match one qualified and one bare.
+        if matches!(operator.to_string().as_str(), "==" | "!=")
+            && self.enum_types_match(&lhs.get_type(), &rhs.get_type())
+        {
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
+        }
+
         let lhs_value_type = self.expand_type(&lhs.get_type());
         let rhs_value_type = self.expand_type(&rhs.get_type());
 
@@ -2187,6 +2447,40 @@ impl
             return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
         }
 
+        // Enum-to-enum: an enum lowers to its i32 variant index, so `==` / `!=`
+        // compares those indices and yields a raw i1.
+        if matches!(operator.to_string().as_str(), "==" | "!=")
+            && self.get_enum_variants(lhs_value_type.name()).is_some()
+            && self.get_enum_variants(rhs_value_type.name()).is_some()
+        {
+            return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
+        }
+
+        // Erased carrier operand: route the operator to its core trait method,
+        // resolved through the carrier's bounds. A `KT: impl Equals` carrier
+        // supports `==` through the Equals trait's `equals`, mirroring the
+        // codegen's bound-driven dispatch.
+        if lhs_value_type.is_generic_param() {
+            let operator_str = operator.to_string();
+            if let Some(method_name) = types::operator_trait_method(&operator_str) {
+                for restraint in lhs_value_type.restraints() {
+                    let types::TypeRestraint::Impl(trait_type) = restraint else {
+                        continue;
+                    };
+                    let Some(trait_definition) = self.get_trait(trait_type.name()) else {
+                        continue;
+                    };
+                    if let Some(slot) = trait_definition
+                        .methods
+                        .iter()
+                        .find(|method| method.name.as_str() == method_name)
+                    {
+                        return Some(SimulatorValue::Value(slot.return_type.clone()));
+                    }
+                }
+            }
+        }
+
         // Object types: route the operator to its core trait method (`+` ->
         // `plus`, `==` -> `equals`, and so on). An operator with no core trait
         // keeps the legacy `[operator <op>]` member name.
@@ -2202,7 +2496,7 @@ impl
                 return Some(value);
             }
 
-            // Overload didn't work — try to cast the lhs to the rhs's
+            // Overload didn't work - try to cast the lhs to the rhs's
             // built-in type via a user-defined `[operator to_<type>]`
             // method, then continue as if the lhs had been that type
             // all along.
@@ -2263,9 +2557,16 @@ impl
                 || rhs_value_type.name() == "pointer"
                 || self.get_class_by_type(&rhs_value_type).is_some();
 
+            // A null / `opaque` value compares to any reference form without a
+            // similarity check, matching the codegen's pointer comparison (a
+            // null pointer is address-space-0 opaque and compares to any
+            // pointer). Otherwise the two reference types must be similar.
+            let either_opaque =
+                lhs_value_type.name() == "opaque" || rhs_value_type.name() == "opaque";
+
             if lhs_is_reference_like
                 && rhs_is_reference_like
-                && self.types_similar(&lhs_value_type, &rhs_value_type)
+                && (either_opaque || self.types_similar(&lhs_value_type, &rhs_value_type))
             {
                 return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
             }
@@ -2315,7 +2616,7 @@ impl
                 class.attributes[&attribute_name_str].attribute_type.clone(),
             ))
         } else {
-            // Caller wants an lvalue — bump the reference depth so the
+            // Caller wants an lvalue - bump the reference depth so the
             // result represents `&attribute` rather than the loaded
             // value.
             let mut reference_type = class.attributes[&attribute_name_str].attribute_type.clone();

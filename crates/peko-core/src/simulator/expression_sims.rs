@@ -1,20 +1,20 @@
 //! # Expression AST simulators
 //!
 //! [`PekoValueSimulator`] implementations for expression-level AST
-//! nodes — anything that produces a value when simulated:
+//! nodes - anything that produces a value when simulated:
 //!
-//! * **Literals** — array ([`ArrayAST`]), map ([`MapAST`]), XML tag
+//! * **Literals** - array ([`ArrayAST`]), map ([`MapAST`]), XML tag
 //!   ([`PekoXTagAST`]), range ([`RangeAST`]).
-//! * **References** — variable ([`VariableReferenceAST`]), module
+//! * **References** - variable ([`VariableReferenceAST`]), module
 //!   access ([`ModuleAccessAST`]), object access ([`ObjectAccessAST`]),
 //!   array access ([`ArrayAccessAST`]).
-//! * **Calls and constructions** — function call ([`FunctionCallAST`]),
+//! * **Calls and constructions** - function call ([`FunctionCallAST`]),
 //!   object construction ([`ObjectConstructionAST`]).
-//! * **Operators** — unary ([`UnaryExpressionAST`]), binary
+//! * **Operators** - unary ([`UnaryExpressionAST`]), binary
 //!   ([`BinaryExpressionAST`]).
-//! * **Conversions** — cast ([`CastAST`]), unwrap ([`UnwrapAST`]).
+//! * **Conversions** - cast ([`CastAST`]), unwrap ([`UnwrapAST`]).
 //!
-//! The function-call impl is by far the largest — it handles three
+//! The function-call impl is by far the largest - it handles three
 //! distinct syntaxes (normal call, expression call, object
 //! construction), overload resolution, and generic type inference,
 //! all behind a single [`FunctionCallAST`] node produced by the parser.
@@ -37,6 +37,32 @@ use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{DefinedObject, SimulatorArg, SimulatorVariable};
 use super::value::SimulatorValue;
+
+/// Replaces every backward-inference variable (`?N`) in `ty` with its bound
+/// concrete type, recursing through generic arguments. A type that is itself
+/// an inference variable becomes the bound type, keeping the original depth.
+fn substitute_inference_variables(
+    ty: &PekoType,
+    bindings: &HashMap<String, PekoType>,
+) -> PekoType {
+    if let Some(concrete) = bindings.get(ty.name()) {
+        let mut result = concrete.clone();
+        result.array_depth += ty.array_depth;
+        result.reference_depth += ty.reference_depth;
+        return result;
+    }
+
+    let mut result = ty.clone();
+    if !result.generics().is_empty() {
+        let substituted: Vec<PekoType> = result
+            .generics()
+            .iter()
+            .map(|generic| substitute_inference_variables(generic, bindings))
+            .collect();
+        *result.generics_mut() = substituted;
+    }
+    result
+}
 
 /// Simulates an array literal `[a, b, c]`.
 ///
@@ -169,26 +195,25 @@ impl PekoValueSimulator for MapAST {
 
 /// Simulates a PekoX (XML-style) tag literal `<Tag attr="...">...</Tag>`.
 ///
-/// Builds the equivalent `ui::Element` object: tag name + string map of
-/// attributes + array of children + inner text + empty events map.
+/// Builds the equivalent `xml::Element` object: tag name + string map of
+/// attributes + array of children + inner text + events map.
 impl PekoValueSimulator for PekoXTagAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         // Build (attribute_name, attribute_value) pairs, each as
         // SimulatorValues, to feed into a string-to-string map.
         let mut attribute_key_value_pairs = Vec::new();
 
-        for (attribute_name, attribute_value) in &self.attributes {
-            let attribute_name = simulator_context
-                .create_standard_string_ast(attribute_name.clone())
-                .simulate(simulator_context);
+        for attribute_value in self.attributes.values() {
+            let attribute_name =
+                SimulatorValue::Value(types::PekoType::simple_type("string"));
 
             attribute_key_value_pairs
                 .push((attribute_name, attribute_value.simulate(simulator_context)));
         }
 
         let element_attributes = simulator_context.create_standard_map(
-            &types::PekoType::simple_type("String"),
-            &types::PekoType::simple_type("String"),
+            &types::PekoType::simple_type("string"),
+            &types::PekoType::simple_type("string"),
             attribute_key_value_pairs,
         );
 
@@ -218,7 +243,7 @@ impl PekoValueSimulator for PekoXTagAST {
 
             if simulator_context.types_equal(
                 &child_value.get_type(),
-                &types::PekoType::from_string("ui::Element", &current_file),
+                &types::PekoType::from_string("xml::Element", &current_file),
             ) {
                 children.push(child_value);
             } else {
@@ -236,43 +261,33 @@ impl PekoValueSimulator for PekoXTagAST {
 
         let element_children = simulator_context
             .create_standard_array(
-                &types::PekoType::from_string("ui::Element", &current_file),
+                &types::PekoType::from_string("xml::Element", &current_file),
                 children,
             )
             .unwrap();
 
-        // Build the inner-text String value.
-        let element_inner_text = ObjectConstructionAST::new(
+        // Build the inner-text `string` value.
+        let element_inner_text = PekoAST::String(StringAST::new(
             PositionData::default(),
             PositionData::default(),
-            PositionedValue::create_no_position(String::from("String")),
-            Vec::new(),
-            vec![(
-                None,
-                PekoAST::String(StringAST::new(
-                    PositionData::default(),
-                    PositionData::default(),
-                    true,
-                    self.inner_text.clone(),
-                )),
-            )],
-        )
+            true,
+            self.inner_text.clone(),
+        ))
         .simulate(simulator_context);
 
-        let tag_string = simulator_context.create_standard_string_ast(self.tag.clone());
-        let tag_string = tag_string.simulate(simulator_context);
+        let tag_string = SimulatorValue::Value(types::PekoType::simple_type("string"));
 
         let events_map = simulator_context
             .create_standard_map(
-                &types::PekoType::simple_type("String"),
-                &types::PekoType::from_string("closure(ui::Event)", &current_file),
+                &types::PekoType::simple_type("string"),
+                &types::PekoType::from_string("closure(xml::Event) => void", &current_file),
                 Vec::new(),
             )
             .unwrap();
 
-        // Build the final ui::Element object.
+        // Build the final `xml::Element` object.
         let pekox_tag_object = simulator_context.create_object(
-            &types::PekoType::from_string("ui::Element", &current_file),
+            &types::PekoType::from_string("xml::Element", &current_file),
             vec![
                 tag_string,
                 element_attributes,
@@ -290,7 +305,7 @@ impl PekoValueSimulator for PekoXTagAST {
                 .report_diagnostic(diagnostics::PekoDiagnostic::new(
                     self.start.clone(),
                     self.end.clone(),
-                    "internal error: failed to construct `ui::Element` for this XML tag. The standard library may not be properly linked".to_string(),
+                    "internal error: failed to construct `xml::Element` for this XML tag. The standard library may not be properly linked".to_string(),
                     diagnostics::DiagnosticType::Error,
                     simulator_context.get_current_file(),
                 ));
@@ -575,7 +590,7 @@ impl PekoValueSimulator for VariableReferenceAST {
                 simulator_context.module_context.current_module().clone(),
             )
         } else {
-            // Globals — and if not a variable, try resolving as a
+            // Globals - and if not a variable, try resolving as a
             // function reference (functions are first-class values).
             let find_global = match simulator_context
                 .find_global_variable_in_current(&self.variable_name.value)
@@ -694,21 +709,21 @@ impl PekoValueSimulator for VariableReferenceAST {
 
 /// Simulates a function call.
 ///
-/// This is the most complex AST simulator — [`FunctionCallAST`]
+/// This is the most complex AST simulator - [`FunctionCallAST`]
 /// represents three distinct surface syntaxes that the parser
 /// produces with the same node shape:
 ///
-/// 1. **Identifier calls** — `name(args)` where `name` is a
+/// 1. **Identifier calls** - `name(args)` where `name` is a
 ///    declared function.
-/// 2. **Expression calls** — `expr(args)` where `expr` evaluates to
+/// 2. **Expression calls** - `expr(args)` where `expr` evaluates to
 ///    a function-typed value (e.g. `closures[0](x)`).
-/// 3. **Object constructions** — `ClassName(args)`, identical at
+/// 3. **Object constructions** - `ClassName(args)`, identical at
 ///    parse time to identifier calls. This impl detects the class
 ///    case and re-delegates to [`ObjectConstructionAST`].
 ///
 /// On top of those three syntaxes, function calls can be generic
 /// (with inference from arguments and/or the surrounding expected
-/// type), and non-generic functions can be overloaded — which
+/// type), and non-generic functions can be overloaded - which
 /// requires running the overload-selection algorithm on every call.
 ///
 /// The flow is:
@@ -757,6 +772,18 @@ impl PekoValueSimulator for FunctionCallAST {
         // Record the called function for usage tracking.
         if let Some(name) = &function_name {
             simulator_context.mark_symbol_used(&name.value);
+        }
+
+        // Built-in `deserialize<T>(source)`: lowers to
+        // `T::deserialize(source as Deserializer)` and yields `T?`.
+        if let Some(name) = &function_name
+            && name.value == "deserialize"
+            && self.function_generics.len() == 1
+            && self.arguments.len() == 1
+        {
+            self.arguments[0].1.simulate(simulator_context);
+            let target = self.function_generics[0].clone();
+            return SimulatorValue::Value(types::PekoType::option_of(target));
         }
 
         // --- Built-in functions: sizeof, Error, __rt_peko_alloc, cstring --- //
@@ -815,7 +842,7 @@ impl PekoValueSimulator for FunctionCallAST {
             simulator_context.module_context.step_forward(post_stack);
             simulator_context.current_function_call = previous_function_call;
 
-            // sizeof<T>() returns int64 — size of T in bytes, used
+            // sizeof<T>() returns int64 - size of T in bytes, used
             // for low-level allocations.
             if function_name.is_some() && function_name.clone().unwrap().value == "sizeof" {
                 if self.function_generics.len() != 1 {
@@ -1044,7 +1071,7 @@ impl PekoValueSimulator for FunctionCallAST {
 
         // Walk up the module hierarchy looking for the function /
         // class / generic. Also tracks whether the name is actually
-        // an in-scope variable (case 2 — the function reference is a
+        // an in-scope variable (case 2 - the function reference is a
         // variable holding a function value).
         let mut function_module = simulator_context.module_context.current_module().clone();
         let mut no_parent = false;
@@ -1062,16 +1089,10 @@ impl PekoValueSimulator for FunctionCallAST {
                     .unwrap()
                     .classes
                     .contains_key(&function_full_name)
-                && !function_module
-                    .read()
-                    .unwrap()
-                    .function_generics
-                    .contains_key(&function_base_name)
-                && !function_module
-                    .read()
-                    .unwrap()
-                    .class_generics
-                    .contains_key(&function_base_name)
+                && !simulator_context
+                    .module_has_function_template(&function_module, &function_base_name)
+                && !simulator_context
+                    .module_has_class_template(&function_module, &function_base_name)
             {
                 // Remember if the name matches a variable so we can
                 // later treat this AST as case 2.
@@ -1284,16 +1305,10 @@ impl PekoValueSimulator for FunctionCallAST {
         // parameters, attempt to infer them: first from the argument
         // types, then from the expected return/binding type.
         if !no_parent
-            && (function_module
-                .read()
-                .unwrap()
-                .function_generics
-                .contains_key(&function_base_name)
-                || function_module
-                    .read()
-                    .unwrap()
-                    .class_generics
-                    .contains_key(&function_base_name))
+            && (simulator_context
+                .module_has_function_template(&function_module, &function_base_name)
+                || simulator_context
+                    .module_has_class_template(&function_module, &function_base_name))
             && self.function_generics.is_empty()
         {
             let previous_function_call = simulator_context.current_function_call.clone();
@@ -1344,21 +1359,18 @@ impl PekoValueSimulator for FunctionCallAST {
 
             // Collect the generic type-parameter names from the
             // declaration.
-            let needed_generics = if function_module
-                .read()
-                .unwrap()
-                .function_generics
-                .contains_key(&function_full_name)
-            {
-                function_module.read().unwrap().function_generics[&function_base_name]
-                    .read()
+            let is_function_template = simulator_context
+                .module_has_function_template(&function_module, &function_base_name);
+            let needed_generics = if is_function_template {
+                simulator_context
+                    .module_function_template(&function_module, &function_base_name)
                     .unwrap()
                     .generic_typenames
                     .iter()
                     .map(|arg_type| arg_type.value.clone())
                     .collect::<Vec<String>>()
             } else {
-                function_module.read().unwrap().class_generics[&function_base_name]
+                function_module.read().unwrap().classes[&function_base_name]
                     .read()
                     .unwrap()
                     .generic_typenames
@@ -1369,17 +1381,12 @@ impl PekoValueSimulator for FunctionCallAST {
 
             // Pull the declared argument-type names from either the
             // function's parameter list or the matching constructor.
-            let argument_declaration_types: Vec<String> = if function_module
-                .read()
-                .unwrap()
-                .function_generics
-                .contains_key(&function_full_name)
-            {
-                let generic =
-                    function_module.read().unwrap().function_generics[&function_base_name].clone();
-                let generic = generic.read().unwrap();
-                generic
-                    .function
+            let argument_declaration_types: Vec<String> = if is_function_template {
+                let generic = simulator_context
+                    .module_function_template(&function_module, &function_base_name)
+                    .unwrap();
+                let source = generic.source_function.clone().unwrap();
+                source
                     .arguments
                     .iter()
                     .map(|(_, argument_declaration_info)| {
@@ -1388,10 +1395,11 @@ impl PekoValueSimulator for FunctionCallAST {
                     .collect()
             } else {
                 let generic =
-                    function_module.read().unwrap().class_generics[&function_base_name].clone();
+                    function_module.read().unwrap().classes[&function_base_name].clone();
                 let generic = generic.read().unwrap();
+                let source = generic.source_class.clone().unwrap();
                 let find_matching_constructor =
-                    generic.class.methods.iter().find(|method| match method {
+                    source.methods.iter().find(|method| match method {
                         ClassMethod::Constructor(constructor_info, _) => {
                             constructor_info.arguments.len() == argument_types.len()
                         }
@@ -1449,7 +1457,7 @@ impl PekoValueSimulator for FunctionCallAST {
                 });
 
             // Fallback: try to fill remaining generics from the
-            // expected type (e.g. `var x: Array<int> = Array()` —
+            // expected type (e.g. `var x: Array<int> = Array()` -
             // the `int` is inferred from the binding's type).
             let find_expected_type = if let Some(current_expected_types) =
                 &simulator_context.current_expected_type_options
@@ -1490,11 +1498,8 @@ impl PekoValueSimulator for FunctionCallAST {
         // missing-`new` mistake, reported here so it does not fall through to
         // function-call resolution.
         if !no_parent
-            && (function_module
-                .read()
-                .unwrap()
-                .class_generics
-                .contains_key(&function_base_name)
+            && (simulator_context
+                .module_has_class_template(&function_module, &function_base_name)
                 || function_module
                     .read()
                     .unwrap()
@@ -1669,25 +1674,20 @@ impl PekoValueSimulator for FunctionCallAST {
             function_var_args_type = None;
             function_argument_types = IndexMap::new();
         } else {
-            // --- Step 2b: identifier call — overload resolution --- //
+            // --- Step 2b: identifier call - overload resolution --- //
 
             // Lazily instantiate a generic function if needed.
-            if function_module
-                .read()
-                .unwrap()
-                .function_generics
-                .contains_key(&function_base_name)
+            if simulator_context
+                .module_has_function_template(&function_module, &function_base_name)
                 && !function_module
                     .read()
                     .unwrap()
                     .functions
                     .contains_key(&function_full_name)
             {
-                let function_reference = function_module.read().unwrap().function_generics
-                    [&function_base_name]
-                    .read()
-                    .unwrap()
-                    .clone();
+                let function_reference = simulator_context
+                    .module_function_template(&function_module, &function_base_name)
+                    .unwrap();
                 let generated_function = simulator_context
                     .create_generic_function(&function_reference, function_generics);
 
@@ -1994,9 +1994,117 @@ impl PekoValueSimulator for ModuleAccessAST {
             return SimulatorValue::Value(types::PekoType::simple_type(enum_name));
         }
 
-        // Resolve the first module in the chain — try the current
-        // module's children first, then top-level imports.
+        // Enum deserialize: `Enum::deserialize(d)` routes to the enum's
+        // deserialize helper. Type-check the arguments and yield `Enum?`.
+        if self.module_names.len() == 1
+            && simulator_context
+                .get_enum_variants(&self.module_names[0].value)
+                .is_some()
+            && let PekoAST::FunctionCall(call) = self.accessor.as_ref()
+            && let PekoAST::VariableReference(method_reference) = call.function_reference.as_ref()
+            && method_reference.variable_name.value == "deserialize"
+        {
+            for (_, argument) in &call.arguments {
+                argument.simulate(simulator_context);
+            }
+            return SimulatorValue::Value(types::PekoType::option_of(types::PekoType::simple_type(
+                &self.module_names[0].value,
+            )));
+        }
+
+        // Static method access: `Type::method(args)`. The head names a class
+        // (not a module) that has a `static` method, and the accessor is a call.
+        // A static method takes no receiver, so it resolves at the type level to
+        // the concrete class named here. Its `Self` return type was already
+        // bound to that class when the method was registered.
+        if self.module_names.len() == 1
+            && let PekoAST::FunctionCall(call) = self.accessor.as_ref()
+            && let PekoAST::VariableReference(method_reference) = call.function_reference.as_ref()
+        {
+            let type_name = self.module_names[0].value.clone();
+            let class_type = types::PekoType::simple_type(&type_name);
+
+            if let Some(class) = simulator_context.get_class_by_type(&class_type) {
+                let method_name = method_reference.variable_name.value.clone();
+
+                if let Some(overloads) = class.main_virtual_table.methods.get(&method_name) {
+                    let static_overloads: Vec<_> = overloads
+                        .iter()
+                        .map(|function| function.read().unwrap().clone())
+                        .filter(|function| function.is_static)
+                        .collect();
+
+                    if !static_overloads.is_empty() {
+                        let mut argument_types = Vec::new();
+                        for (_, argument) in &call.arguments {
+                            argument_types.push(argument.simulate(simulator_context).get_type());
+                        }
+
+                        let chosen = simulator_context.choose_function(
+                            static_overloads,
+                            argument_types,
+                            None,
+                            true,
+                        );
+
+                        return match chosen {
+                            Some(method) => SimulatorValue::Value(method.return_type.clone()),
+                            None => {
+                                simulator_context.diagnostics.report_diagnostic(
+                                    diagnostics::PekoDiagnostic::new(
+                                        method_reference.variable_name.start.clone(),
+                                        method_reference.variable_name.end.clone(),
+                                        format!(
+                                            "no overload of static method `{method_name}` on type `{type_name}` matches the supplied argument types",
+                                        ),
+                                        diagnostics::DiagnosticType::Error,
+                                        simulator_context.get_current_file(),
+                                    ),
+                                );
+                                simulator_context.create_error_value()
+                            }
+                        };
+                    }
+
+                    // The method exists but has no static overload: an instance
+                    // method cannot be called at the type level.
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
+                            method_reference.variable_name.start.clone(),
+                            method_reference.variable_name.end.clone(),
+                            format!(
+                                "method `{method_name}` on type `{type_name}` is not static, so it cannot be called as `{type_name}::{method_name}(...)`. Call it on an instance instead",
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ),
+                    );
+                    return simulator_context.create_error_value();
+                }
+            }
+        }
+
+        // Resolve the first module in the chain - try the importing module's
+        // own aliases first (so a local import name wins over a global one),
+        // then its child modules, then top-level imports.
         let next_module = if simulator_context
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .module_aliases
+            .contains_key(&self.module_names[0].value)
+        {
+            Some(
+                simulator_context
+                    .module_context
+                    .current_module()
+                    .read()
+                    .unwrap()
+                    .module_aliases[&self.module_names[0].value]
+                    .clone(),
+            )
+        } else if simulator_context
             .module_context
             .current_module()
             .read()
@@ -2057,6 +2165,54 @@ impl PekoValueSimulator for ModuleAccessAST {
             {
                 if next_module.read().unwrap().name == self.module_names[i].value {
                     break;
+                }
+
+                // The final segment may name an enum in this module rather
+                // than a submodule, so `module::Enum::Variant` resolves here.
+                if i == self.module_names.len() - 1
+                    && let PekoAST::VariableReference(variant_reference) = self.accessor.as_ref()
+                    && let Some(definition) = next_module
+                        .read()
+                        .unwrap()
+                        .enums
+                        .get(&self.module_names[i].value)
+                        .cloned()
+                {
+                    let enum_name = &self.module_names[i].value;
+                    let variant_name = &variant_reference.variable_name.value;
+
+                    // A qualified path reaches this enum from another module,
+                    // so a `[private]` enum is out of bounds.
+                    if definition.private {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.module_names[i].start.clone(),
+                                variant_reference.variable_name.end.clone(),
+                                format!(
+                                    "cannot access private enum `{enum_name}` from outside its module. Remove the `[private]` modifier to export it",
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+
+                    if !definition.variants.contains(variant_name) {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                variant_reference.variable_name.start.clone(),
+                                variant_reference.variable_name.end.clone(),
+                                format!(
+                                    "enum `{enum_name}` has no variant `{variant_name}`. Check the variant name and that it is declared in the enum",
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
+                            ),
+                        );
+                        return simulator_context.create_error_value();
+                    }
+                    return SimulatorValue::Value(types::PekoType::simple_type(enum_name));
                 }
 
                 simulator_context
@@ -2122,14 +2278,28 @@ impl PekoValueSimulator for ModuleAccessAST {
 /// constructors.
 impl PekoValueSimulator for ObjectConstructionAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // Generic-argument inference: when `new Class()` omits its type
+        // arguments, recover them from a matching expected type at the use
+        // site, so `let x: Array<number> = new Array()` constructs an
+        // `Array<number>`.
+        let mut object_generics = self.object_generics.clone();
+        if object_generics.is_empty()
+            && let Some(options) = &simulator_context.current_expected_type_options
+        {
+            for expected in options {
+                if expected.name() == self.class_name.value && !expected.generics().is_empty() {
+                    object_generics = expected.generics().to_vec();
+                    break;
+                }
+            }
+        }
+
         let mut class_name_to_type =
             types::PekoType::from_string(self.class_name.value.as_str(), "");
-        class_name_to_type
-            .generics_mut()
-            .extend(self.object_generics.clone());
+        class_name_to_type.generics_mut().extend(object_generics.clone());
         let class_to_create = simulator_context.get_class_by_type(&class_name_to_type);
 
-        let Some(class_to_create) = class_to_create else {
+        let Some(mut class_to_create) = class_to_create else {
             simulator_context
                 .diagnostics
                 .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -2144,6 +2314,27 @@ impl PekoValueSimulator for ObjectConstructionAST {
                 ));
             return simulator_context.create_error_value();
         };
+
+        // Backward inference: still no type arguments but the class is
+        // generic. Bind a fresh inference variable (`?N`) per missing
+        // argument so the instance is usable now; a later constraining call
+        // resolves them and back-patches the variable's type.
+        if object_generics.is_empty() && !class_to_create.generic_typenames.is_empty() {
+            for _ in 0..class_to_create.generic_typenames.len() {
+                let name = format!("?{}", simulator_context.inference_counter);
+                simulator_context.inference_counter += 1;
+                object_generics.push(types::PekoType::generic_type(name, Vec::new()));
+            }
+            class_name_to_type.generics_mut().clear();
+            class_name_to_type
+                .generics_mut()
+                .extend(object_generics.clone());
+            if let Some(reinstantiated) =
+                simulator_context.get_class_by_type(&class_name_to_type)
+            {
+                class_to_create = reinstantiated;
+            }
+        }
 
         // Build a trace record for IDE signature help.
         let function_call_info = Arc::new(RwLock::new(FunctionCall::new(
@@ -2340,7 +2531,7 @@ impl PekoValueSimulator for ObjectConstructionAST {
                     ));
             }
         } else {
-            // No declared constructor — use the implicit attribute-list
+            // No declared constructor - use the implicit attribute-list
             // constructor. The synthetic vtable slot is not a user attribute,
             // so it takes no constructor argument.
             let constructor_attributes: Vec<_> = class_to_create
@@ -2448,18 +2639,18 @@ impl PekoValueSimulator for ObjectConstructionAST {
 ///
 /// Three cases dispatched on the kind of access:
 ///
-/// * **Method call** (`object.method(args)`) — resolves and calls
+/// * **Method call** (`object.method(args)`) - resolves and calls
 ///   the method, with special handling for attribute fields that
 ///   hold function-typed values.
-/// * **Attribute read** (`object.attr`) — resolves and returns the
+/// * **Attribute read** (`object.attr`) - resolves and returns the
 ///   attribute's value, with special handling for the `function` and
 ///   `context` pseudo-attributes on closures.
-/// * **Attribute write** (`object.attr = value`) — type-checks the
+/// * **Attribute write** (`object.attr = value`) - type-checks the
 ///   assignment, with support for compound assignment operators.
 impl PekoValueSimulator for ObjectAccessAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         // The object expression must simulate as a value, not a
-        // reference — references are introduced only at the final
+        // reference - references are introduced only at the final
         // step of access if needed.
         let return_references = simulator_context.return_references;
         simulator_context.return_references = false;
@@ -2516,21 +2707,56 @@ impl PekoValueSimulator for ObjectAccessAST {
                     }
                 };
 
-                // A method call on a trait-typed value resolves against the
-                // trait's slots: the result is the slot's return type.
-                if let Some(trait_definition) =
-                    simulator_context.get_trait(object.get_type().name())
+                // `enumValue.serialize(...)` has no method to resolve; it routes
+                // to the enum's serialize helper, which yields void.
+                if function_name == "serialize"
+                    && simulator_context
+                        .get_enum_variants(object.get_type().name())
+                        .is_some()
                 {
                     for (_, argument) in &function_call.arguments {
                         argument.simulate(simulator_context);
                     }
+                    return SimulatorValue::Value(types::PekoType::simple_type("void"));
+                }
 
-                    if let Some(slot) = trait_definition
-                        .methods
-                        .iter()
-                        .find(|method| method.name == function_name)
-                    {
-                        return SimulatorValue::Value(slot.return_type.clone());
+                // A method call on a trait-typed value, or on an erased carrier,
+                // resolves against the trait's slots: the result is the slot's
+                // return type. A carrier bound by several traits searches each of
+                // its bounds, so `KT: impl Hash, impl Equals` resolves methods
+                // from both.
+                let receiver_type = object.get_type();
+                let candidate_traits: Vec<_> =
+                    if let Some(definition) = simulator_context.get_trait(receiver_type.name()) {
+                        vec![definition]
+                    } else if receiver_type.is_generic_param() {
+                        receiver_type
+                            .restraints()
+                            .iter()
+                            .filter_map(|restraint| match restraint {
+                                types::TypeRestraint::Impl(trait_type) => {
+                                    simulator_context.get_trait(trait_type.name())
+                                }
+                                types::TypeRestraint::From(_) => None,
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                if !candidate_traits.is_empty() {
+                    for (_, argument) in &function_call.arguments {
+                        argument.simulate(simulator_context);
+                    }
+
+                    for trait_definition in &candidate_traits {
+                        if let Some(slot) = trait_definition
+                            .methods
+                            .iter()
+                            .find(|method| method.name == function_name)
+                        {
+                            return SimulatorValue::Value(slot.return_type.clone());
+                        }
                     }
 
                     simulator_context
@@ -2539,8 +2765,8 @@ impl PekoValueSimulator for ObjectAccessAST {
                             self.access.get_start().clone(),
                             self.access.get_end().clone(),
                             format!(
-                                "trait `{}` has no method `{}`. Check the method name against the trait declaration",
-                                object.get_type(),
+                                "type `{}` has no method `{}` among its bounds. Check the method name against the trait declarations",
+                                receiver_type,
                                 function_name,
                             ),
                             diagnostics::DiagnosticType::Error,
@@ -2883,6 +3109,29 @@ impl PekoValueSimulator for ObjectAccessAST {
                         return simulator_context.create_error_value();
                     }
                 };
+
+                // Backward inference: a constraining call on a variable holding
+                // inference variables resolves them. Substitute the discovered
+                // bindings into the receiver variable's stored type so later
+                // uses see the concrete type.
+                if !simulator_context.last_call_inference.is_empty()
+                    && let PekoAST::VariableReference(receiver) = self.object.as_ref()
+                {
+                    let name = receiver.variable_name.value.clone();
+                    let current = simulator_context
+                        .scoped_variables
+                        .get(&name)
+                        .map(|variable| variable.variable_type.clone());
+                    if let Some(current) = current {
+                        let updated = substitute_inference_variables(
+                            &current,
+                            &simulator_context.last_call_inference,
+                        );
+                        if let Some(variable) = simulator_context.scoped_variables.get_mut(&name) {
+                            variable.variable_type = updated;
+                        }
+                    }
+                }
 
                 // Rule 2 of 24.2: calling a [mutates] method on an attribute of
                 // `this` makes the enclosing method [mutates] too.
@@ -3241,7 +3490,7 @@ impl PekoValueSimulator for UnaryExpressionAST {
                 SimulatorValue::Value(pointee_type(&value_type))
             }
             "&" => {
-                // Take a reference — simulate the operand in
+                // Take a reference - simulate the operand in
                 // reference-returning mode.
                 let return_references = simulator_context.return_references;
                 simulator_context.return_references = true;
@@ -3264,10 +3513,17 @@ impl PekoValueSimulator for UnaryExpressionAST {
                 value
             }
             "-" => {
-                // Negate via `operand * -1`, leveraging the operator
-                // overload for `*`.
-                let negative_value = SimulatorValue::Value(types::PekoType::simple_type("i32"));
+                // Negate via `operand * -1`, leveraging the operator overload
+                // for `*`. The minus-one carries the operand's own type so the
+                // overload matches: a `number` operand multiplies by a `number`
+                // minus-one, a raw scalar by a raw machine minus-one.
                 let value = self.operand.simulate(simulator_context);
+                let negative_type = if value.get_type().name() == "number" {
+                    types::PekoType::simple_type("number")
+                } else {
+                    types::PekoType::simple_type("i32")
+                };
+                let negative_value = SimulatorValue::Value(negative_type);
 
                 let evaluated = simulator_context.apply_operator("*", &value, &negative_value);
 
@@ -3328,11 +3584,51 @@ impl PekoValueSimulator for UnaryExpressionAST {
 /// consults the type's declared operator overloads.
 ///
 /// [`apply_operator`]: ExecutionContextAlgorithms::apply_operator
+/// True when `ast` is the bare `None` literal. The parser represents None as a
+/// variable reference named None.
+fn is_none_literal_ast(ast: &PekoAST) -> bool {
+    matches!(ast, PekoAST::VariableReference(reference) if reference.variable_name.value == "None")
+}
+
 impl PekoValueSimulator for BinaryExpressionAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         if self.operator == ".." {
             return PekoAST::Range(RangeAST::new(self.lhs.clone(), self.rhs.clone()))
                 .simulate(simulator_context);
+        }
+
+        // `opt == None` / `opt != None` test an optional for emptiness. None has
+        // no type of its own here, so the comparison resolves to a bool on the
+        // optional operand without forcing None to name a type.
+        if self.operator == "==" || self.operator == "!=" {
+            let lhs_is_none = is_none_literal_ast(self.get_lhs());
+            let rhs_is_none = is_none_literal_ast(self.get_rhs());
+            if lhs_is_none ^ rhs_is_none {
+                let operand_ast = if lhs_is_none {
+                    self.get_rhs()
+                } else {
+                    self.get_lhs()
+                };
+                let operand = operand_ast.simulate(simulator_context);
+                if operand.get_type().name() == "Option" {
+                    return SimulatorValue::Value(types::PekoType::simple_type("bool"));
+                }
+                if !operand.get_type().is_error_type() {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.lhs.get_start().clone(),
+                            self.rhs.get_end().clone(),
+                            format!(
+                                "cannot compare `{}` against None. A None comparison requires an optional value",
+                                operand.get_type()
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                }
+                return simulator_context.create_error_value();
+            }
         }
 
         let lhs = self.get_lhs().simulate(simulator_context);
@@ -3377,8 +3673,8 @@ impl PekoValueSimulator for BinaryExpressionAST {
 
 /// Simulates an array access `array[index]`.
 ///
-/// If the array's type is a class with an `[operator []]` overload,
-/// the access is dispatched through that overload. Otherwise the
+/// If the array's type is a class, the access is dispatched through the
+/// Index trait (`index` for a read, `index_ref` for a write). Otherwise the
 /// array must be a pointer/reference type, and the index must be
 /// `int64`-compatible.
 impl PekoValueSimulator for ArrayAccessAST {
@@ -3399,16 +3695,17 @@ impl PekoValueSimulator for ArrayAccessAST {
                 .get_class_by_type(&array.get_type())
                 .is_some()
         {
-            // Pick the mutable or immutable overload depending on
-            // the surrounding context.
-            let operator = if simulator_context.return_references {
-                String::from("[operator []=]")
+            // Route indexing to the Index / IndexRef trait methods. A write
+            // context (the slot is needed) dispatches `index_ref`; a read
+            // context dispatches `index`.
+            let method = if simulator_context.return_references {
+                String::from("index_ref")
             } else {
-                String::from("[operator []]")
+                String::from("index")
             };
 
             let access_call =
-                simulator_context.call_object_method(&array, operator, vec![access.clone()], None);
+                simulator_context.call_object_method(&array, method, vec![access.clone()], None);
 
             if access_call.is_err() {
                 simulator_context
@@ -3417,7 +3714,7 @@ impl PekoValueSimulator for ArrayAccessAST {
                         self.array.get_start().clone(),
                         self.array.get_end().clone(),
                         format!(
-                            "cannot index into value of type `{}`. The type does not implement the `[operator []]` overload",
+                            "cannot index into value of type `{}`. The type does not implement the `Index` trait",
                             array.get_type(),
                         ),
                         diagnostics::DiagnosticType::Error,
@@ -3428,7 +3725,7 @@ impl PekoValueSimulator for ArrayAccessAST {
 
             return access_call.unwrap();
         } else if !array.get_type().is_pointer() {
-            // No indexing overload and not a pointer — can't be
+            // No indexing overload and not a pointer - can't be
             // indexed.
             simulator_context
                 .diagnostics
@@ -3573,42 +3870,46 @@ impl PekoValueSimulator for UnwrapAST {
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         let optional = self.optional.simulate(simulator_context);
 
-        let unwrap_call = simulator_context.call_object_method(
-            &optional,
-            String::from("[operator ?]"),
-            Vec::new(),
-            None,
-        );
-
-        if unwrap_call.is_err() {
-            simulator_context
-                .diagnostics
-                .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                    self.optional.get_start().clone(),
-                    self.optional.get_end().clone(),
-                    format!(
-                        "cannot unwrap value of type `{}` with `?`. The value is not an `Option<T>`; only optional values can be unwrapped",
-                        optional.get_type(),
-                    ),
-                    diagnostics::DiagnosticType::Error,
-                    simulator_context.get_current_file(),
-                ));
+        // The operand must be an optional. `?` yields its held type T.
+        if optional.get_type().name() != "Option" {
+            if !optional.get_type().is_error_type() {
+                simulator_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.optional.get_start().clone(),
+                        self.optional.get_end().clone(),
+                        format!(
+                            "cannot unwrap value of type `{}` with `?`. The value is not an `Option<T>`; only optional values can be unwrapped",
+                            optional.get_type(),
+                        ),
+                        diagnostics::DiagnosticType::Error,
+                        simulator_context.get_current_file(),
+                    ));
+            }
             return simulator_context.create_error_value();
         }
 
-        let unwrap_call = unwrap_call.unwrap();
+        let inner_type = optional
+            .get_type()
+            .optional_get_inner_type()
+            .unwrap_or_else(types::PekoType::error_type);
 
-        if simulator_context
-            .get_class_by_type(&unwrap_call.get_type())
-            .is_some()
-        {
+        // Type-check a fallback block. Its statements simulate for their own
+        // diagnostics; the block yields the fallback value.
+        if let Some(else_body) = &self.else_body {
+            for statement in &else_body.value {
+                statement.simulate(simulator_context);
+            }
+        }
+
+        if simulator_context.get_class_by_type(&inner_type).is_some() {
             simulator_context.defined_objects.push(DefinedObject::new(
                 false,
-                unwrap_call.get_type(),
+                inner_type.clone(),
                 self.end.clone(),
             ));
         }
 
-        unwrap_call
+        SimulatorValue::Value(inner_type)
     }
 }

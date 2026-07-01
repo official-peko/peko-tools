@@ -39,6 +39,7 @@ use peko_llvm::codegen::context::PekoCodegenContext;
 use peko_llvm::codegen::data_structures::CodegenModule;
 
 pub mod incremental;
+pub mod native;
 
 /// Outcome of a successful (or partial) [`compile`] invocation.
 ///
@@ -105,7 +106,7 @@ pub(super) fn parse_peko_source(file: PathBuf, source: String) -> (Vec<PekoAST>,
 
     // Walk the token stream until exhausted, skipping stray `;` / `}` that
     // tail-end a previous statement.
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }
@@ -132,18 +133,39 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
     peko_root: &Path,
     compilation_root: Option<P>,
 ) -> HashMap<String, ExternalModuleInfo> {
-    let Some(project_root) = compilation_root else {
-        return HashMap::new();
-    };
-    let project_root = project_root.as_ref();
+    let mut modules = HashMap::new();
 
-    match peko_core::config::Lockfile::load_from_root(project_root) {
-        Ok(Some(lockfile)) => {
-            peko_core::packages::PekoPackageIndex::from_lockfile(peko_root, project_root, &lockfile)
-                .get_external_modules()
-        }
-        _ => HashMap::new(),
+    // TEMPORARY dev override: resolve the `std` package from the compiler
+    // repo's own std/ directory rather than an installed package, so the V2
+    // standard library is the one being developed here. This makes std
+    // available on every path, including load_required_packages (which passes
+    // no compilation root). Remove once std is published and locked normally.
+    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("std").join("peko.toml"));
+    if let Some(repo_std) = repo_std
+        && let Ok(loaded) = peko_core::config::Manifest::load(&repo_std)
+    {
+        let info = loaded.manifest.to_external_module(&loaded.root);
+        modules.insert(info.module_name.clone(), info);
     }
+
+    if let Some(project_root) = compilation_root
+        && let Ok(Some(lockfile)) =
+            peko_core::config::Lockfile::load_from_root(project_root.as_ref())
+    {
+        modules.extend(
+            peko_core::packages::PekoPackageIndex::from_lockfile(
+                peko_root,
+                project_root.as_ref(),
+                &lockfile,
+            )
+            .get_external_modules(),
+        );
+    }
+
+    modules
 }
 
 /// Assign the lock-scoped external-module map onto a context's
@@ -187,14 +209,21 @@ pub fn compile(
     load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
 
-    // Codegen every top-level AST: header pass then body pass, so a class can
-    // reference another declared later.
+    // Codegen every top-level AST in three passes - shells, class signatures,
+    // then bodies - so a class body can dispatch on any other class regardless
+    // of source order.
     for ast in &asts {
         PekoValueBuilder::declare(ast, &mut codegen_context);
     }
     for ast in &asts {
+        ast.declare_signatures(&mut codegen_context);
+    }
+    for ast in &asts {
         ast.build_value(&mut codegen_context);
     }
+    // Emit the bodies of any generic instantiation laid out during the
+    // signature pass, now that every class is laid out.
+    codegen_context.drain_pending_generic_class_bodies();
 
     // Build the module containing all global-initializer functions.
     let globals_set = codegen_context.create_global_set_module();
@@ -237,7 +266,7 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
     // Parse with no default-import prelude.
     let mut parser = PekoParser::new(TokenList::from_source(source, &file), &file);
     let mut asts = Vec::new();
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }
@@ -293,8 +322,12 @@ pub fn compile_snippet_to_ir(source: &str) -> (String, DiagnosticList) {
             PekoValueBuilder::declare(ast, &mut codegen_context);
         }
         for ast in asts_for_codegen {
+            ast.declare_signatures(&mut codegen_context);
+        }
+        for ast in asts_for_codegen {
             ast.build_value(&mut codegen_context);
         }
+        codegen_context.drain_pending_generic_class_bodies();
         let codegen_diagnostics = codegen_context.diagnostics.get_diagnostics().to_vec();
 
         // Emit just the main module's IR. The full link step pulls in the
@@ -358,7 +391,7 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
     // Parse with the V2 import prelude prepended.
     let mut asts = default_imports();
     let mut parser = PekoParser::new(TokenList::from_source(source, &file), &file);
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
             parser.tokens.increase_index();
         }
@@ -390,6 +423,9 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
     for ast in &asts {
         ast.simulate(&mut simulator);
     }
+    // Type-check every generic body once with its parameters erased to their
+    // bound carriers (the erasure invariant).
+    simulator.check_generics_erased();
     for diagnostic in simulator.diagnostics.get_diagnostics() {
         diagnostics.report_diagnostic(diagnostic.clone());
     }

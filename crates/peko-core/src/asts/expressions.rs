@@ -145,12 +145,14 @@ impl Spanned for ArrayAccessAST {
     }
 }
 
-/// An optional unwrap: `optional?`.
+/// An optional unwrap: `optional?`, optionally with a fallback `optional? else
+/// { ... }` whose block yields a value on None or Error.
 #[derive(Clone, new)]
 pub struct UnwrapAST {
     pub start: PositionData,
     pub end: PositionData,
     pub optional: Box<PekoAST>,
+    pub else_body: Option<PositionedValue<Vec<PekoAST>>>,
 }
 
 impl Spanned for UnwrapAST {

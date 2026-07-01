@@ -1,0 +1,135 @@
+//! std::io: console and file-descriptor input and output.
+//!
+//! The V2 home of the V1 console package. Low-level fd I/O plus the console
+//! print helpers. The platform layer is the C in c/io/console.c, exposed
+//! through c/io/console.peko.h. Used through the std::io prefix.
+
+import c::io::console;
+import { * } from core;
+import runtime;
+
+// ---------------------------------------------------------------------------
+// --- Standard file descriptors ---
+// ---------------------------------------------------------------------------
+
+/// The standard input file descriptor.
+[public] fn stdin() => i32 {
+    return constant<i32>(0)
+}
+
+/// The standard output file descriptor.
+[public] fn stdout() => i32 {
+    return constant<i32>(1)
+}
+
+/// The standard error file descriptor.
+[public] fn stderr() => i32 {
+    return constant<i32>(2)
+}
+
+// ---------------------------------------------------------------------------
+// --- Write ---
+// ---------------------------------------------------------------------------
+
+/// Writes a string to the given fd. Returns the number of bytes written, or
+/// None on error.
+[public] fn write(fd: i32, str: string) => number? {
+    let zero: i32 = constant<i32>(0)
+    let result: i32 = console::peko_write_fd_string(fd, str.to_raw())
+    if result < zero {
+        return None
+    }
+    return new number(danger_cast<f64>(result))
+}
+
+// ---------------------------------------------------------------------------
+// --- Print (stdout) ---
+// ---------------------------------------------------------------------------
+
+/// Prints a string to stdout, no trailing newline.
+[public] fn print(str: string) {
+    console::peko_write_fd_string(stdout(), str.to_raw())
+}
+
+/// Prints a number to stdout, no trailing newline.
+[public] fn print(value: number) {
+    print(runtime::float_to_string(value.to_raw()))
+}
+
+/// Prints a bool to stdout, no trailing newline.
+[public] fn print(value: bool) {
+    print(runtime::bool_to_string(value.to_raw()))
+}
+
+/// Prints a char to stdout, no trailing newline.
+[public] fn print(value: char) {
+    print(runtime::char_to_string(value.to_raw()))
+}
+
+/// Prints a string to stdout with a trailing newline.
+[public] fn println(str: string) {
+    print(str)
+    print("\n")
+}
+
+/// Prints a number to stdout with a trailing newline.
+[public] fn println(value: number) {
+    println(runtime::float_to_string(value.to_raw()))
+}
+
+/// Prints a bool to stdout with a trailing newline.
+[public] fn println(value: bool) {
+    println(runtime::bool_to_string(value.to_raw()))
+}
+
+/// Prints a char to stdout with a trailing newline.
+[public] fn println(value: char) {
+    println(runtime::char_to_string(value.to_raw()))
+}
+
+// ---------------------------------------------------------------------------
+// --- Print (stderr) ---
+// ---------------------------------------------------------------------------
+
+/// Prints a string to stderr, no trailing newline.
+[public] fn eprint(str: string) {
+    console::peko_write_fd_string(stderr(), str.to_raw())
+}
+
+/// Prints a string to stderr with a trailing newline.
+[public] fn eprintln(str: string) {
+    eprint(str)
+    eprint("\n")
+}
+
+// ---------------------------------------------------------------------------
+// --- Flush ---
+// ---------------------------------------------------------------------------
+
+/// Flushes the write buffer for stdout.
+[public] fn flush() {
+    console::peko_flush_fd(stdout())
+}
+
+/// Flushes the write buffer for the given fd.
+[public] fn flush(fd: i32) {
+    console::peko_flush_fd(fd)
+}
+
+// ---------------------------------------------------------------------------
+// --- Read ---
+// ---------------------------------------------------------------------------
+
+/// Reads one line from the given fd (newline excluded), or None on error.
+[public] fn read_line(fd: i32) => string? {
+    let buffer: pointer<i8> = console::peko_read_line(fd)
+    if buffer == null {
+        return None
+    }
+    return runtime::managed_string(buffer)
+}
+
+/// Reads one line from stdin (newline excluded), or None on error.
+[public] fn read_line() => string? {
+    return read_line(stdin())
+}

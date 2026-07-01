@@ -1,0 +1,111 @@
+//! std::random: fast non-cryptographic random number generation.
+//!
+//! Uses the CMWC (Complementary Multiply With Carry) algorithm in
+//! c/random/random.c, exposed through c/random/random.peko.h. This generator
+//! is NOT cryptographically secure. For security-sensitive random data use
+//! std::crypto instead. Used through the std::random prefix.
+
+import c::random::random as cmwc;
+import { * } from core;
+import { * } from collections;
+
+// ---------------------------------------------------------------------------
+// --- Global RNG ---
+// A single shared CMWC state, time-seeded from the current time on first use.
+// ---------------------------------------------------------------------------
+
+/// Seeds the global RNG with a specific value, for a reproducible sequence.
+/// When not called, the RNG seeds itself from the current time on first use.
+[public] fn seed(value: number) {
+    let raw: i32 = danger_cast<i32>(value.to_raw())
+    cmwc::peko_random_seed(raw)
+}
+
+/// A random integer in the range [min, max). The upper bound is exclusive.
+/// When max is not greater than min, returns min.
+[public] fn next_int(min: number, max: number) => number {
+    let lo: i32 = danger_cast<i32>(min.to_raw())
+    let hi: i32 = danger_cast<i32>(max.to_raw())
+    let result: i32 = cmwc::peko_random_int(lo, hi)
+    return new number(danger_cast<f64>(result))
+}
+
+/// A random fraction in the range [0.0, 1.0).
+[public] fn next_float() => number {
+    let result: f32 = cmwc::peko_random_float()
+    return new number(danger_cast<f64>(result))
+}
+
+/// A random boolean.
+[public] fn next_bool() => bool {
+    return cmwc::peko_random_bool()
+}
+
+/// A random element from `array`, or None when the array is empty.
+[public] fn choice<T>(array: Array<T>) => T? {
+    let zero: i32 = constant<i32>(0)
+    let count: i32 = danger_cast<i32>(array.size().to_raw())
+    if count == zero {
+        return None
+    }
+    let idx: i32 = cmwc::peko_random_int(zero, count)
+    let index: number = new number(danger_cast<f64>(idx))
+    return array[index]
+}
+
+// ---------------------------------------------------------------------------
+// --- Rng instance ---
+// An independent generator with its own state, separate from the global RNG.
+// The state is an unmanaged C allocation; call free() when done with it.
+// ---------------------------------------------------------------------------
+
+/// An independent non-cryptographic random number generator. Each instance
+/// owns its own state, so seeding one does not affect the global RNG or any
+/// other instance.
+[public] class Rng {
+    [private] handle: opaque
+
+    /// A new generator seeded from the current time.
+    constructor() {
+        this.handle = cmwc::peko_rng_new()
+    }
+
+    /// A new generator seeded with `seed`. The same seed always produces the
+    /// same sequence.
+    constructor(seed: number) {
+        let raw: i32 = danger_cast<i32>(seed.to_raw())
+        this.handle = cmwc::peko_rng_new_seeded(raw)
+    }
+
+    /// Re-seeds this generator, resetting the sequence.
+    [mutates] fn seed(value: number) {
+        let raw: i32 = danger_cast<i32>(value.to_raw())
+        cmwc::peko_rng_seed(this.handle, raw)
+    }
+
+    /// A random integer in the range [min, max). The upper bound is exclusive.
+    [public] fn next_int(min: number, max: number) => number {
+        let lo: i32 = danger_cast<i32>(min.to_raw())
+        let hi: i32 = danger_cast<i32>(max.to_raw())
+        let result: i32 = cmwc::peko_rng_int(this.handle, lo, hi)
+        return new number(danger_cast<f64>(result))
+    }
+
+    /// A random fraction in the range [0.0, 1.0).
+    [public] fn next_float() => number {
+        let result: f32 = cmwc::peko_rng_float(this.handle)
+        return new number(danger_cast<f64>(result))
+    }
+
+    /// A random boolean.
+    [public] fn next_bool() => bool {
+        return cmwc::peko_rng_bool(this.handle)
+    }
+
+    /// Frees the underlying C state. The Rng must not be used after this call.
+    /// The collector manages the Rng object, but the malloc'd state it points
+    /// at is unmanaged and must be released explicitly.
+    [public] fn free() {
+        cmwc::peko_rng_free(this.handle)
+    }
+}

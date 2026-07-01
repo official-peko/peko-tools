@@ -1,0 +1,30 @@
+# Toolchain description for the iOS simulator on x86_64.
+#
+# Paths are relative to this file's directory. OpenSSL is shared one level up
+# at ../openssl_libs.
+
+[toolchain]
+id = "ios-x86_64"
+target = "ios"
+arch = "x86_64"
+triple = "x86_64-apple-ios"
+
+[build]
+cxx_std = "c++17"
+c_flags = ["-fobjc-arc", "-isysroot", "iPhoneOS.sdk"]
+objc_flags = []
+include = []
+
+[link]
+driver = "ld64.lld"
+lib_paths = []
+libs = ["objc", "c++", "c"]
+frameworks = ["Security", "Foundation", "WebKit", "UIKit"]
+objects = ["../openssl_libs/libssl.a", "../openssl_libs/libcrypto.a"]
+flags = [
+  "-w",
+  "-dynamic",
+  "-arch", "x86_64",
+  "-platform_version", "ios-simulator", "15.0", "26.2",
+  "-syslibroot", "iPhoneOS.sdk",
+]

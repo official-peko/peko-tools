@@ -1,0 +1,176 @@
+# Toolchain description for Linux on x86_64.
+#
+# Paths are relative to this file's directory, except absolute on-device
+# runtime paths such as the dynamic linker. The GTK and WebKit headers live in
+# a shared sibling directory (../gtk).
+
+[toolchain]
+id = "linux-x86_64"
+target = "linux"
+arch = "x86_64"
+triple = "x86_64-pc-linux"
+
+[build]
+cxx_std = "c++17"
+c_flags = []
+objc_flags = []
+include = [
+  "include",
+  "x86_64-linux-gnu/include/c++/14.3.0",
+  "x86_64-linux-gnu/include/c++/14.3.0/x86_64-linux-gnu",
+  "x86_64-linux-gnu/include/c++/14.3.0/backward",
+  "x86_64-linux-gnu/sysroot/usr/include",
+  "../gtk/webkitgtk-4.0",
+  "../gtk/at-spi-2.0",
+  "../gtk/at-spi2-atk",
+  "../gtk/atk-1.0",
+  "../gtk/blkid",
+  "../gtk/cairo",
+  "../gtk/dbus",
+  "../gtk/dbus-1.0",
+  "../gtk/freetype2",
+  "../gtk/fribidi",
+  "../gtk/gdk-pixbuf-2.0",
+  "../gtk/gio-unix-2.0",
+  "../gtk/glib-2.0",
+  "../gtk/glib-include",
+  "../gtk/gtk-3.0",
+  "../gtk/harfbuzz",
+  "../gtk/libmount",
+  "../gtk/libpng16",
+  "../gtk/libsoup-2.4",
+  "../gtk/libxml2",
+  "../gtk/pango-1.0",
+  "../gtk/pixman-1",
+  "../gtk/uuid",
+]
+
+[link]
+driver = "ld.lld"
+lib_paths = [
+  "lib",
+  "lib/gcc/x86_64-linux-gnu/14.3.0",
+  "lib64",
+  "x86_64-linux-gnu/lib",
+  "x86_64-linux-gnu/lib64",
+  "x86_64-linux-gnu/sysroot/lib",
+  "x86_64-linux-gnu/sysroot/lib64",
+  "x86_64-linux-gnu/sysroot/usr/lib",
+  "x86_64-linux-gnu/sysroot/usr/lib64",
+]
+libs = [
+  "stdc++", "m", "gcc_s", "gcc", "c", "pthread",
+  "webkit2gtk-4.0", "gtk-3", "gdk-3", "pangocairo-1.0", "pango-1.0",
+  "harfbuzz", "atk-1.0", "cairo-gobject", "cairo", "gdk_pixbuf-2.0",
+  "soup-2.4", "gmodule-2.0", "gio-2.0", "javascriptcoregtk-4.0",
+  "gobject-2.0", "glib-2.0",
+]
+frameworks = []
+# C runtime objects plus the SSL archives, in link order.
+objects = [
+  "x86_64-linux-gnu/sysroot/usr/lib/Scrt1.o",
+  "lib/gcc/x86_64-linux-gnu/14.3.0/crtbeginS.o",
+  "x86_64-linux-gnu/sysroot/usr/lib/crti.o",
+  "x86_64-linux-gnu/sysroot/usr/lib/crtn.o",
+  "lib/gcc/x86_64-linux-gnu/14.3.0/crtendS.o",
+  "openssl_libs/libssl.a",
+  "openssl_libs/libcrypto.a",
+]
+# The dynamic linker is an absolute on-device path, not a toolchain path.
+flags = [
+  "-m", "elf_x86_64",
+  "-pie",
+  "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
+  "--sysroot=x86_64-linux-gnu/sysroot",
+]
+# Dynamic libraries copied into the bundle. Each entry is a soname found in the
+# toolchain's lib directory.
+bundle_dylibs = [
+  # webkit core
+  "libwebkit2gtk-4.0.so.37",
+  "libjavascriptcoregtk-4.0.so.18",
+  # gtk stack
+  "libgtk-3.so.0",
+  "libgdk-3.so.0",
+  "libgdk_pixbuf-2.0.so.0",
+  "libatk-1.0.so.0",
+  # accessibility
+  "libatk-bridge-2.0.so.0",
+  "libatspi.so.0",
+  # glib stack
+  "libglib-2.0.so.0",
+  "libgobject-2.0.so.0",
+  "libgio-2.0.so.0",
+  "libgmodule-2.0.so.0",
+  "libpcre.so.3",
+  # pango and text
+  "libpango-1.0.so.0",
+  "libpangocairo-1.0.so.0",
+  "libpangoft2-1.0.so.0",
+  "libharfbuzz.so.0",
+  "libharfbuzz-icu.so.0",
+  "libfribidi.so.0",
+  "libthai.so.0",
+  "libdatrie.so.1",
+  "libgraphite2.so.3",
+  "libfreetype.so.6",
+  "libfontconfig.so.1",
+  # cairo and rendering
+  "libcairo.so.2",
+  "libcairo-gobject.so.2",
+  "libpixman-1.so.0",
+  "libepoxy.so.0",
+  # networking
+  "libsoup-2.4.so.1",
+  # icu
+  "libicui18n.so.70",
+  "libicuuc.so.70",
+  "libicudata.so.70",
+  # xml/xslt
+  "libxml2.so.2",
+  "libxslt.so.1",
+  # fonts and web formats
+  "libwoff2dec.so.1.0.2",
+  "libwoff2common.so.1.0.2",
+  "libhyphen.so.0",
+  # image codecs
+  "libjpeg.so.8",
+  "libpng16.so.16",
+  "libwebp.so.7",
+  "libwebpdemux.so.2",
+  "libwebpmux.so.3",
+  # compression
+  "libbrotlidec.so.1",
+  "libbrotlicommon.so.1",
+  # sqlite
+  "libsqlite3.so.0",
+  # crypto used by webkit
+  "libgcrypt.so.20",
+  "libgpg-error.so.0",
+  "libtasn1.so.6",
+  "libsecret-1.so.0",
+  # spellcheck
+  "libenchant-2.so.2",
+  # input devices
+  "libmanette-0.2.so.0",
+  "libgudev-1.0.so.0",
+  # gstreamer media stack
+  "libgstreamer-1.0.so.0",
+  "libgstbase-1.0.so.0",
+  "libgstapp-1.0.so.0",
+  "libgstallocators-1.0.so.0",
+  "libgstpbutils-1.0.so.0",
+  "libgstaudio-1.0.so.0",
+  "libgsttag-1.0.so.0",
+  "libgstvideo-1.0.so.0",
+  "libgstgl-1.0.so.0",
+  "libgstfft-1.0.so.0",
+  "liborc-0.4.so.0",
+  "liblcms2.so.2",
+  # libsecret and misc dependencies
+  "libblkid.so.1",
+  "libffi.so.8",
+  "libmount.so.1",
+  "libpcre2-8.so.0",
+  "libz.so.1",
+]

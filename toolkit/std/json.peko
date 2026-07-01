@@ -1,0 +1,529 @@
+//! std::json: a JSON value model with serialization and parsing.
+//!
+//! A JSON value is a small class hierarchy rooted at JsonValue (null, bool,
+//! number, string, array, object). Each kind renders itself with to_string and
+//! reports its kind. parse turns JSON text into a JsonValue using the std lexer.
+
+import { * } from core;
+import { * } from collections;
+import { * } from std::lexer;
+
+/// Wraps `text` in double quotes and escapes the characters JSON requires.
+fn json_escape(text: string) => string {
+    let builder: StringBuilder = new StringBuilder()
+    builder.append_char('"')
+    let length: number = text.size()
+    let index: number = 0
+    let one: number = 1
+    while index < length {
+        let c: char = text[index]
+        if c == '"' {
+            builder.append("\\\"")
+        } else if c == '\\' {
+            builder.append("\\\\")
+        } else if c == '\n' {
+            builder.append("\\n")
+        } else if c == '\t' {
+            builder.append("\\t")
+        } else if c == '\r' {
+            builder.append("\\r")
+        } else {
+            builder.append_char(c)
+        }
+        index = index + one
+    }
+    builder.append_char('"')
+    return builder.build()
+}
+
+/// A JSON value. The base renders as `null`; each derived kind overrides
+/// to_string and kind.
+[public] class JsonValue {
+    /// The JSON text of this value.
+    [public] fn to_string() => string {
+        return "null"
+    }
+
+    /// A short tag: one of null, bool, number, string, array, object.
+    [public] fn kind() => string {
+        return "null"
+    }
+}
+
+/// The JSON `null` literal.
+[public] class JsonNull from JsonValue {
+    constructor() {}
+
+    [public] fn kind() => string {
+        return "null"
+    }
+}
+
+/// A JSON boolean.
+[public] class JsonBool from JsonValue {
+    value: bool
+
+    constructor(value: bool) {
+        this.value = value
+    }
+
+    [public] fn get() => bool {
+        return this.value
+    }
+
+    [public] fn to_string() => string {
+        return this.value.to_string()
+    }
+
+    [public] fn kind() => string {
+        return "bool"
+    }
+}
+
+/// A JSON number.
+[public] class JsonNumber from JsonValue {
+    value: number
+
+    constructor(value: number) {
+        this.value = value
+    }
+
+    [public] fn get() => number {
+        return this.value
+    }
+
+    [public] fn to_string() => string {
+        return this.value.to_string()
+    }
+
+    [public] fn kind() => string {
+        return "number"
+    }
+}
+
+/// A JSON string. to_string quotes and escapes; get returns the raw value.
+[public] class JsonString from JsonValue {
+    value: string
+
+    constructor(value: string) {
+        this.value = value
+    }
+
+    [public] fn get() => string {
+        return this.value
+    }
+
+    [public] fn to_string() => string {
+        return json_escape(this.value)
+    }
+
+    [public] fn kind() => string {
+        return "string"
+    }
+}
+
+/// A JSON array of values.
+[public] class JsonArray from JsonValue {
+    values: Array<JsonValue>
+
+    constructor() {
+        this.values = new Array<JsonValue>()
+    }
+
+    /// Append a value.
+    [public] fn push(value: JsonValue) {
+        this.values.push(value)
+    }
+
+    /// The value at `index`.
+    [public] fn at(index: number) => JsonValue {
+        return this.values[index]
+    }
+
+    /// The number of elements.
+    [public] fn size() => number {
+        return this.values.size()
+    }
+
+    [public] fn to_string() => string {
+        let builder: StringBuilder = new StringBuilder()
+        builder.append("[")
+        let length: number = this.values.size()
+        let index: number = 0
+        let one: number = 1
+        while index < length {
+            if index > 0 {
+                builder.append(",")
+            }
+            builder.append(this.values[index].to_string())
+            index = index + one
+        }
+        builder.append("]")
+        return builder.build()
+    }
+
+    [public] fn kind() => string {
+        return "array"
+    }
+}
+
+/// A JSON object: string keys mapped to JSON values.
+[public] class JsonObject from JsonValue {
+    entries: IndexMap<string, JsonValue>
+
+    constructor() {
+        this.entries = new IndexMap<string, JsonValue>()
+    }
+
+    /// Insert or replace `value` under `key`.
+    [public] fn insert(key: string, value: JsonValue) {
+        this.entries.set(key, value)
+    }
+
+    /// The value under `key`, or None when absent.
+    [public] fn get(key: string) => JsonValue? {
+        return this.entries.get(key)
+    }
+
+    /// The number of key-value pairs.
+    [public] fn size() => number {
+        return this.entries.size()
+    }
+
+    [public] fn to_string() => string {
+        let builder: StringBuilder = new StringBuilder()
+        builder.append("{")
+        let keys: Array<string> = this.entries.key_list()
+        let length: number = keys.size()
+        let index: number = 0
+        let one: number = 1
+        while index < length {
+            if index > 0 {
+                builder.append(",")
+            }
+            let key: string = keys[index]
+            builder.append(`${json_escape(key)}:${this.entries.get(key).unwrap().to_string()}`)
+            index = index + one
+        }
+        builder.append("}")
+        return builder.build()
+    }
+
+    [public] fn kind() => string {
+        return "object"
+    }
+}
+
+/// A recursive-descent parser over the std lexer's tokens. Assumes well-formed
+/// JSON; a malformed document yields whatever partial value was built.
+class JsonParser {
+    tokens: Array<Token>
+    index: number
+    count: number
+
+    constructor(tokens: Array<Token>) {
+        this.tokens = tokens
+        this.index = 0
+        this.count = tokens.size()
+    }
+
+    /// Advance past any whitespace tokens.
+    fn skip_whitespace() {
+        let one: number = 1
+        while this.index < this.count {
+            let tok: Token = this.tokens[this.index]
+            if tok.get_kind() != TokenType::Whitespace {
+                return
+            }
+            this.index = this.index + one
+        }
+    }
+
+    /// Parse the value at the cursor.
+    fn parse_value() => JsonValue {
+        let one: number = 1
+        this.skip_whitespace()
+        if this.index >= this.count {
+            return new JsonNull()
+        }
+        let tok: Token = this.tokens[this.index]
+        let kind: TokenType = tok.get_kind()
+
+        if tok.value_equals("{") {
+            return this.parse_object()
+        }
+        if tok.value_equals("[") {
+            return this.parse_array()
+        }
+        if kind == TokenType::String {
+            this.index = this.index + one
+            return new JsonString(tok.get_value())
+        }
+        if kind == TokenType::Number {
+            this.index = this.index + one
+            return new JsonNumber(tok.get_value().to_number())
+        }
+        if tok.value_equals("true") {
+            this.index = this.index + one
+            return new JsonBool(true)
+        }
+        if tok.value_equals("false") {
+            this.index = this.index + one
+            return new JsonBool(false)
+        }
+        this.index = this.index + one
+        return new JsonNull()
+    }
+
+    /// Parse an array, the cursor on the opening bracket.
+    fn parse_array() => JsonValue {
+        let one: number = 1
+        let array: JsonArray = new JsonArray()
+        this.index = this.index + one
+        this.skip_whitespace()
+        while this.index < this.count {
+            let tok: Token = this.tokens[this.index]
+            if tok.value_equals("]") {
+                this.index = this.index + one
+                return array
+            }
+            let value: JsonValue = this.parse_value()
+            array.push(value)
+            this.skip_whitespace()
+            if this.index < this.count {
+                let separator: Token = this.tokens[this.index]
+                if separator.value_equals(",") {
+                    this.index = this.index + one
+                    this.skip_whitespace()
+                }
+            }
+        }
+        return array
+    }
+
+    /// Parse an object, the cursor on the opening brace.
+    fn parse_object() => JsonValue {
+        let one: number = 1
+        let object: JsonObject = new JsonObject()
+        this.index = this.index + one
+        this.skip_whitespace()
+        while this.index < this.count {
+            let tok: Token = this.tokens[this.index]
+            if tok.value_equals("}") {
+                this.index = this.index + one
+                return object
+            }
+            let key: string = tok.get_value()
+            this.index = this.index + one
+            this.skip_whitespace()
+            if this.index < this.count {
+                let colon: Token = this.tokens[this.index]
+                if colon.value_equals(":") {
+                    this.index = this.index + one
+                }
+            }
+            let value: JsonValue = this.parse_value()
+            object.insert(key, value)
+            this.skip_whitespace()
+            if this.index < this.count {
+                let separator: Token = this.tokens[this.index]
+                if separator.value_equals(",") {
+                    this.index = this.index + one
+                    this.skip_whitespace()
+                }
+            }
+        }
+        return object
+    }
+}
+
+/// Parse JSON `text` into a JsonValue.
+[public] fn parse(text: string) => JsonValue {
+    let tokens: Array<Token> = tokenize(text)
+    let parser: JsonParser = new JsonParser(tokens)
+    return parser.parse_value()
+}
+
+// --- Serialization format --------------------------------------------------
+//
+// JsonSerializer and JsonDeserializer implement the core Serializer and
+// Deserializer protocols over the JsonValue tree, so any Serialize or
+// Deserialize type works with JSON with no per-type JSON code.
+
+/// Builds a JsonValue tree from a stream of Serializer events. It keeps a stack
+/// of the open containers; a completed scalar or container is placed into the
+/// container on top of the stack, under the pending field name when that
+/// container is an object.
+[public] class JsonSerializer impl Serializer {
+    stack: Array<JsonValue>
+    result: JsonValue
+    pending_key: string
+
+    constructor() {
+        this.stack = new Array<JsonValue>()
+        this.result = new JsonNull()
+        this.pending_key = ""
+    }
+
+    /// The value built so far. Read it after the top-level value is written.
+    [public] fn result_value() => JsonValue {
+        return this.result
+    }
+
+    /// Place a finished value into the current container, or record it as the
+    /// top-level result when no container is open.
+    [mutates] fn add(value: JsonValue) {
+        if this.stack.size() == 0 {
+            this.result = value
+        } else {
+            let top: JsonValue = this.stack.last().unwrap()
+            if top.kind().equals("object") {
+                let object: JsonObject = danger_cast<JsonObject>(top)
+                object.insert(this.pending_key, value)
+            } else {
+                let array: JsonArray = danger_cast<JsonArray>(top)
+                array.push(value)
+            }
+        }
+    }
+
+    [public] [mutates] fn begin_object() {
+        let object: JsonObject = new JsonObject()
+        this.add(object)
+        this.stack.push(object)
+    }
+    [public] [mutates] fn end_object() {
+        this.stack.pop()
+    }
+    [public] [mutates] fn field(name: string) {
+        this.pending_key = name
+    }
+    [public] [mutates] fn begin_array() {
+        let array: JsonArray = new JsonArray()
+        this.add(array)
+        this.stack.push(array)
+    }
+    [public] [mutates] fn end_array() {
+        this.stack.pop()
+    }
+    [public] [mutates] fn put_number(value: number) {
+        this.add(new JsonNumber(value))
+    }
+    [public] [mutates] fn put_string(value: string) {
+        this.add(new JsonString(value))
+    }
+    [public] [mutates] fn put_bool(value: bool) {
+        this.add(new JsonBool(value))
+    }
+    [public] [mutates] fn put_null() {
+        this.add(new JsonNull())
+    }
+}
+
+/// Reads values out of a JsonValue tree for a Deserialize implementation. It
+/// keeps a cursor stack: the value on top is the one currently being read.
+/// enter_field and enter_index descend; exit_field and exit_index return.
+[public] class JsonDeserializer impl Deserializer {
+    stack: Array<JsonValue>
+
+    constructor(root: JsonValue) {
+        this.stack = new Array<JsonValue>()
+        this.stack.push(root)
+    }
+
+    /// The value at the cursor.
+    fn current() => JsonValue {
+        return this.stack.last().unwrap()
+    }
+
+    [public] [mutates] fn enter_field(name: string) => bool {
+        let value: JsonValue = this.current()
+        if !value.kind().equals("object") {
+            return false
+        }
+        let object: JsonObject = danger_cast<JsonObject>(value)
+        let child: JsonValue? = object.get(name)
+        if child.is_value() {
+            this.stack.push(child.unwrap())
+            return true
+        }
+        return false
+    }
+    [public] [mutates] fn exit_field() {
+        this.stack.pop()
+    }
+
+    [public] fn length() => number? {
+        let value: JsonValue = this.current()
+        if value.kind().equals("array") {
+            return danger_cast<JsonArray>(value).size()
+        }
+        return None
+    }
+    [public] [mutates] fn enter_index(index: number) => bool {
+        let value: JsonValue = this.current()
+        if !value.kind().equals("array") {
+            return false
+        }
+        let array: JsonArray = danger_cast<JsonArray>(value)
+        if index < array.size() {
+            this.stack.push(array.at(index))
+            return true
+        }
+        return false
+    }
+    [public] [mutates] fn exit_index() {
+        this.stack.pop()
+    }
+
+    [public] fn get_number() => number? {
+        let value: JsonValue = this.current()
+        if value.kind().equals("number") {
+            return danger_cast<JsonNumber>(value).get()
+        }
+        return None
+    }
+    [public] fn get_string() => string? {
+        let value: JsonValue = this.current()
+        if value.kind().equals("string") {
+            return danger_cast<JsonString>(value).get()
+        }
+        return None
+    }
+    [public] fn get_bool() => bool? {
+        let value: JsonValue = this.current()
+        if value.kind().equals("bool") {
+            return danger_cast<JsonBool>(value).get()
+        }
+        return None
+    }
+    [public] fn is_null() => bool {
+        return this.current().kind().equals("null")
+    }
+    [public] fn get_identifier() => string? {
+        return this.get_string()
+    }
+}
+
+/// Serialize any value into a JsonValue.
+[public] fn serialize<T: impl Serialize>(value: T) => JsonValue {
+    let serializer: JsonSerializer = new JsonSerializer()
+    value.serialize(serializer as Serializer)
+    return serializer.result_value()
+}
+
+/// Serialize any value into JSON text.
+[public] fn stringify<T: impl Serialize>(value: T) => string {
+    return serialize(value).to_string()
+}
+
+/// A Deserializer over a parsed JsonValue tree, for `deserialize<T>(reader(v))`.
+[public] fn reader(root: JsonValue) => JsonDeserializer {
+    return new JsonDeserializer(root)
+}
+
+/// A Deserializer over JSON `text`, parsing it first. Pairs with the
+/// `deserialize<T>` built-in: `deserialize<Point>(json::read(text))`.
+[public] fn read(text: string) => JsonDeserializer {
+    return new JsonDeserializer(parse(text))
+}

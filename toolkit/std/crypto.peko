@@ -1,0 +1,583 @@
+//! std::crypto: cryptographic primitives over libsodium.
+//!
+//! Secure random, encoding (hex and base64), hashing (SHA-256, SHA-512, and
+//! BLAKE2b, one-shot and streaming), authenticated encryption (secretbox,
+//! ChaCha20-Poly1305, and AES-256-GCM), public-key boxes (X25519), Ed25519
+//! signatures, HMAC, and Argon2id password hashing. Byte values such as keys,
+//! nonces, and ciphertexts are binary strings; to_hex and to_base64 render
+//! them for display. The platform layer is the C in c/crypto/crypto.c over the
+//! vendored libsodium static library, exposed through c/crypto/crypto.peko.h.
+//! Used through the std::crypto prefix.
+//!
+//! Call init once before other functions so libsodium sets itself up.
+
+import c::crypto::crypto as c_crypto;
+import c::crypto::legacy as legacy;
+import { * } from core;
+import runtime;
+
+/// SHA-256 produces a 32-byte digest.
+[private] fn sha256_size() => i32 {
+    return constant<i32>(32)
+}
+
+/// SHA-512 produces a 64-byte digest.
+[private] fn sha512_size() => i32 {
+    return constant<i32>(64)
+}
+
+/// Initializes libsodium. True on success. Safe to call more than once.
+[public] fn init() => bool {
+    let zero: i32 = constant<i32>(0)
+    return c_crypto::peko_crypto_init() == zero
+}
+
+// ---------------------------------------------------------------------------
+// --- Secure random ---
+// ---------------------------------------------------------------------------
+
+/// A cryptographically secure random 32-bit value, in the range 0 to 2^32-1.
+[public] fn random_u32() => number {
+    let raw: i64 = c_crypto::peko_random_u32()
+    return new number(danger_cast<f64>(raw))
+}
+
+/// `n` cryptographically secure random bytes as a binary string.
+[public] fn random_bytes(n: number) => string {
+    let count: i32 = danger_cast<i32>(n.to_raw())
+    let buffer: pointer<i8> = runtime::allocate<i8>(count)
+    c_crypto::peko_random_bytes(buffer, count)
+    return new string(buffer, danger_cast<i64>(count))
+}
+
+// ---------------------------------------------------------------------------
+// --- Encoding ---
+// ---------------------------------------------------------------------------
+
+/// The bytes of `data` as a lowercase hex string.
+[public] fn to_hex(data: string) => string {
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    let hex: pointer<i8> = c_crypto::peko_bin_to_hex(data.to_raw(), length)
+    return runtime::managed_string(hex)
+}
+
+/// `n` cryptographically secure random bytes as a hex string.
+[public] fn random_hex(n: number) => string {
+    return to_hex(random_bytes(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- One-shot hashing ---
+// ---------------------------------------------------------------------------
+
+/// The SHA-256 digest of `data` as a hex string.
+[public] fn sha256(data: string) => string {
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    let digest: pointer<i8> = c_crypto::peko_sha256(data.to_raw(), length)
+    let hex: pointer<i8> = c_crypto::peko_bin_to_hex(digest, sha256_size())
+    return runtime::managed_string(hex)
+}
+
+/// The SHA-512 digest of `data` as a hex string.
+[public] fn sha512(data: string) => string {
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    let digest: pointer<i8> = c_crypto::peko_sha512(data.to_raw(), length)
+    let hex: pointer<i8> = c_crypto::peko_bin_to_hex(digest, sha512_size())
+    return runtime::managed_string(hex)
+}
+
+/// The keyless BLAKE2b digest of `data` at `size` bytes (16 to 64), as a hex
+/// string. None when `size` is out of range.
+[public] fn blake2b(data: string, size: number) => string? {
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    let out_len: i32 = danger_cast<i32>(size.to_raw())
+    let no_key: i32 = constant<i32>(0)
+    let digest: pointer<i8> = c_crypto::peko_blake2b(data.to_raw(), length, data.to_raw(), no_key, out_len)
+    if digest == null {
+        return None
+    }
+    let hex: pointer<i8> = c_crypto::peko_bin_to_hex(digest, out_len)
+    return runtime::managed_string(hex)
+}
+
+// ---------------------------------------------------------------------------
+// --- Streaming hashing ---
+// ---------------------------------------------------------------------------
+
+/// An incremental SHA-256 hasher. Feed it with update, then call finalize to
+/// get the digest. The hasher must not be used after finalize.
+[public] class Sha256 {
+    [private] ctx: opaque
+
+    /// A fresh streaming SHA-256 context.
+    constructor() {
+        this.ctx = c_crypto::peko_sha256_ctx_new()
+    }
+
+    /// Adds the bytes of `data` to the running hash.
+    [public] fn update(data: string) {
+        let length: i32 = danger_cast<i32>(data.size().to_raw())
+        c_crypto::peko_sha256_update(this.ctx, data.to_raw(), length)
+    }
+
+    /// The final digest as a hex string. Frees the context.
+    [public] fn finalize() => string {
+        let digest: pointer<i8> = c_crypto::peko_sha256_final(this.ctx)
+        let hex: pointer<i8> = c_crypto::peko_bin_to_hex(digest, sha256_size())
+        return runtime::managed_string(hex)
+    }
+}
+
+/// An incremental SHA-512 hasher. Feed it with update, then call finalize to
+/// get the digest. The hasher must not be used after finalize.
+[public] class Sha512 {
+    [private] ctx: opaque
+
+    /// A fresh streaming SHA-512 context.
+    constructor() {
+        this.ctx = c_crypto::peko_sha512_ctx_new()
+    }
+
+    /// Adds the bytes of `data` to the running hash.
+    [public] fn update(data: string) {
+        let length: i32 = danger_cast<i32>(data.size().to_raw())
+        c_crypto::peko_sha512_update(this.ctx, data.to_raw(), length)
+    }
+
+    /// The final digest as a hex string. Frees the context.
+    [public] fn finalize() => string {
+        let digest: pointer<i8> = c_crypto::peko_sha512_final(this.ctx)
+        let hex: pointer<i8> = c_crypto::peko_bin_to_hex(digest, sha512_size())
+        return runtime::managed_string(hex)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Key pairs ---
+// ---------------------------------------------------------------------------
+
+/// A public and secret key pair. The keys are binary strings.
+[public] class KeyPair {
+    [public] public_key: string
+    [public] secret_key: string
+
+    constructor(public_key: string, secret_key: string) {
+        this.public_key = public_key
+        this.secret_key = secret_key
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --- Encoding ---
+// ---------------------------------------------------------------------------
+
+/// The bytes of `data` as a standard base64 string.
+[public] fn to_base64(data: string) => string {
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    let standard: i32 = constant<i32>(0)
+    let encoded: pointer<i8> = c_crypto::peko_to_base64(data.to_raw(), length, standard)
+    return runtime::managed_string(encoded)
+}
+
+/// The binary string decoded from the hex string `hex`. None when `hex` is not
+/// valid hex.
+[public] fn from_hex(hex: string) => string? {
+    let hex_len: i32 = danger_cast<i32>(hex.size().to_raw())
+    let two: i32 = constant<i32>(2)
+    let cap: i32 = hex_len / two
+    let out: pointer<i8> = runtime::allocate<i8>(cap)
+    let n: i32 = c_crypto::peko_from_hex(out, cap, hex.to_raw(), hex_len)
+    let zero: i32 = constant<i32>(0)
+    if n < zero {
+        return None
+    }
+    return new string(out, danger_cast<i64>(n))
+}
+
+/// The binary string decoded from the standard base64 string `b64`. None when
+/// `b64` is not valid base64.
+[public] fn from_base64(b64: string) => string? {
+    let b64_len: i32 = danger_cast<i32>(b64.size().to_raw())
+    let out: pointer<i8> = runtime::allocate<i8>(b64_len)
+    let standard: i32 = constant<i32>(0)
+    let n: i32 = c_crypto::peko_from_base64(out, b64_len, b64.to_raw(), b64_len, standard)
+    let zero: i32 = constant<i32>(0)
+    if n < zero {
+        return None
+    }
+    return new string(out, danger_cast<i64>(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- Secretbox: secret-key authenticated encryption (XSalsa20-Poly1305) ---
+// ---------------------------------------------------------------------------
+
+/// A random 32-byte secretbox key.
+[public] fn secretbox_keygen() => string {
+    let size: i32 = constant<i32>(32)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_secretbox_keygen(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// A random 24-byte secretbox nonce. Use a fresh nonce for every message.
+[public] fn secretbox_nonce() => string {
+    let size: i32 = constant<i32>(24)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_secretbox_nonce(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// Encrypts `plaintext` with `nonce` and `key`. The result holds the 16-byte
+/// authentication tag followed by the ciphertext.
+[public] fn secretbox_encrypt(plaintext: string, nonce: string, key: string) => string {
+    let pt_len: i32 = danger_cast<i32>(plaintext.size().to_raw())
+    let mac: i32 = constant<i32>(16)
+    let cap: i32 = pt_len + mac
+    let ct: pointer<i8> = runtime::allocate<i8>(cap)
+    let n: i32 = c_crypto::peko_secretbox_encrypt(ct, plaintext.to_raw(), pt_len, nonce.to_raw(), key.to_raw())
+    return new string(ct, danger_cast<i64>(n))
+}
+
+/// Decrypts `ciphertext` with `nonce` and `key`. None when authentication
+/// fails.
+[public] fn secretbox_decrypt(ciphertext: string, nonce: string, key: string) => string? {
+    let ct_len: i32 = danger_cast<i32>(ciphertext.size().to_raw())
+    let mac: i32 = constant<i32>(16)
+    let one: i32 = constant<i32>(1)
+    let zero: i32 = constant<i32>(0)
+    let cap: i32 = ct_len - mac
+    if cap < zero {
+        return None
+    }
+    let pt: pointer<i8> = runtime::allocate<i8>(cap + one)
+    let n: i32 = c_crypto::peko_secretbox_decrypt(pt, ciphertext.to_raw(), ct_len, nonce.to_raw(), key.to_raw())
+    if n < zero {
+        return None
+    }
+    return new string(pt, danger_cast<i64>(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- ChaCha20-Poly1305 IETF: AEAD with additional data ---
+// ---------------------------------------------------------------------------
+
+/// A random 32-byte ChaCha20-Poly1305 key.
+[public] fn chacha_keygen() => string {
+    let size: i32 = constant<i32>(32)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_chacha_keygen(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// A random 12-byte ChaCha20-Poly1305 nonce.
+[public] fn chacha_nonce() => string {
+    let size: i32 = constant<i32>(12)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_chacha_nonce(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// Encrypts `plaintext`, binding `additional_data` to the ciphertext without
+/// encrypting it. The result is the ciphertext followed by a 16-byte tag.
+[public] fn chacha_encrypt(plaintext: string, additional_data: string, nonce: string, key: string) => string {
+    let pt_len: i32 = danger_cast<i32>(plaintext.size().to_raw())
+    let ad_len: i32 = danger_cast<i32>(additional_data.size().to_raw())
+    let tag: i32 = constant<i32>(16)
+    let cap: i32 = pt_len + tag
+    let ct: pointer<i8> = runtime::allocate<i8>(cap)
+    let n: i32 = c_crypto::peko_chacha_encrypt(ct, plaintext.to_raw(), pt_len, additional_data.to_raw(), ad_len, nonce.to_raw(), key.to_raw())
+    return new string(ct, danger_cast<i64>(n))
+}
+
+/// Decrypts `ciphertext`. `additional_data` must match what encryption used.
+/// None when authentication fails.
+[public] fn chacha_decrypt(ciphertext: string, additional_data: string, nonce: string, key: string) => string? {
+    let ct_len: i32 = danger_cast<i32>(ciphertext.size().to_raw())
+    let ad_len: i32 = danger_cast<i32>(additional_data.size().to_raw())
+    let tag: i32 = constant<i32>(16)
+    let one: i32 = constant<i32>(1)
+    let zero: i32 = constant<i32>(0)
+    let cap: i32 = ct_len - tag
+    if cap < zero {
+        return None
+    }
+    let pt: pointer<i8> = runtime::allocate<i8>(cap + one)
+    let n: i32 = c_crypto::peko_chacha_decrypt(pt, ciphertext.to_raw(), ct_len, additional_data.to_raw(), ad_len, nonce.to_raw(), key.to_raw())
+    if n < zero {
+        return None
+    }
+    return new string(pt, danger_cast<i64>(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- AES-256-GCM: AEAD, faster where the CPU supports it ---
+// ---------------------------------------------------------------------------
+
+/// True when this CPU supports AES-256-GCM. The other aesgcm functions require
+/// it.
+[public] fn aesgcm_available() => bool {
+    let one: i32 = constant<i32>(1)
+    return c_crypto::peko_aesgcm_available() == one
+}
+
+/// A random 32-byte AES-256-GCM key.
+[public] fn aesgcm_keygen() => string {
+    let size: i32 = constant<i32>(32)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_aesgcm_keygen(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// A random 12-byte AES-256-GCM nonce.
+[public] fn aesgcm_nonce() => string {
+    let size: i32 = constant<i32>(12)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_aesgcm_nonce(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// Encrypts `plaintext` with additional data. The result is the ciphertext
+/// followed by a 16-byte tag.
+[public] fn aesgcm_encrypt(plaintext: string, additional_data: string, nonce: string, key: string) => string {
+    let pt_len: i32 = danger_cast<i32>(plaintext.size().to_raw())
+    let ad_len: i32 = danger_cast<i32>(additional_data.size().to_raw())
+    let tag: i32 = constant<i32>(16)
+    let cap: i32 = pt_len + tag
+    let ct: pointer<i8> = runtime::allocate<i8>(cap)
+    let n: i32 = c_crypto::peko_aesgcm_encrypt(ct, plaintext.to_raw(), pt_len, additional_data.to_raw(), ad_len, nonce.to_raw(), key.to_raw())
+    return new string(ct, danger_cast<i64>(n))
+}
+
+/// Decrypts `ciphertext`. None when authentication fails.
+[public] fn aesgcm_decrypt(ciphertext: string, additional_data: string, nonce: string, key: string) => string? {
+    let ct_len: i32 = danger_cast<i32>(ciphertext.size().to_raw())
+    let ad_len: i32 = danger_cast<i32>(additional_data.size().to_raw())
+    let tag: i32 = constant<i32>(16)
+    let one: i32 = constant<i32>(1)
+    let zero: i32 = constant<i32>(0)
+    let cap: i32 = ct_len - tag
+    if cap < zero {
+        return None
+    }
+    let pt: pointer<i8> = runtime::allocate<i8>(cap + one)
+    let n: i32 = c_crypto::peko_aesgcm_decrypt(pt, ciphertext.to_raw(), ct_len, additional_data.to_raw(), ad_len, nonce.to_raw(), key.to_raw())
+    if n < zero {
+        return None
+    }
+    return new string(pt, danger_cast<i64>(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- Box: public-key authenticated encryption (X25519) ---
+// ---------------------------------------------------------------------------
+
+/// A fresh X25519 key pair for box encryption.
+[public] fn box_keypair() => KeyPair {
+    let size: i32 = constant<i32>(32)
+    let pk: pointer<i8> = runtime::allocate<i8>(size)
+    let sk: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_box_keypair(pk, sk)
+    return new KeyPair(new string(pk, danger_cast<i64>(size)), new string(sk, danger_cast<i64>(size)))
+}
+
+/// A random 24-byte box nonce.
+[public] fn box_nonce() => string {
+    let size: i32 = constant<i32>(24)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_box_nonce(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// Encrypts `plaintext` from the sender to the recipient. The result holds a
+/// 16-byte tag followed by the ciphertext.
+[public] fn box_encrypt(plaintext: string, nonce: string, recipient_public_key: string, sender_secret_key: string) => string {
+    let pt_len: i32 = danger_cast<i32>(plaintext.size().to_raw())
+    let mac: i32 = constant<i32>(16)
+    let cap: i32 = pt_len + mac
+    let ct: pointer<i8> = runtime::allocate<i8>(cap)
+    let n: i32 = c_crypto::peko_box_encrypt(ct, plaintext.to_raw(), pt_len, nonce.to_raw(), recipient_public_key.to_raw(), sender_secret_key.to_raw())
+    return new string(ct, danger_cast<i64>(n))
+}
+
+/// Decrypts `ciphertext` sent by the sender to the recipient. None when
+/// authentication fails.
+[public] fn box_decrypt(ciphertext: string, nonce: string, sender_public_key: string, recipient_secret_key: string) => string? {
+    let ct_len: i32 = danger_cast<i32>(ciphertext.size().to_raw())
+    let mac: i32 = constant<i32>(16)
+    let one: i32 = constant<i32>(1)
+    let zero: i32 = constant<i32>(0)
+    let cap: i32 = ct_len - mac
+    if cap < zero {
+        return None
+    }
+    let pt: pointer<i8> = runtime::allocate<i8>(cap + one)
+    let n: i32 = c_crypto::peko_box_decrypt(pt, ciphertext.to_raw(), ct_len, nonce.to_raw(), sender_public_key.to_raw(), recipient_secret_key.to_raw())
+    if n < zero {
+        return None
+    }
+    return new string(pt, danger_cast<i64>(n))
+}
+
+// ---------------------------------------------------------------------------
+// --- Ed25519 signatures ---
+// ---------------------------------------------------------------------------
+
+/// A fresh Ed25519 key pair. The public key is 32 bytes and the secret key is
+/// 64 bytes.
+[public] fn sign_keypair() => KeyPair {
+    let pk_size: i32 = constant<i32>(32)
+    let sk_size: i32 = constant<i32>(64)
+    let pk: pointer<i8> = runtime::allocate<i8>(pk_size)
+    let sk: pointer<i8> = runtime::allocate<i8>(sk_size)
+    c_crypto::peko_sign_keypair(pk, sk)
+    return new KeyPair(new string(pk, danger_cast<i64>(pk_size)), new string(sk, danger_cast<i64>(sk_size)))
+}
+
+/// The 64-byte detached signature of `message` under `secret_key`.
+[public] fn sign(message: string, secret_key: string) => string {
+    let size: i32 = constant<i32>(64)
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let sig: pointer<i8> = runtime::allocate<i8>(size)
+    let n: i32 = c_crypto::peko_sign(sig, message.to_raw(), msg_len, secret_key.to_raw())
+    return new string(sig, danger_cast<i64>(n))
+}
+
+/// True when `signature` is a valid signature of `message` under
+/// `public_key`.
+[public] fn sign_verify(signature: string, message: string, public_key: string) => bool {
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let one: i32 = constant<i32>(1)
+    return c_crypto::peko_sign_verify(signature.to_raw(), message.to_raw(), msg_len, public_key.to_raw()) == one
+}
+
+// ---------------------------------------------------------------------------
+// --- HMAC ---
+// ---------------------------------------------------------------------------
+
+/// A random 32-byte HMAC-SHA256 key.
+[public] fn hmac256_keygen() => string {
+    let size: i32 = constant<i32>(32)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_hmac256_keygen(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// The 32-byte HMAC-SHA256 tag of `message` under `key`.
+[public] fn hmac256(message: string, key: string) => string {
+    let size: i32 = constant<i32>(32)
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let out: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_hmac256(out, message.to_raw(), msg_len, key.to_raw())
+    return new string(out, danger_cast<i64>(size))
+}
+
+/// True when `tag` is the HMAC-SHA256 of `message` under `key`.
+[public] fn hmac256_verify(tag: string, message: string, key: string) => bool {
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let one: i32 = constant<i32>(1)
+    return c_crypto::peko_hmac256_verify(tag.to_raw(), message.to_raw(), msg_len, key.to_raw()) == one
+}
+
+/// A random 32-byte HMAC-SHA512 key.
+[public] fn hmac512_keygen() => string {
+    let size: i32 = constant<i32>(32)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_hmac512_keygen(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// The 64-byte HMAC-SHA512 tag of `message` under `key`.
+[public] fn hmac512(message: string, key: string) => string {
+    let size: i32 = constant<i32>(64)
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let out: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_hmac512(out, message.to_raw(), msg_len, key.to_raw())
+    return new string(out, danger_cast<i64>(size))
+}
+
+/// True when `tag` is the HMAC-SHA512 of `message` under `key`.
+[public] fn hmac512_verify(tag: string, message: string, key: string) => bool {
+    let msg_len: i32 = danger_cast<i32>(message.size().to_raw())
+    let one: i32 = constant<i32>(1)
+    return c_crypto::peko_hmac512_verify(tag.to_raw(), message.to_raw(), msg_len, key.to_raw()) == one
+}
+
+// ---------------------------------------------------------------------------
+// --- Argon2id password hashing ---
+// ---------------------------------------------------------------------------
+
+/// A random 16-byte Argon2id salt. Use a fresh salt for each password.
+[public] fn pwhash_salt() => string {
+    let size: i32 = constant<i32>(16)
+    let buf: pointer<i8> = runtime::allocate<i8>(size)
+    c_crypto::peko_pwhash_salt(buf)
+    return new string(buf, danger_cast<i64>(size))
+}
+
+/// Derives a `key_size`-byte key from `password` and `salt` using the
+/// interactive Argon2id cost. None on failure.
+[public] fn pwhash(password: string, key_size: number, salt: string) => string? {
+    let key_len: i32 = danger_cast<i32>(key_size.to_raw())
+    let pw_len: i32 = danger_cast<i32>(password.size().to_raw())
+    let interactive: i32 = constant<i32>(0)
+    let out: pointer<i8> = runtime::allocate<i8>(key_len)
+    let rc: i32 = c_crypto::peko_pwhash(out, key_len, password.to_raw(), pw_len, salt.to_raw(), interactive)
+    let zero: i32 = constant<i32>(0)
+    if rc < zero {
+        return None
+    }
+    return new string(out, danger_cast<i64>(key_len))
+}
+
+/// Hashes `password` into a self-contained verifier string that embeds the
+/// salt and parameters. None on failure.
+[public] fn pwhash_str(password: string) => string? {
+    let size: i32 = constant<i32>(128)
+    let pw_len: i32 = danger_cast<i32>(password.size().to_raw())
+    let interactive: i32 = constant<i32>(0)
+    let out: pointer<i8> = runtime::allocate<i8>(size)
+    let rc: i32 = c_crypto::peko_pwhash_str(out, password.to_raw(), pw_len, interactive)
+    let zero: i32 = constant<i32>(0)
+    if rc < zero {
+        return None
+    }
+    return runtime::managed_string(out)
+}
+
+/// True when `password` matches the verifier string from pwhash_str.
+[public] fn pwhash_verify(hash_str: string, password: string) => bool {
+    let pw_len: i32 = danger_cast<i32>(password.size().to_raw())
+    let one: i32 = constant<i32>(1)
+    return c_crypto::peko_pwhash_verify(hash_str.to_raw(), password.to_raw(), pw_len) == one
+}
+
+// ---------------------------------------------------------------------------
+// --- Legacy hashes (MD5 and SHA-1) ---
+// These algorithms are broken and serve compatibility only, such as checksums
+// and non-security protocols.
+// ---------------------------------------------------------------------------
+
+/// The MD5 digest of `data` as a hex string. Broken; for compatibility only.
+[public] fn md5(data: string) => string {
+    let ctx: opaque = legacy::md5_context_allocate()
+    legacy::md5_init_binded(ctx)
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    legacy::md5_update_binded(ctx, data.to_raw(), length)
+    let size: i32 = constant<i32>(16)
+    let out: pointer<i8> = runtime::allocate<i8>(size)
+    legacy::md5_final_binded(ctx, out)
+    return to_hex(new string(out, danger_cast<i64>(size)))
+}
+
+/// The SHA-1 digest of `data` as a hex string. Broken; for compatibility only.
+[public] fn sha1(data: string) => string {
+    let ctx: opaque = legacy::sha1_context_allocate()
+    legacy::sha1_init_binded(ctx)
+    let length: i32 = danger_cast<i32>(data.size().to_raw())
+    legacy::sha1_update_binded(ctx, data.to_raw(), length)
+    let size: i32 = constant<i32>(20)
+    let out: pointer<i8> = runtime::allocate<i8>(size)
+    legacy::sha1_final_binded(ctx, out)
+    return to_hex(new string(out, danger_cast<i64>(size)))
+}

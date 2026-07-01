@@ -141,6 +141,7 @@ impl PekoValueSimulator for PekoAST {
             PlatformStatement,
             // Declarations
             NewVariable,
+            Destructure,
             FunctionDeclaration,
             Closure,
             Class,

@@ -29,9 +29,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use data_structures::{
-    ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassGeneric,
-    ExecutionClassVirtualTable, ExecutionFunction, ExecutionFunctionGeneric, ExecutionModule,
-    ExecutionValue, ExecutionVariable, TraitDefinition,
+    EnumDefinition, ExecutionArgument, ExecutionClass, ExecutionClassAttribute,
+    ExecutionClassVirtualTable, ExecutionFunction, ExecutionModule, ExecutionValue,
+    ExecutionVariable, TraitDefinition,
 };
 use indexmap::IndexMap;
 
@@ -227,10 +227,8 @@ pub trait ExecutionContextAlgorithms<
             ValueType,
             VariableType,
             FunctionType,
-            FunctionGenericType,
             ArgumentType,
             ClassType,
-            ClassGenericType,
             ClassVirtualTableType,
             ClassAttributeType,
         > + Clone,
@@ -238,11 +236,9 @@ pub trait ExecutionContextAlgorithms<
     VariableType: ExecutionVariable<ValueType, ModuleType> + Clone,
     FunctionType: ExecutionFunction<ArgumentType, ModuleType> + Clone,
     ArgumentType: ExecutionArgument,
-    FunctionGenericType: ExecutionFunctionGeneric<ModuleType> + Clone,
     ClassType: ExecutionClass<ClassType, ClassVirtualTableType, ClassAttributeType, ModuleType> + Clone,
     ClassVirtualTableType: ExecutionClassVirtualTable<FunctionType>,
     ClassAttributeType: ExecutionClassAttribute,
-    ClassGenericType: ExecutionClassGeneric<ModuleType> + Clone,
 >
 {
     /// Generic type substitutions currently in scope (e.g. `T` -> `String`
@@ -261,8 +257,8 @@ pub trait ExecutionContextAlgorithms<
         let mut current = self.get_module_context().current_module();
 
         loop {
-            if let Some(variants) = current.read().unwrap().get_enums().get(enum_name) {
-                return Some(variants.clone());
+            if let Some(definition) = current.read().unwrap().get_enums().get(enum_name) {
+                return Some(definition.variants.clone());
             }
 
             let parent = current.read().unwrap().get_parent()?.clone();
@@ -270,16 +266,16 @@ pub trait ExecutionContextAlgorithms<
         }
     }
 
-    /// Registers an enum and its variant names in the current module so the
-    /// name resolves as a type and its variants resolve through
-    /// `Enum::Variant`.
-    fn register_enum(&mut self, enum_name: String, variants: Vec<String>) {
+    /// Registers an enum, its variant names, and its visibility in the current
+    /// module so the name resolves as a type, its variants resolve through
+    /// `Enum::Variant`, and a `[private]` enum is rejected across modules.
+    fn register_enum(&mut self, enum_name: String, variants: Vec<String>, private: bool) {
         self.get_module_context()
             .current_module()
             .write()
             .unwrap()
             .get_enums_mut()
-            .insert(enum_name, variants);
+            .insert(enum_name, EnumDefinition { variants, private });
     }
 
     /// The trait definition registered under `trait_name`, or `None` when no
@@ -340,7 +336,7 @@ pub trait ExecutionContextAlgorithms<
     /// parameter count).
     fn create_generic_function(
         &mut self,
-        generic: &FunctionGenericType,
+        generic: &FunctionType,
         type_parameters: Vec<PekoType>,
     ) -> Option<FunctionType>;
 
@@ -348,7 +344,7 @@ pub trait ExecutionContextAlgorithms<
     /// arguments.
     fn create_generic_class(
         &mut self,
-        generic: &ClassGenericType,
+        generic: &ClassType,
         type_parameters: Vec<PekoType>,
     ) -> Option<ClassType>;
 
@@ -647,6 +643,32 @@ pub trait ExecutionContextAlgorithms<
         )
     }
 
+    /// The root token a locally-resolved import leads its module id with.
+    ///
+    /// When `root_folder` matches an external package's source root, the
+    /// package name is the token, so a package's own sibling imports build the
+    /// same module id as the same file imported by package path. Otherwise the
+    /// token is `project`, for the top-level project's own files.
+    fn local_root_token(&self, root_folder: &Path) -> String {
+        let canonical_root = root_folder
+            .canonicalize()
+            .unwrap_or_else(|_| root_folder.to_path_buf());
+
+        for (name, info) in self.get_external_modules() {
+            for version in &info.versions {
+                let canonical_source = version
+                    .source_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| version.source_root.clone());
+                if canonical_source == canonical_root {
+                    return name.clone();
+                }
+            }
+        }
+
+        String::from("project")
+    }
+
     /// Builds the final [`ResolvedModule`] from a resolved entry file.
     ///
     /// Computes the canonical module id, synthesizes a local
@@ -666,7 +688,14 @@ pub trait ExecutionContextAlgorithms<
         let module_id = if is_registry {
             Self::build_module_id(&new_root_folder, &current_file, &root_token)
         } else {
-            Self::build_module_id(&root_folder, &current_file, "project")
+            // A local import resolves relative to the root folder. While a
+            // package loads, the root folder is the package source root, so a
+            // package's own sibling import (a bare `core` from inside std)
+            // roots under the package token and shares identity with the same
+            // file imported by its package path (`std::core`). Project files
+            // root under the project token.
+            let local_token = self.local_root_token(&root_folder);
+            Self::build_module_id(&root_folder, &current_file, &local_token)
         };
 
         let entry_name = current_file
@@ -722,6 +751,68 @@ pub trait ExecutionContextAlgorithms<
         }
     }
 
+    /// Resolves a module path such as `["webview"]` or `["a", "b"]` to the
+    /// module it names, walking the same way qualified class types resolve: the
+    /// first segment is found in the current module tree or the top-level
+    /// modules, and each further segment steps into a submodule. Returns `None`
+    /// when any segment does not resolve.
+    fn resolve_qualified_module(
+        &self,
+        module_names: &[String],
+    ) -> Option<Arc<RwLock<ModuleType>>> {
+        if module_names.is_empty() {
+            return None;
+        }
+        let mut names = module_names.to_vec();
+        let mut contained_in = if let Some(module) = self.find_module_in_current(&names[0]) {
+            module
+        } else if self
+            .get_module_context()
+            .top_level_modules
+            .contains_key(&names[0])
+        {
+            self.get_module_context().top_level_modules[&names[0]].clone()
+        } else {
+            return None;
+        };
+        names.remove(0);
+
+        for module_name in &names {
+            if !contained_in
+                .read()
+                .unwrap()
+                .get_modules()
+                .contains_key(module_name)
+            {
+                if contained_in.read().unwrap().get_name() == module_name {
+                    break;
+                }
+                return None;
+            }
+            let parent = contained_in.read().unwrap().get_modules()[module_name].clone();
+            contained_in = parent;
+        }
+
+        Some(contained_in)
+    }
+
+    /// Whether `type1` names an enum, whether by a bare name reachable up the
+    /// current module tree or by a module-qualified path. Generic, array, and
+    /// function types are never enums.
+    fn is_reachable_enum(&self, type1: &PekoType) -> bool {
+        if !type1.generics().is_empty() || type1.is_function() {
+            return false;
+        }
+        if self.get_enum_variants(type1.name()).is_some() {
+            return true;
+        }
+        !type1.module_names().is_empty()
+            && self
+                .resolve_qualified_module(type1.module_names())
+                .map(|module| module.read().unwrap().get_enums().contains_key(type1.name()))
+                .unwrap_or(false)
+    }
+
     /// Walks up the module tree looking for a class named `class_name`.
     fn find_class_in_current(&self, class_name: impl ToString) -> Option<ClassType> {
         let mut current = self.get_module_context().current_module();
@@ -738,19 +829,63 @@ pub trait ExecutionContextAlgorithms<
         }
     }
 
-    /// Walks up the module tree looking for a generic-class declaration
-    /// named `generic_name`.
-    fn find_class_generic_in_current(
+    /// Whether `module` holds a generic-class template under `name`: a class
+    /// stored under its bare name that still holds its source AST.
+    fn module_has_class_template(&self, module: &Arc<RwLock<ModuleType>>, name: &str) -> bool {
+        module
+            .read()
+            .unwrap()
+            .get_classes()
+            .get(name)
+            .map(|class| class.read().unwrap().get_source_class().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Whether `module` holds a generic-function template under `name`: an
+    /// overload stored under the bare name that still holds its source AST.
+    fn module_has_function_template(&self, module: &Arc<RwLock<ModuleType>>, name: &str) -> bool {
+        module
+            .read()
+            .unwrap()
+            .get_functions()
+            .get(name)
+            .map(|overloads| {
+                overloads
+                    .iter()
+                    .any(|overload| overload.read().unwrap().get_source_function().is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    /// The generic-function template overload under `name` in `module`, if any.
+    fn module_function_template(
         &self,
-        generic_name: impl ToString,
-    ) -> Option<ClassGenericType> {
+        module: &Arc<RwLock<ModuleType>>,
+        name: &str,
+    ) -> Option<FunctionType> {
+        module
+            .read()
+            .unwrap()
+            .get_functions()
+            .get(name)?
+            .iter()
+            .find(|overload| overload.read().unwrap().get_source_function().is_some())
+            .map(|overload| overload.read().unwrap().clone())
+    }
+
+    /// Walks up the module tree looking for a generic-class template named
+    /// `generic_name`. A template is a class stored under its bare name that
+    /// still holds its source AST (it has type parameters awaiting
+    /// instantiation).
+    fn find_class_generic_in_current(&self, generic_name: impl ToString) -> Option<ClassType> {
         let mut current = self.get_module_context().current_module();
+        let target = generic_name.to_string();
 
         loop {
-            for (genname, generic) in current.read().unwrap().get_class_generics() {
-                if &generic_name.to_string() == genname {
-                    return Some(generic.read().unwrap().clone());
-                }
+            if let Some(class) = current.read().unwrap().get_classes().get(&target)
+                && class.read().unwrap().get_source_class().is_some()
+            {
+                return Some(class.read().unwrap().clone());
             }
 
             let parent = current.read().unwrap().get_parent()?.clone();
@@ -775,18 +910,19 @@ pub trait ExecutionContextAlgorithms<
         }
     }
 
-    /// Walks up the module tree looking for a generic-function
-    /// declaration named `generic_name`.
-    fn find_function_generic_in_current(
-        &self,
-        generic_name: impl ToString,
-    ) -> Option<FunctionGenericType> {
+    /// Walks up the module tree looking for a generic-function template named
+    /// `generic_name`: an overload stored under the bare name that still holds
+    /// its source AST.
+    fn find_function_generic_in_current(&self, generic_name: impl ToString) -> Option<FunctionType> {
         let mut current = self.get_module_context().current_module();
+        let target = generic_name.to_string();
 
         loop {
-            for (genname, generic) in current.read().unwrap().get_function_generics() {
-                if &generic_name.to_string() == genname {
-                    return Some(generic.read().unwrap().clone());
+            if let Some(overloads) = current.read().unwrap().get_functions().get(&target) {
+                for overload in overloads {
+                    if overload.read().unwrap().get_source_function().is_some() {
+                        return Some(overload.read().unwrap().clone());
+                    }
                 }
             }
 
@@ -842,14 +978,34 @@ pub trait ExecutionContextAlgorithms<
 
         // Expand a generic type. e.g. T = String, T -> String.
         while self.get_generic_types().contains_key(type1.name()) {
-            type1 = self.get_generic_types()[type1.name()].clone();
+            let mut replacement = self.get_generic_types()[type1.name()].clone();
 
             // Add all the non-definition type info back in.
-            type1.array_depth += array_depth;
-            type1.reference_depth += reference_depth;
+            replacement.array_depth += array_depth;
+            replacement.reference_depth += reference_depth;
 
-            array_depth = type1.array_depth;
-            reference_depth = type1.reference_depth;
+            // An erased generic parameter is mapped to a bounded `Generic`
+            // carrier of its own name. It is terminal: adopt the carrier
+            // (keeping its bounds) and stop, so the parameter is not chased
+            // into an infinite self-substitution.
+            let self_mapped =
+                replacement.is_generic_param() && replacement.name() == type1.name();
+
+            array_depth = replacement.array_depth;
+            reference_depth = replacement.reference_depth;
+            type1 = replacement;
+
+            if self_mapped {
+                break;
+            }
+        }
+
+        // A generic parameter is a terminal named type during erased
+        // compilation. It lowers to a thin managed object pointer and its
+        // bounds drive dispatch, so it expands to itself.
+        if type1.is_generic_param() {
+            type1.fully_expanded = true;
+            return Some(type1);
         }
 
         // Expand the argument and return types of functions/closures.
@@ -880,8 +1036,12 @@ pub trait ExecutionContextAlgorithms<
         }
 
         // Enums are terminal named types backed by an integer. They have no
-        // class body or modules to expand, so they expand to themselves.
-        if self.get_enum_variants(type1.name()).is_some() {
+        // class body or modules to expand, so they expand to themselves. A
+        // module-qualified enum (`fs::OpenMode`) is terminal too; it keeps its
+        // qualifier so a later comparison can match a bare reference to the same
+        // enum, and this stops it from falling through to class resolution,
+        // which would report it as undefined.
+        if self.get_enum_variants(type1.name()).is_some() || self.is_reachable_enum(&type1) {
             type1.fully_expanded = true;
             return Some(type1);
         }
@@ -911,8 +1071,27 @@ pub trait ExecutionContextAlgorithms<
             match self.expand_type(generic_type) {
                 Some(expanded) => *generic_type = expanded,
                 None => {
-                    argument_expansion_failed = true;
-                    break;
+                    // An unresolved bare identifier in a generic-argument
+                    // position is an erased carrier: a generic parameter with no
+                    // binding in the current context (for example `Option<U>`
+                    // where the method parameter U is erased). Keep it as a
+                    // terminal generic parameter so the enclosing class type
+                    // still resolves, matching erasure. A name with a module path
+                    // or nested generics is a genuine lookup failure.
+                    if generic_type.module_names().is_empty()
+                        && generic_type.generics().is_empty()
+                        && !generic_type.is_function()
+                        && !generic_type.name().is_empty()
+                    {
+                        let mut carrier =
+                            PekoType::generic_type(generic_type.name().to_string(), Vec::new());
+                        carrier.array_depth = generic_type.array_depth;
+                        carrier.reference_depth = generic_type.reference_depth;
+                        *generic_type = carrier;
+                    } else {
+                        argument_expansion_failed = true;
+                        break;
+                    }
                 }
             }
         }
@@ -965,48 +1144,22 @@ pub trait ExecutionContextAlgorithms<
                 contained_in = parent;
             }
 
-            if contained_in
+            let has_concrete = contained_in
                 .read()
                 .unwrap()
                 .get_classes()
-                .contains_key(&class_name)
-                || contained_in
-                    .read()
-                    .unwrap()
-                    .get_class_generics()
-                    .contains_key(&class_name)
-                || contained_in
-                    .read()
-                    .unwrap()
-                    .get_class_generics()
-                    .contains_key(&class_name_base)
-            {
-                if contained_in
-                    .read()
-                    .unwrap()
-                    .get_classes()
-                    .contains_key(&class_name)
-                {
-                    contained_in.read().unwrap().get_classes()[&class_name]
-                        .read()
-                        .unwrap()
-                        .get_parent_module()
-                } else if contained_in
-                    .read()
-                    .unwrap()
-                    .get_class_generics()
-                    .contains_key(&class_name_base)
-                {
-                    contained_in.read().unwrap().get_class_generics()[&class_name_base]
-                        .read()
-                        .unwrap()
-                        .get_parent_module()
+                .contains_key(&class_name);
+            let has_base_template = self.module_has_class_template(&contained_in, &class_name_base);
+            if has_concrete || has_base_template {
+                let lookup_name = if has_concrete {
+                    &class_name
                 } else {
-                    contained_in.read().unwrap().get_class_generics()[&class_name]
-                        .read()
-                        .unwrap()
-                        .get_parent_module()
-                }
+                    &class_name_base
+                };
+                contained_in.read().unwrap().get_classes()[lookup_name]
+                    .read()
+                    .unwrap()
+                    .get_parent_module()
             } else {
                 return None;
             }
@@ -1037,19 +1190,19 @@ pub trait ExecutionContextAlgorithms<
             .unwrap()
             .get_classes()
             .contains_key(&class_name)
-            && class_parent
-                .read()
-                .unwrap()
-                .get_class_generics()
-                .contains_key(&class_name_base)
+            && self.module_has_class_template(&class_parent, &class_name_base)
         {
-            let generic = class_parent.read().unwrap().get_class_generics()[&class_name_base]
+            let generic = class_parent.read().unwrap().get_classes()[&class_name_base]
                 .read()
                 .unwrap()
                 .clone();
-            return self
-                .create_generic_class(&generic, type1.generics().to_vec())
-                .map(|class| class.get_class_type().clone());
+
+            // Instantiate the generic class. Under erasure the compiled class is
+            // shared across instantiations, so the expanded type keeps its own
+            // concrete generic arguments (used for use-site member
+            // substitution) and is qualified below, rather than adopting the
+            // compiled class's parameter-named type.
+            self.create_generic_class(&generic, type1.generics().to_vec())?;
         }
 
         type1.module_names_mut().clear();
@@ -1071,6 +1224,13 @@ pub trait ExecutionContextAlgorithms<
     fn type_exists(&mut self, peko_type: &PekoType) -> bool {
         // Error types are treated as poison (they technically exist).
         if peko_type.is_error_type() {
+            return true;
+        }
+
+        // An erased generic parameter is a valid bounded type. It maps to a
+        // carrier of its own name, so resolving it through the generic-type
+        // substitution below would recurse forever; treat it as terminal.
+        if peko_type.is_generic_param() {
             return true;
         }
 
@@ -1112,6 +1272,15 @@ pub trait ExecutionContextAlgorithms<
         // e.g. T -> string | context.type_exists(T) -> context.type_exists(string).
         if self.get_generic_types().contains_key(peko_type.name()) {
             return self.type_exists(&self.get_generic_types()[peko_type.name()].clone());
+        }
+
+        // Enums are user-defined named types backed by an integer. They do not
+        // expand to a class definition, so recognize them before expansion,
+        // which would otherwise fail and report the enum as undefined. A
+        // module-qualified enum (`fs::OpenMode`) is recognized here too, since a
+        // qualified enum name resolves to no class.
+        if self.is_reachable_enum(peko_type) {
+            return true;
         }
 
         // Expand the type to its full official definition.
@@ -1158,6 +1327,13 @@ pub trait ExecutionContextAlgorithms<
 
         // Expand the type all the way.
         let type_expanded = self.expand_type(type1)?;
+
+        // A generic parameter is not a class. An erased parameter is a thin
+        // managed object; dispatch on it is bound-driven (the from-class or
+        // impl-trait carrier), resolved at the call site, not here.
+        if type_expanded.is_generic_param() {
+            return None;
+        }
 
         // Convert the type to a class name.
         let class_name = type_expanded.declutter().to_string();
@@ -1217,15 +1393,11 @@ pub trait ExecutionContextAlgorithms<
             .contains_key(&class_name)
         {
             if !type_expanded.generics().is_empty()
-                && next_module
-                    .read()
-                    .unwrap()
-                    .get_class_generics()
-                    .contains_key(type_expanded.name())
+                && self.module_has_class_template(&next_module, type_expanded.name())
             {
-                // Instantiate the generic using the provided generic
-                // types as the type parameters.
-                let next_generic = next_module.clone().read().unwrap().get_class_generics()
+                // Instantiate the template using the provided generic types as
+                // the type parameters.
+                let next_generic = next_module.clone().read().unwrap().get_classes()
                     [type_expanded.name()]
                     .read()
                     .unwrap()
@@ -1353,55 +1525,7 @@ pub trait ExecutionContextAlgorithms<
             return true;
         }
 
-        let type1_is_managed = type1.name() == "pointer";
-        let type2_is_managed = type2.name() == "pointer";
-
-        // Pointers can be blindly cast to each other.
-        if (type1_expanded.is_pointer() || type1_is_managed)
-            && (type2_expanded.is_pointer() || type2_is_managed)
-        {
-            return true;
-        }
-
-        // Class instances are represented as pointers, so an untyped
-        // pointer (`opaque` or `Pointer<void>`) casts cleanly to and from
-        // a class instance. Depth must match: a bare untyped pointer pairs
-        // with a bare class value, `opaque[]` with a class array, and so
-        // on. The element type on the class side is what must be a class.
-        let type1_is_untyped_pointer = type1_expanded.no_depth().to_string() == "opaque"
-            || (type1_expanded.name() == "pointer"
-                && type1_expanded.generics().len() == 1
-                && type1_expanded.generics()[0].name() == "void");
-        let type2_is_untyped_pointer = type2_expanded.no_depth().to_string() == "opaque"
-            || (type2_expanded.name() == "pointer"
-                && type2_expanded.generics().len() == 1
-                && type2_expanded.generics()[0].name() == "void");
-
-        // Compare pointer/reference depth so the untyped pointer and the
-        // class are at the same level of indirection.
-        let depths_match = type1_expanded.array_depth + type1_expanded.reference_depth
-            == type2_expanded.array_depth + type2_expanded.reference_depth;
-
-        if depths_match && (type1_is_untyped_pointer || type2_is_untyped_pointer) {
-            if type1_is_untyped_pointer {
-                let mut class_side = type2_expanded.clone();
-                class_side.array_depth = 0;
-                class_side.reference_depth = 0;
-                if self.get_class_by_type(&class_side).is_some() {
-                    return true;
-                }
-            }
-
-            if type2_is_untyped_pointer {
-                let mut class_side = type1_expanded.clone();
-                class_side.array_depth = 0;
-                class_side.reference_depth = 0;
-                if self.get_class_by_type(&class_side).is_some() {
-                    return true;
-                }
-            }
-        }
-
+        // Managed string and the raw string type name the same logical type.
         let type1_is_managed_string = type1.name() == "string";
         let type2_is_managed_string = type2.name() == "string";
 
@@ -1411,48 +1535,15 @@ pub trait ExecutionContextAlgorithms<
             return true;
         }
 
-        // All built-in types can be cast to each other.
-        if type1_expanded.is_builtin_type() && type2_expanded.is_builtin_type() {
-            return true;
-        }
-
-        // Connected classes can be cast to each other.
+        // A subclass coerces up to a superclass. Every other conversion -- a
+        // downcast, an unrelated class, a different builtin width, a pointer
+        // retype, an untyped pointer to a class -- is not implicit and needs
+        // an explicit `as` or `danger_cast`.
         let type1_class = self.get_class_by_type(&type1_expanded);
         let type2_class = self.get_class_by_type(&type2_expanded);
 
         if let (Some(class1), Some(class2)) = (&type1_class, &type2_class)
-            && (self.classes_connect(class1, class2) || self.classes_connect(class2, class1))
-        {
-            return true;
-        }
-
-        // Classes implementing `operator to_<type>` casts are similar to
-        // <type>.
-        if let Some(class1) = type1_class
-            && type2_expanded.is_builtin_type()
-            && class1
-                .get_main_virtual_table()
-                .get_methods()
-                .contains_key(&format!("[operator to_{}]", type2_expanded))
-        {
-            return true;
-        }
-
-        if type2_class.is_some()
-            && type1_expanded.is_builtin_type()
-            && type2_class
-                .unwrap()
-                .get_main_virtual_table()
-                .get_methods()
-                .contains_key(&format!("[operator to_{}]", type1_expanded))
-        {
-            return true;
-        }
-
-        // Strings and opaques are technically pointers; cast freely.
-        if ((type1.is_pointer() || type1.to_string() == "string") && type2.to_string() == "opaque")
-            || (type1.to_string() == "opaque"
-                && (type2.is_pointer() || type2.to_string() == "string"))
+            && self.classes_connect(class1, class2)
         {
             return true;
         }
@@ -1494,9 +1585,54 @@ pub trait ExecutionContextAlgorithms<
         Some(first)
     }
 
+    /// Whether two types name the same enum reached one qualified and one bare.
+    ///
+    /// A `module::Enum::Variant` access yields a value typed by the bare enum
+    /// name, while an annotation or parameter keeps the module qualifier, so
+    /// `webview::WebViewHint` and `WebViewHint` name the same enum. Expansion
+    /// cannot reconcile them, since a bare cross-module enum name does not
+    /// resolve in the importing module. The bare names must match and at least
+    /// one side must resolve to an enum; neither unqualified side may name a
+    /// distinct concrete type (a class or trait of that name), which would
+    /// otherwise be wrongly unified with the enum.
+    fn enum_types_match(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
+        if type1.name() != type2.name()
+            || type1.array_depth != type2.array_depth
+            || type1.reference_depth != type2.reference_depth
+            || !type1.generics().is_empty()
+            || !type2.generics().is_empty()
+            || type1.is_function()
+            || type2.is_function()
+        {
+            return false;
+        }
+
+        if !self.is_reachable_enum(type1) && !self.is_reachable_enum(type2) {
+            return false;
+        }
+
+        for side in [type1, type2] {
+            if side.module_names().is_empty()
+                && self.get_enum_variants(side.name()).is_none()
+                && (self.get_class_by_type(side).is_some() || self.get_trait(side.name()).is_some())
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn types_equal(&mut self, type1: &PekoType, type2: &PekoType) -> bool {
         // Error types "work" with any type.
         if type1.is_error_type() || type2.is_error_type() {
+            return true;
+        }
+
+        // A module-qualified enum and a bare reference to the same enum are the
+        // same type, reconciled before expansion since a bare cross-module enum
+        // name does not resolve in the importer.
+        if self.enum_types_match(type1, type2) {
             return true;
         }
 
@@ -1511,8 +1647,86 @@ pub trait ExecutionContextAlgorithms<
         let type1_expanded = type1_expanded.unwrap();
         let type2_expanded = type2_expanded.unwrap();
 
-        // Compare via stringified form.
-        type1_expanded.to_string() == type2_expanded.to_string()
+        self.types_equal_expanded(&type1_expanded, &type2_expanded)
+    }
+
+    /// Structural equality over two already-expanded types. An erased generic
+    /// parameter matches any type (every instantiation shares one thin-pointer
+    /// slot and the parameter's bounds were enforced at the instantiation site),
+    /// so a parameter compares equal wherever it appears, including nested in a
+    /// generic argument: `Map<KT, VT>` matches `Map<string, number>`.
+    fn types_equal_expanded(&self, type1: &PekoType, type2: &PekoType) -> bool {
+        // A generic parameter is a wildcard.
+        if type1.is_generic_param() || type2.is_generic_param() {
+            return true;
+        }
+
+        if type1.array_depth != type2.array_depth
+            || type1.reference_depth != type2.reference_depth
+            || type1.is_function() != type2.is_function()
+            || type1.name() != type2.name()
+            || type1.module_names() != type2.module_names()
+            || type1.generics().len() != type2.generics().len()
+        {
+            return false;
+        }
+
+        for (generic1, generic2) in type1.generics().iter().zip(type2.generics().iter()) {
+            if !self.types_equal_expanded(generic1, generic2) {
+                return false;
+            }
+        }
+
+        match (type1.function_return(), type2.function_return()) {
+            (Some(return1), Some(return2)) => self.types_equal_expanded(return1, return2),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether a value of `argument_type` may be passed to a parameter of
+    /// `parameter_type`. An exact type match always works; a subclass argument
+    /// is also accepted for a superclass parameter (an implicit upcast, since a
+    /// subclass is everywhere usable as its base). Other conversions are not
+    /// implicit and need an explicit `as` / `danger_cast`.
+    fn argument_matches_parameter(
+        &mut self,
+        argument_type: &PekoType,
+        parameter_type: &PekoType,
+    ) -> bool {
+        if self.types_equal(argument_type, parameter_type) {
+            return true;
+        }
+
+        // Depth must agree: an upcast applies to a bare instance, not an array
+        // or reference of one.
+        if argument_type.array_depth + argument_type.reference_depth
+            != parameter_type.array_depth + parameter_type.reference_depth
+        {
+            return false;
+        }
+
+        // A class argument coerces to a trait it implements (implicit trait
+        // object), so `f(x)` stands in for `f(x as Trait)`.
+        if self.get_trait(parameter_type.name()).is_some()
+            && let Some(argument_class) = self.get_class_by_type(argument_type)
+            && argument_class
+                .get_implemented_trait_names()
+                .iter()
+                .any(|name| name == parameter_type.name())
+        {
+            return true;
+        }
+
+        match (
+            self.get_class_by_type(argument_type),
+            self.get_class_by_type(parameter_type),
+        ) {
+            (Some(argument_class), Some(parameter_class)) => {
+                self.classes_connect(&argument_class, &parameter_class)
+            }
+            _ => false,
+        }
     }
 
     /// Picks the matching function from `function_choices` for the supplied
@@ -1571,12 +1785,12 @@ pub trait ExecutionContextAlgorithms<
                     if function.get_arguments().contains_key(argument_name)
                         && function.get_arguments()[argument_name].has_default_value()
                     {
-                        // Only an exactly-equal argument type matches. Implicit
-                        // casts are gone, so a similar-but-unequal type is not a
-                        // candidate, and const cannot be dropped.
-                        if self.types_equal(
-                            function.get_arguments()[argument_name].get_argument_type(),
+                        // An exactly-equal type or an implicit upcast matches.
+                        // Other conversions are not implicit, and const cannot be
+                        // dropped.
+                        if self.argument_matches_parameter(
                             argument_type,
+                            function.get_arguments()[argument_name].get_argument_type(),
                         ) && self.const_compatible(
                             argument_type,
                             function.get_arguments()[argument_name].get_argument_type(),
@@ -1620,9 +1834,10 @@ pub trait ExecutionContextAlgorithms<
                         break;
                     }
 
-                    // Only an exactly-equal argument type matches, and const
-                    // cannot be dropped to satisfy the parameter.
-                    if !self.types_equal(arg.get_argument_type(), &argument_types[index])
+                    // An exactly-equal type or an implicit upcast matches, and
+                    // const cannot be dropped to satisfy the parameter.
+                    if !self
+                        .argument_matches_parameter(&argument_types[index], arg.get_argument_type())
                         || !self.const_compatible(&argument_types[index], arg.get_argument_type())
                     {
                         current_type_match_score = 0;
@@ -1639,11 +1854,13 @@ pub trait ExecutionContextAlgorithms<
                     for argument_type in
                         &argument_types[(function.get_arguments().len())..argument_types.len()]
                     {
-                        // Only an exactly-equal argument type matches, and const
-                        // cannot be dropped.
-                        if !self.types_equal(argument_type, function.get_var_args_type().unwrap())
-                            || !self
-                                .const_compatible(argument_type, function.get_var_args_type().unwrap())
+                        // An exactly-equal type or an implicit upcast matches,
+                        // and const cannot be dropped.
+                        if !self.argument_matches_parameter(
+                            argument_type,
+                            function.get_var_args_type().unwrap(),
+                        ) || !self
+                            .const_compatible(argument_type, function.get_var_args_type().unwrap())
                         {
                             current_type_match_score = 0;
                             break;

@@ -1,0 +1,174 @@
+//! std::webview: a native webview window.
+//!
+//! A cross-platform desktop webview: WKWebView on macOS, WebKitGTK on Linux,
+//! WebView2 on Windows. Create a window, point it at a URL or HTML document,
+//! run JavaScript, bind native handlers to JavaScript, and drive the native
+//! event loop. The platform layer is the C in c/webview/webview.cc and the
+//! bind bridge in c/webview/webview_bridge.c, exposed through
+//! c/webview/webview.peko.h. Used through the std::webview prefix.
+
+import c::webview::webview as c_webview;
+import { * } from core;
+import { * } from collections;
+import runtime;
+
+// ---------------------------------------------------------------------------
+// --- Size hints ---
+// ---------------------------------------------------------------------------
+
+// The native webview_set_size hint codes. set_size and its bounded and fixed
+// variants pass the matching value.
+[private] fn hint_none() => i32 {
+    return constant<i32>(0)
+}
+
+[private] fn hint_min() => i32 {
+    return constant<i32>(1)
+}
+
+[private] fn hint_max() => i32 {
+    return constant<i32>(2)
+}
+
+[private] fn hint_fixed() => i32 {
+    return constant<i32>(3)
+}
+
+// ---------------------------------------------------------------------------
+// --- WebView ---
+// ---------------------------------------------------------------------------
+
+/// A native webview window. The window opens when run() starts the event loop
+/// and closes when the user dismisses it.
+[public] class WebView {
+    [private] handle: opaque;
+    // Bound handlers, kept reachable for the webview's lifetime so their
+    // captured environments stay live while the native side may call them.
+    [private] bindings: Map<string, closure(string) => string>
+
+    /// Creates a window titled `title` sized `width` by `height` pixels.
+    constructor(title: string, width: number, height: number) {
+        this.handle = c_webview::webview_create(constant<i32>(0), null)
+        this.bindings = new Map<string, closure(string) => string>()
+        c_webview::webview_set_title(this.handle, title.to_raw())
+        this.set_size(width, height)
+    }
+
+    /// Sets the window title.
+    fn set_title(title: string) {
+        c_webview::webview_set_title(this.handle, title.to_raw())
+    }
+
+    /// Sets the window size in pixels. The user may still resize the window.
+    fn set_size(width: number, height: number) {
+        let w: i32 = danger_cast<i32>(width.to_raw())
+        let h: i32 = danger_cast<i32>(height.to_raw())
+        c_webview::webview_set_size(this.handle, w, h, hint_none())
+    }
+
+    /// Sets the minimum window size in pixels.
+    fn set_min_size(width: number, height: number) {
+        let w: i32 = danger_cast<i32>(width.to_raw())
+        let h: i32 = danger_cast<i32>(height.to_raw())
+        c_webview::webview_set_size(this.handle, w, h, hint_min())
+    }
+
+    /// Sets the maximum window size in pixels.
+    fn set_max_size(width: number, height: number) {
+        let w: i32 = danger_cast<i32>(width.to_raw())
+        let h: i32 = danger_cast<i32>(height.to_raw())
+        c_webview::webview_set_size(this.handle, w, h, hint_max())
+    }
+
+    /// Fixes the window at the given size in pixels. The user cannot resize it.
+    fn set_fixed_size(width: number, height: number) {
+        let w: i32 = danger_cast<i32>(width.to_raw())
+        let h: i32 = danger_cast<i32>(height.to_raw())
+        c_webview::webview_set_size(this.handle, w, h, hint_fixed())
+    }
+
+    /// Navigates to `url`.
+    fn navigate(url: string) {
+        c_webview::webview_navigate(this.handle, url.to_raw())
+    }
+
+    /// Loads `html` as the current document.
+    fn set_html(html: string) {
+        c_webview::webview_set_html(this.handle, html.to_raw())
+    }
+
+    /// Runs `js` once in the current page. Execution is asynchronous and the
+    /// result is ignored.
+    fn eval(js: string) {
+        c_webview::webview_eval(this.handle, js.to_raw())
+    }
+
+    /// Injects `js` to run at the start of every page load.
+    fn init(js: string) {
+        c_webview::webview_init(this.handle, js.to_raw())
+    }
+
+    /// Binds `handler` to a global JavaScript function `name`. When JavaScript
+    /// calls that function, `handler` receives the request string (a JSON
+    /// array of the call arguments) and returns the JSON result, which becomes
+    /// the resolved value of the call's promise. The handler runs on the
+    /// native UI thread while run() drives the event loop.
+    ///
+    /// The handler is retained for the webview's lifetime. The trampoline
+    /// closure adapts the native cstr callback to the managed handler: it
+    /// copies the request into a managed string and hands back the result's
+    /// raw buffer, which the native side reads before the call returns.
+    [mutates] fn bind(name: string, handler: closure(string) => string) {
+        this.bindings.set(name, handler)
+
+        let trampoline: closure(cstr) => cstr = closure[handler](raw: cstr) => cstr {
+            let req: string = runtime::create_managed(raw)
+            let result: string = handler(req)
+            return danger_cast<cstr>(result.to_raw())
+        }
+
+        c_webview::peko_webview_bind(
+            this.handle,
+            name.to_raw(),
+            danger_cast<opaque>(trampoline.function),
+            trampoline.context)
+    }
+
+    /// Registers `handler` to run after each page finishes loading. Built on a
+    /// bound native function that injected JavaScript calls on the load event.
+    [mutates] fn on_load(handler: closure() => void) {
+        this.bind("__peko_on_load", closure[handler](request: string) => string {
+            handler()
+            return ""
+        })
+        this.init("window.addEventListener('DOMContentLoaded', function() { __peko_on_load(); });")
+    }
+
+    /// Navigates back one entry in history.
+    fn back() {
+        c_webview::webview_eval(this.handle, "history.back()".to_raw())
+    }
+
+    /// Navigates forward one entry in history.
+    fn forward() {
+        c_webview::webview_eval(this.handle, "history.forward()".to_raw())
+    }
+
+    /// Reloads the current page.
+    fn reload() {
+        c_webview::webview_eval(this.handle, "location.reload()".to_raw())
+    }
+
+    /// Runs the native event loop until the window closes, then destroys the
+    /// webview. Blocking. The main thread parks for the whole loop so the
+    /// collector can run without it. The native handle is an opaque value read
+    /// into a local before parking, and no managed field is touched while
+    /// parked.
+    fn run() {
+        let win: opaque = this.handle
+        c_webview::pgc_begin_blocking()
+        c_webview::webview_run(win)
+        c_webview::pgc_end_blocking()
+        c_webview::webview_destroy(win)
+    }
+}

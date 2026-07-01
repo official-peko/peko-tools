@@ -154,7 +154,7 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
     fn get_object_vtable(&mut self, object: &CodegenValue, load_vtable: bool) -> CodegenValue {
         let object_class = self.get_class_by_type(&object.value_type).unwrap();
 
-        let mut vtable_element = unsafe {
+        let vtable_element = unsafe {
             core::LLVMBuildStructGEP2(
                 self.llvm_builder,
                 object_class.struct_type,
@@ -165,23 +165,43 @@ impl LlvmMemoryBuilder for PekoCodegenContext {
         };
 
         if load_vtable {
-            vtable_element = unsafe {
+            // Offset-0 holds a raw (address-space-0) pointer to the class's
+            // static TypeInfo. Load it, then load the vtable pointer out of the
+            // TypeInfo's vtable field (index 3). Both are raw static pointers.
+            let raw_pointer_type = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 0) };
+            let type_info = unsafe {
                 core::LLVMBuildLoad2(
                     self.llvm_builder,
-                    // The vtable pointer is a raw (address-space-0) pointer to
-                    // the static vtable.
-                    core::LLVMPointerType(object_class.main_virtual_table.llvm_type, 0),
+                    raw_pointer_type,
                     vtable_element,
+                    c"".as_ptr(),
+                )
+            };
+            let type_info_type = self.type_info_struct_type();
+            let vtable_field = unsafe {
+                core::LLVMBuildStructGEP2(
+                    self.llvm_builder,
+                    type_info_type,
+                    type_info,
+                    3,
+                    c"".as_ptr(),
+                )
+            };
+            let vtable = unsafe {
+                core::LLVMBuildLoad2(
+                    self.llvm_builder,
+                    raw_pointer_type,
+                    vtable_field,
                     c"".as_ptr(),
                 )
             };
 
             // The loaded value is the raw vtable pointer itself.
-            return CodegenValue::new(vtable_element, PekoType::simple_type("opaque"));
+            return CodegenValue::new(vtable, PekoType::simple_type("opaque"));
         }
 
-        // The GEP result is a managed interior pointer to the vtable slot,
-        // which holds a raw pointer to the static vtable.
+        // The GEP result is a managed interior pointer to the offset-0 slot,
+        // which holds a raw pointer to the static TypeInfo.
         CodegenValue::new(
             vtable_element,
             managed_pointer_type(PekoType::simple_type("opaque")),

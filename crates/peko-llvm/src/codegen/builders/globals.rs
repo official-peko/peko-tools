@@ -138,16 +138,21 @@ impl GlobalBuilder for PekoCodegenContext {
             if modname == "extern" {
                 continue;
             }
-            module_global_sets_names.push(
-                module
-                    .read()
-                    .unwrap()
-                    .get_top_level()
-                    .unwrap()
-                    .globals_info
-                    .globals_set_name
-                    .to_string(false),
-            );
+            // A source file bound under two names appears twice in the registry
+            // as the same module. Its globals initializer is one function, so
+            // record its name once; calling it twice would reference a name the
+            // module never defines.
+            let set_name = module
+                .read()
+                .unwrap()
+                .get_top_level()
+                .unwrap()
+                .globals_info
+                .globals_set_name
+                .to_string(false);
+            if !module_global_sets_names.contains(&set_name) {
+                module_global_sets_names.push(set_name);
+            }
         }
         self.init_all_globals_specified(module_global_sets_names)
     }
@@ -198,32 +203,37 @@ impl GlobalBuilder for PekoCodegenContext {
         let entry_block = self.create_new_block(Some("entry".to_string()));
         self.goto_block_end(entry_block);
 
-        ["Runtime", "standard", "ui"].iter().for_each(|modname| {
-            let global_method = global_sets.remove(
-                global_sets
+        // Initialize the foundational modules' globals first, in this order, so
+        // later modules can rely on them. A module that declares no globals (and
+        // so has no `set_globals`) is simply skipped rather than required.
+        ["runtime", "core", "collections"]
+            .iter()
+            .for_each(|modname| {
+                let Some((index, _)) = global_sets
                     .iter()
                     .find_position(|global_set| {
                         global_set.as_str() == format!("{modname}::set_globals")
                     })
-                    .unwrap()
-                    .0,
-            );
+                else {
+                    return;
+                };
+                let global_method = global_sets.remove(index);
 
-            let globals_init_function = self.create_function_raw(
-                global_method,
-                Vec::new(),
-                &PekoType::simple_type("void"),
-                false,
-                true,
-            );
+                let globals_init_function = self.create_function_raw(
+                    global_method,
+                    Vec::new(),
+                    &PekoType::simple_type("void"),
+                    false,
+                    true,
+                );
 
-            self.call_function(
-                &globals_init_function.value_type,
-                false,
-                globals_init_function.llvm_value,
-                Vec::new(),
-            );
-        });
+                self.call_function(
+                    &globals_init_function.value_type,
+                    false,
+                    globals_init_function.llvm_value,
+                    Vec::new(),
+                );
+            });
 
         for global_method in global_sets {
             let globals_init_function = self.create_function_raw(

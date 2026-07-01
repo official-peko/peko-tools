@@ -1,0 +1,54 @@
+# Toolchain description for Android on arm64 (aarch64, API 22).
+#
+# Paths are relative to this file's directory, except absolute on-device
+# runtime paths such as the dynamic linker. Android has a single architecture,
+# so there is no arch subdirectory. The objects and flags describe an
+# executable link.
+
+[toolchain]
+id = "android-arm64"
+target = "android"
+arch = "arm"
+triple = "aarch64-unknown-linux-android22"
+
+[build]
+cxx_std = "c++17"
+c_flags = ["-fPIC"]
+objc_flags = []
+include = [
+  "sysroot/usr/include/c++/v1",
+  "include",
+  "sysroot/usr/include/aarch64-linux-android",
+  "sysroot/usr/include",
+]
+
+[link]
+driver = "ld.lld"
+lib_paths = [
+  "linux/aarch64",
+  "sysroot/usr/lib/aarch64-linux-android/22",
+  "sysroot/usr/lib/aarch64-linux-android",
+  "sysroot/usr/lib",
+]
+# ":libunwind.a" links that exact file by name.
+libs = [
+  ":libunwind.a", "dl", "c", "m", "c++_static", "c++abi",
+  "log", "android", "EGL", "GLESv3", "OpenSLES",
+]
+frameworks = []
+# The crt objects for an executable link.
+objects = [
+  "linux/libclang_rt.builtins-aarch64-android.a",
+  "sysroot/usr/lib/aarch64-linux-android/22/crtbegin_dynamic.o",
+  "sysroot/usr/lib/aarch64-linux-android/22/crtend_android.o",
+]
+# -z max-page-size=16384 aligns loadable segments to 16 KB so the binary loads
+# on both 4 KB and 16 KB page-size devices.
+flags = [
+  "-pie",
+  "-uANativeActivity_onCreate",
+  "-dynamic-linker", "/system/bin/linker64",
+  "--sysroot=sysroot",
+  "-m", "aarch64linux",
+  "-z", "max-page-size=16384",
+]

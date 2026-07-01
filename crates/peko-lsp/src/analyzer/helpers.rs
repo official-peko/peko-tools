@@ -123,7 +123,7 @@ pub fn parse_peko_source(file: &Path, source: String) -> (Vec<PekoAST>, Diagnost
     // a parse step that consumes no tokens cannot hang the server.
     let max_iterations = source.len() + 1;
     let mut iterations = 0;
-    while !parser.tokens.finished() {
+    while !parser.tokens.finished() || parser.has_pending() {
         iterations += 1;
         if iterations > max_iterations {
             break;

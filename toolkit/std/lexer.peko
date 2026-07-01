@@ -1,0 +1,139 @@
+//! std::lexer: a general-purpose lexer.
+//!
+//! Breaks a string into a flat list of tokens: identifiers, numbers, quoted
+//! strings, single whitespace characters, and any other single character.
+//! Built for the json parser and simple request parsing. The token values
+//! concatenate back to the original text (whitespace and stray characters are
+//! tokens too), apart from the quotes and escapes stripped from strings.
+
+import { * } from core;
+import { * } from collections;
+
+/// The kind of a lexed token.
+[public] enum TokenType {
+    Identifier,
+    String,
+    Number,
+    Whitespace,
+    Other
+}
+
+/// A single unit of text produced by the lexer: its literal value and kind.
+[public] class Token {
+    value: string
+    kind: TokenType
+
+    constructor(value: string, kind: TokenType) {
+        this.value = value
+        this.kind = kind
+    }
+
+    /// The literal text of this token.
+    [public] fn get_value() => string {
+        return this.value
+    }
+
+    /// The kind of this token.
+    [public] fn get_kind() => TokenType {
+        return this.kind
+    }
+
+    /// True when this token has the given text and is not a string token, so a
+    /// quoted delimiter is never mistaken for a structural one.
+    [public] fn value_equals(text: string) => bool {
+        let same: bool = this.value == text
+        let not_string: bool = this.kind != TokenType::String
+        return same && not_string
+    }
+}
+
+/// Breaks `text` into a list of tokens.
+[public] fn tokenize(text: string) => Array<Token> {
+    let tokens: Array<Token> = new Array<Token>()
+    let length: number = text.size()
+    let index: number = 0
+    let one: number = 1
+
+    while index < length {
+        let current: char = text[index]
+
+        if current.is_alpha() {
+            // An identifier runs over letters, digits, and underscores.
+            let builder: StringBuilder = new StringBuilder()
+            while index < length {
+                let c: char = text[index]
+                let underscore: bool = c == '_'
+                let part: bool = c.is_alphanumeric() || underscore
+                if !part {
+                    break
+                }
+                builder.append_char(c)
+                index = index + one
+            }
+            tokens.push(new Token(builder.build(), TokenType::Identifier))
+
+        } else if current.is_digit() || current == '-' {
+            // A number runs over digits with at most one decimal point, plus
+            // separators and a leading sign.
+            let builder: StringBuilder = new StringBuilder()
+            let seen_dot: bool = false
+            while index < length {
+                let c: char = text[index]
+                let is_dot: bool = c == '.' && !seen_dot
+                let is_sep: bool = c == '_'
+                let is_sign: bool = c == '-'
+                let part: bool = c.is_digit() || is_dot || is_sep || is_sign
+                if !part {
+                    break
+                }
+                if c == '.' {
+                    seen_dot = true
+                }
+                builder.append_char(c)
+                index = index + one
+            }
+            tokens.push(new Token(builder.build(), TokenType::Number))
+
+        } else if current == '"' || current == '\'' {
+            // A quoted string, with the matching delimiter and the common
+            // backslash escapes consumed.
+            let builder: StringBuilder = new StringBuilder()
+            let delimiter: char = current
+            index = index + one
+            while index < length {
+                let c: char = text[index]
+                if c == delimiter {
+                    break
+                }
+                if c == '\\' {
+                    index = index + one
+                    let escaped: char = text[index]
+                    if escaped == 'n' {
+                        builder.append_char('\n')
+                    } else if escaped == 't' {
+                        builder.append_char('\t')
+                    } else if escaped == 'r' {
+                        builder.append_char('\r')
+                    } else {
+                        builder.append_char(escaped)
+                    }
+                } else {
+                    builder.append_char(c)
+                }
+                index = index + one
+            }
+            index = index + one
+            tokens.push(new Token(builder.build(), TokenType::String))
+
+        } else if current.is_whitespace() {
+            tokens.push(new Token(current.to_string(), TokenType::Whitespace))
+            index = index + one
+
+        } else {
+            tokens.push(new Token(current.to_string(), TokenType::Other))
+            index = index + one
+        }
+    }
+
+    return tokens
+}

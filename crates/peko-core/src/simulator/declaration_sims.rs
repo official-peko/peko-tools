@@ -25,17 +25,45 @@ use crate::diagnostics;
 use crate::execution::ExecutionContextAlgorithms;
 use crate::execution::data_structures::{TraitDefinition, TraitMethodSlot};
 use crate::simulator::data_structures::{
-    ScopeClass, SimulatorClass, SimulatorClassAttribute, SimulatorClassGeneric,
-    SimulatorClassVirtualTable,
+    ScopeClass, SimulatorClass, SimulatorClassAttribute, SimulatorClassVirtualTable,
 };
 use crate::types::{self, PekoType};
 
 use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{
-    DefinedObject, Scope, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,
-    SimulatorFunction, SimulatorFunctionGeneric, SimulatorModule, SimulatorVariable,
+    DefinedObject, Scope, ScopeEnum, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,
+    SimulatorFunction, SimulatorModule, SimulatorVariable,
 };
+
+/// Builds a generic-class template: a `SimulatorClass` stored under its bare
+/// name that holds the source AST and the type-parameter names. Its base fields
+/// are placeholders; instantiation re-simulates `source` under substitution.
+fn build_generic_class_template(
+    source: ClassAST,
+    typenames: Vec<crate::asts::data_structures::PositionedValue<String>>,
+    position: crate::asts::data_structures::PositionData,
+    class_name: String,
+    module: std::sync::Arc<std::sync::RwLock<SimulatorModule>>,
+    scope: std::sync::Arc<std::sync::RwLock<Scope>>,
+    file: std::path::PathBuf,
+) -> SimulatorClass {
+    let class_type = types::PekoType::from_string(class_name.as_str(), file.clone());
+    let mut class = SimulatorClass::new(
+        position,
+        class_type,
+        None,
+        indexmap::IndexMap::new(),
+        SimulatorClassVirtualTable::new(indexmap::IndexMap::new()),
+        Vec::new(),
+        module,
+    );
+    class.generic_typenames = typenames;
+    class.source_class = Some(source);
+    class.template_scope = Some(scope);
+    class.template_filename = file;
+    class
+}
 use super::value::SimulatorValue;
 
 /// Simulates a variable declaration.
@@ -83,6 +111,85 @@ impl NewVariableAST {
                 simulator_context.module_context.current_module().clone(),
             ),
         );
+    }
+}
+
+impl PekoValueSimulator for DestructureAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        let value = self.value.simulate(simulator_context);
+
+        for (index, name) in self.names.iter().enumerate() {
+            let accessor = match index {
+                0 => "get_first",
+                1 => "get_second",
+                _ => {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            name.start.clone(),
+                            name.end.clone(),
+                            "destructuring binds at most two names".to_string(),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    continue;
+                }
+            };
+
+            let element_type = match simulator_context.call_object_method(
+                &value,
+                accessor,
+                Vec::new(),
+                None,
+            ) {
+                Ok(element) => element.get_type(),
+                Err(_) => {
+                    simulator_context
+                        .diagnostics
+                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                            self.value.get_start().clone(),
+                            self.value.get_end().clone(),
+                            format!(
+                                "cannot destructure a value of type `{}`; it is not a Pair",
+                                value.get_type()
+                            ),
+                            diagnostics::DiagnosticType::Error,
+                            simulator_context.get_current_file(),
+                        ));
+                    types::PekoType::error_type()
+                }
+            };
+
+            if let Some(scope) = simulator_context.current_scope.as_mut() {
+                scope.write().unwrap().symbols.insert(
+                    name.value.clone(),
+                    ScopeSymbol::Variable(
+                        ScopeVariable::new(
+                            None,
+                            name.value.clone(),
+                            element_type.clone(),
+                            name.start.clone(),
+                            name.end.clone(),
+                            false,
+                        ),
+                        VisibilityData::open_visibility(),
+                    ),
+                );
+            }
+
+            simulator_context.scoped_variables.insert(
+                name.value.clone(),
+                SimulatorVariable::new(
+                    name.start.clone(),
+                    VisibilityData::open_visibility(),
+                    element_type.clone(),
+                    SimulatorValue::Value(element_type),
+                    simulator_context.module_context.current_module().clone(),
+                ),
+            );
+        }
+
+        SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
 }
 
@@ -427,21 +534,29 @@ impl PekoValueSimulator for FunctionDeclarationAST {
 
             let current_module = simulator_context.module_context.current_module().clone();
 
-            let function = SimulatorFunctionGeneric::new(
+            // A generic function is stored as a template: a SimulatorFunction
+            // under the bare name that holds the source AST and the type
+            // parameter names. Instantiation re-simulates the source.
+            let mut function = SimulatorFunction::new(
+                self.start.clone(),
                 self.visibility.clone(),
-                self.generic_types.clone(),
-                self_reference,
+                self.docinfo.clone(),
+                PekoType::simple_type("void"),
+                indexmap::IndexMap::new(),
+                self.varargs_type.clone(),
                 current_module,
             );
+            function.generic_typenames = self.generic_types.clone();
+            function.source_function = Some(self_reference);
             simulator_context
                 .module_context
                 .current_module()
                 .write()
                 .unwrap()
-                .function_generics
+                .functions
                 .insert(
                     self.function_name.value.clone(),
-                    Arc::new(RwLock::new(function)),
+                    vec![Arc::new(RwLock::new(function))],
                 );
 
             if let Some(scope) = simulator_context.current_scope.as_mut() {
@@ -592,8 +707,9 @@ impl PekoValueSimulator for FunctionDeclarationAST {
             );
         }
 
-        // Functions named OnStart in main get auto-promoted to extern
-        // so the linker can find them as entry points.
+        // The `on_start` function in main is the program entry hook. It is
+        // auto-promoted to extern so the runtime's `main` resolves it by its
+        // bare symbol name at link time.
         let is_onstart = simulator_context
             .module_context
             .current_module()
@@ -601,7 +717,7 @@ impl PekoValueSimulator for FunctionDeclarationAST {
             .unwrap()
             .name
             == "main"
-            && self.function_name.value == "OnStart";
+            && self.function_name.value == "on_start";
 
         // External functions live in the global extern module, except a
         // scoped foreign symbol (a `.peko.h` import) which stays in its
@@ -1229,8 +1345,6 @@ impl PekoValueSimulator for ModuleCreationAST {
             IndexMap::new(),
             IndexMap::new(),
             IndexMap::new(),
-            IndexMap::new(),
-            IndexMap::new(),
             Arc::clone(&scope_reference),
             Vec::new(),
             IndexMap::new(),
@@ -1319,7 +1433,7 @@ impl PekoValueSimulator for EnumDeclarationAST {
                 variant_names.push(variant.value.clone());
             }
         }
-        simulator_context.register_enum(self.enum_name.value.clone(), variant_names);
+        simulator_context.register_enum(self.enum_name.value.clone(), variant_names, self.visibility.private);
     }
 
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
@@ -1345,7 +1459,29 @@ impl PekoValueSimulator for EnumDeclarationAST {
             variant_names.push(variant.value.clone());
         }
 
-        simulator_context.register_enum(self.enum_name.value.clone(), variant_names);
+        simulator_context.register_enum(
+            self.enum_name.value.clone(),
+            variant_names.clone(),
+            self.visibility.private,
+        );
+
+        // Surface the enum to tooling as a scope symbol so the language server
+        // can list, complete, and describe it.
+        if let Some(scope) = simulator_context.current_scope.as_mut() {
+            scope.write().unwrap().symbols.insert(
+                self.enum_name.value.clone(),
+                ScopeSymbol::Enum(
+                    ScopeEnum::new(
+                        self.docinfo.clone(),
+                        self.enum_name.value.clone(),
+                        self.start.clone(),
+                        self.end.clone(),
+                        variant_names,
+                    ),
+                    self.visibility.clone(),
+                ),
+            );
+        }
 
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
@@ -1384,6 +1520,7 @@ impl PekoValueSimulator for TraitDeclarationAST {
                 argument_types,
                 return_type,
                 has_default: method.function_body.is_some(),
+                is_static: method.is_static,
             });
         }
 
@@ -1438,6 +1575,7 @@ impl PekoValueSimulator for TraitDeclarationAST {
                 argument_types,
                 return_type,
                 has_default: method.function_body.is_some(),
+                is_static: method.is_static,
             });
         }
 
@@ -1475,14 +1613,15 @@ impl PekoValueSimulator for ClassAST {
                 .current_module()
                 .write()
                 .unwrap()
-                .class_generics
+                .classes
                 .insert(
                     self.class_name.value.clone(),
-                    Arc::new(RwLock::new(SimulatorClassGeneric::new(
-                        self.visibility.clone(),
-                        self.generics.clone(),
+                    Arc::new(RwLock::new(build_generic_class_template(
                         self_reference,
-                        current_module,
+                        self.generics.clone(),
+                        self.start.clone(),
+                        self.class_name.value.clone(),
+                        current_module.clone(),
                         current_scope,
                         current_file,
                     ))),
@@ -1525,28 +1664,45 @@ impl PekoValueSimulator for ClassAST {
         // Method signatures, grouped by name into overload lists.
         let mut methods: IndexMap<String, Vec<Arc<RwLock<SimulatorFunction>>>> = IndexMap::new();
         for class_method in &self.methods {
+            let is_static = class_method.get_info().is_static;
             let mut arguments = IndexMap::new();
             for (argument_name, argument) in &class_method.get_info().arguments {
+                // A static method's signature may name `Self`; bind it to the
+                // owning class so a type-level call resolves to a concrete type.
+                let argument_type = if is_static {
+                    types::substitute_self(&argument.argument_type, &class_type)
+                } else {
+                    argument.argument_type.clone()
+                };
                 arguments.insert(
                     argument_name.value.clone(),
                     SimulatorArg::new(
                         argument.start.clone(),
                         argument.visibility.clone(),
-                        argument.argument_type.clone(),
+                        argument_type,
                         argument.default_value.is_some(),
                     ),
                 );
             }
 
-            let simulator_function = SimulatorFunction::new(
+            let return_type = if is_static {
+                types::substitute_self(&class_method.get_return_type(), &class_type)
+            } else {
+                class_method.get_return_type()
+            };
+
+            let mut simulator_function = SimulatorFunction::new(
                 class_method.get_info().start.clone(),
                 class_method.get_info().visibility.clone(),
                 class_method.get_info().docinfo.clone(),
-                class_method.get_return_type(),
+                return_type,
                 arguments,
                 class_method.get_info().varargs_type.clone(),
                 simulator_context.module_context.current_module().clone(),
             );
+            simulator_function.method_generic_typenames =
+                class_method.get_generic_types().clone();
+            simulator_function.is_static = is_static;
 
             methods
                 .entry(class_method.get_info().name.value.clone())
@@ -1604,13 +1760,14 @@ impl PekoValueSimulator for ClassAST {
                 .current_module()
                 .write()
                 .unwrap()
-                .class_generics
+                .classes
                 .insert(
                     self.class_name.value.clone(),
-                    Arc::new(RwLock::new(SimulatorClassGeneric::new(
-                        self.visibility.clone(),
-                        self.generics.clone(),
+                    Arc::new(RwLock::new(build_generic_class_template(
                         self_reference,
+                        self.generics.clone(),
+                        self.start.clone(),
+                        self.class_name.value.clone(),
                         current_module,
                         current_scope,
                         current_file,
@@ -1725,11 +1882,14 @@ impl PekoValueSimulator for ClassAST {
 
                         let find_generic = simulator_context
                             .find_class_generic_in_current(generic_class_simple.to_string());
-                        if find_generic.is_none() {
+                        let Some(template) = find_generic else {
                             break;
-                        }
+                        };
+                        let Some(source) = template.source_class.clone() else {
+                            break;
+                        };
 
-                        parent = Some(find_generic.unwrap().class.clone());
+                        parent = Some(source);
                     } else {
                         let parent_class =
                             simulator_context.get_class_by_type(&self.derives_from[0]);
@@ -2035,10 +2195,18 @@ impl PekoValueSimulator for ClassAST {
                     .insert(class_method.get_info().name.value.clone(), Vec::new());
             }
 
+            let is_static = class_method.get_info().is_static;
+
             let mut simulator_arguments = IndexMap::new();
             for (argument_name, argument_declaration) in &class_method.get_info().arguments {
-                let argument_type_expanded =
-                    simulator_context.expand_type(&argument_declaration.argument_type);
+                // Resolve a static method's `Self` to the owning class before
+                // expanding, so the stored signature carries the concrete type.
+                let declared_argument = if is_static {
+                    types::substitute_self(&argument_declaration.argument_type, &class_type)
+                } else {
+                    argument_declaration.argument_type.clone()
+                };
+                let argument_type_expanded = simulator_context.expand_type(&declared_argument);
 
                 simulator_arguments.insert(
                     argument_name.value.clone(),
@@ -2051,10 +2219,14 @@ impl PekoValueSimulator for ClassAST {
                 );
             }
 
-            let return_type_expanded =
-                simulator_context.expand_type(&class_method.get_return_type());
+            let declared_return = if is_static {
+                types::substitute_self(&class_method.get_return_type(), &class_type)
+            } else {
+                class_method.get_return_type()
+            };
+            let return_type_expanded = simulator_context.expand_type(&declared_return);
 
-            let simulator_function = SimulatorFunction::new(
+            let mut simulator_function = SimulatorFunction::new(
                 class_method.get_info().start.clone(),
                 class_method.get_info().visibility.clone(),
                 class_method.get_info().docinfo.clone(),
@@ -2065,6 +2237,9 @@ impl PekoValueSimulator for ClassAST {
                 class_method.get_info().varargs_type.clone(),
                 simulator_context.module_context.current_module().clone(),
             );
+            simulator_function.method_generic_typenames =
+                class_method.get_generic_types().clone();
+            simulator_function.is_static = is_static;
 
             let mut function_added_to_vtable = false;
 
@@ -2177,58 +2352,74 @@ impl PekoValueSimulator for ClassAST {
             let local_scope_previous = simulator_context.local_scope;
             simulator_context.local_scope = true;
 
-            let return_type_expanded =
-                simulator_context.expand_type(&class_method.get_return_type());
+            // A static method carries no `this`; its signature resolves `Self`
+            // to the owning class. An instance method keeps `Self` as-is.
+            let is_static = class_method.get_info().is_static;
+            let body_return_type = if is_static {
+                types::substitute_self(&class_method.get_return_type(), &class_type)
+            } else {
+                class_method.get_return_type()
+            };
+
+            let return_type_expanded = simulator_context.expand_type(&body_return_type);
 
             let previous_return_type = simulator_context.current_return_type.clone();
-            simulator_context.current_return_type =
-                if class_method.get_return_type().to_string() != "void" {
-                    return_type_expanded
-                } else {
-                    None
-                };
+            simulator_context.current_return_type = if body_return_type.to_string() != "void" {
+                return_type_expanded
+            } else {
+                None
+            };
 
             let current_this = simulator_context.current_this.clone();
-            let current_this_variable = SimulatorVariable::new(
-                class_method.get_info().start.clone(),
-                VisibilityData::open_visibility(),
-                class_type.clone(),
-                SimulatorValue::Value(class_type.clone()),
-                simulator_context.module_context.current_module().clone(),
-            );
-
-            simulator_context
-                .scoped_variables
-                .insert(String::from("this"), current_this_variable.clone());
-
-            simulator_context.current_this = Some(current_this_variable);
-
-            simulator_context
-                .current_scope
-                .as_mut()
-                .unwrap()
-                .write()
-                .unwrap()
-                .symbols
-                .insert(
-                    String::from("this"),
-                    ScopeSymbol::Variable(
-                        ScopeVariable::new(
-                            None,
-                            String::from("this"),
-                            class_type.clone(),
-                            class_method.get_info().start.clone(),
-                            class_method.get_info().end.clone(),
-                            false,
-                        ),
-                        VisibilityData::open_visibility(),
-                    ),
+            if !is_static {
+                let current_this_variable = SimulatorVariable::new(
+                    class_method.get_info().start.clone(),
+                    VisibilityData::open_visibility(),
+                    class_type.clone(),
+                    SimulatorValue::Value(class_type.clone()),
+                    simulator_context.module_context.current_module().clone(),
                 );
+
+                simulator_context
+                    .scoped_variables
+                    .insert(String::from("this"), current_this_variable.clone());
+
+                simulator_context.current_this = Some(current_this_variable);
+
+                simulator_context
+                    .current_scope
+                    .as_mut()
+                    .unwrap()
+                    .write()
+                    .unwrap()
+                    .symbols
+                    .insert(
+                        String::from("this"),
+                        ScopeSymbol::Variable(
+                            ScopeVariable::new(
+                                None,
+                                String::from("this"),
+                                class_type.clone(),
+                                class_method.get_info().start.clone(),
+                                class_method.get_info().end.clone(),
+                                false,
+                            ),
+                            VisibilityData::open_visibility(),
+                        ),
+                    );
+            } else {
+                // No receiver in a static method body.
+                simulator_context.current_this = None;
+            }
 
             // Bind each method argument.
             for (argument_name, argument_info) in &class_method.get_info().arguments {
-                let argument_type = if !simulator_context.type_exists(&argument_info.argument_type)
-                {
+                let declared_argument_type = if is_static {
+                    types::substitute_self(&argument_info.argument_type, &class_type)
+                } else {
+                    argument_info.argument_type.clone()
+                };
+                let argument_type = if !simulator_context.type_exists(&declared_argument_type) {
                     simulator_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
@@ -2236,14 +2427,14 @@ impl PekoValueSimulator for ClassAST {
                             argument_info.argument_type.end_position.clone(),
                             format!(
                                 "argument type `{}` is not defined. Check the type name and that the type is in scope",
-                                argument_info.argument_type,
+                                declared_argument_type,
                             ),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file(),
                         ));
                     types::PekoType::error_type()
                 } else {
-                    argument_info.argument_type.clone()
+                    declared_argument_type.clone()
                 };
 
                 simulator_context.scoped_variables.insert(

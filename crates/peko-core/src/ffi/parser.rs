@@ -361,7 +361,10 @@ impl Parser {
 /// Map a bare type token to its Peko FFI type.
 fn map_bare_type(name: &str) -> Option<String> {
     let peko = match name {
-        "p_ch" => "char",
+        // A C `char` is a raw 8-bit scalar; the `char` value type wraps an i8.
+        "p_ch" => "i8",
+        "p_i1" => "i1",
+        "p_i8" => "i8",
         "p_i16" => "i16",
         "p_i32" => "i32",
         "p_i64" => "i64",
@@ -369,7 +372,8 @@ fn map_bare_type(name: &str) -> Option<String> {
         "p_f16" => "f16",
         "p_f32" => "f32",
         "p_f64" => "f64",
-        "p_bool" => "bool",
+        // A C boolean is a raw 1-bit scalar; the `bool` value type wraps an i1.
+        "p_bool" => "i1",
         "p_cstr" => "cstr",
         "p_opaque" => "opaque",
         "p_gc_opaque" => "pointer<void>",

@@ -11,20 +11,25 @@
 
 use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMTypeRef, LLVMValueRef};
+use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::types::PekoType;
 
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
-use crate::codegen::builders::prelude::LlvmMemoryBuilder;
+use crate::codegen::builders::prelude::{HighLevelCodegen, LlvmMemoryBuilder};
 use crate::codegen::context::PekoCodegenContext;
 use crate::codegen::cstr;
-use crate::codegen::data_structures::CodegenValue;
+use crate::codegen::data_structures::{CodegenValue, managed_pointer_type};
 
 /// Builders that produce constant `CodegenValue`s for use in IR.
 pub trait LlvmConstantBuilder {
-    /// Create a managed `string` for the given text. The bytes (including the
-    /// `\0` terminator) are GC-allocated in address space 1 and copied in, and
-    /// the returned value carries `PekoType::simple_type("string")`. Use this
-    /// for ordinary string literals.
+    /// Create a managed `string` object for the given text. The bytes
+    /// (including the `\0` terminator) are GC-allocated in address space 1 and
+    /// copied into a managed `pointer<i8>` buffer, then wrapped in a freshly
+    /// allocated std::core `string` object whose `data` field points at the
+    /// buffer and whose `length` field holds the byte count. The returned value
+    /// carries `PekoType::simple_type("string")`. Use this for ordinary string
+    /// literals. When the `string` class is not in scope (the no-std snippet
+    /// harness), the raw buffer is returned typed `string` as a fallback.
     fn create_string(&mut self, string_value: impl ToString) -> CodegenValue;
 
     /// Create a raw `cstr` for the given text: a static, unmanaged C string
@@ -163,16 +168,81 @@ pub trait LlvmConstantBuilder {
         trait_mangled: &str,
         slot_indices: Vec<i32>,
     ) -> CodegenValue;
+
+    /// Emit a class's static `TypeInfo` record as an external constant global
+    /// and return a pointer to it. The record is the runtime-reachable type
+    /// handle erased generics dispatch through:
+    ///
+    /// `{ i32 type_id, ptr parent, ptr descriptor, ptr vtable, ptr itable,
+    /// i32 itable_len }`
+    ///
+    /// * `type_id` is a stable hash of the class mangled name.
+    /// * `parent` points at the parent class's `TypeInfo`, or null at the root.
+    /// * `descriptor` and `vtable` point at the class's existing static
+    ///   descriptor and vtable globals (vtable null when the class has none).
+    /// * `itable` points at a `[itable_len x { i32 trait_id, ptr witness }]`
+    ///   global mapping each implemented trait's id to its witness table, or
+    ///   null when the class implements no traits.
+    ///
+    /// The record and itable are static data, never GC-allocated or traced.
+    /// Reused by name if already emitted in this module. This emits the data;
+    /// dispatch through it is wired separately.
+    fn emit_type_info(
+        &mut self,
+        mangled_name: &str,
+        parent_mangled: Option<&str>,
+        descriptor: &CodegenValue,
+        vtable: Option<&CodegenValue>,
+        itable_entries: Vec<(i32, CodegenValue)>,
+    ) -> CodegenValue;
+
+    /// Get a pointer to a class's `TypeInfo` global, declaring it as an external
+    /// reference when it is not already present in this module. Used at object
+    /// allocation to store the handle at offset-0, and wherever dispatch needs
+    /// the runtime type. The owning module emits the definition via
+    /// `emit_type_info`; the linker resolves references here to it.
+    fn reference_type_info(&mut self, mangled_name: &str) -> CodegenValue;
+
+    /// The LLVM struct type of a `TypeInfo` record: `{ i32, ptr, ptr, ptr, ptr,
+    /// i32 }`. The fields are type_id, parent, descriptor, vtable, itable, and
+    /// itable_len. Used to GEP into a `TypeInfo` at a dispatch site.
+    fn type_info_struct_type(&mut self) -> LLVMTypeRef;
+}
+
+/// A stable 32-bit id for a mangled type or trait name (FNV-1a). Used as the
+/// `type_id` / `trait_id` so an itable entry emitted in one module matches the
+/// id a dispatch site computes in another, with no global counter.
+pub fn stable_type_id(mangled_name: &str) -> i32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in mangled_name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash as i32
+}
+
+/// The dispatch id of a trait, identifying it by module path and name with its
+/// generic arguments dropped. A class that implements `Equals<string>` and a
+/// bound written `impl Equals` name the same trait, so both must hash to the
+/// same itable id; the type argument does not take part in the identity.
+pub fn trait_dispatch_id(trait_type: &peko_core::types::PekoType) -> i32 {
+    let mut identity = trait_type.clone();
+    if !identity.is_generic_param() && !identity.is_function() {
+        identity.generics_mut().clear();
+    }
+    stable_type_id(&identity.to_mangled_string())
 }
 
 impl LlvmConstantBuilder for PekoCodegenContext {
     fn create_string(&mut self, string_value: impl ToString) -> CodegenValue {
-        // A `string` is a managed (address space 1) char buffer. Emit the
-        // literal bytes as a static raw template, GC-allocate a managed buffer
-        // sized to hold them (including the trailing NUL), and copy the bytes
-        // in. The result is a real managed object the collector can relocate.
+        // A `string` is the std::core object `{ data: pointer<i8>, length: i64 }`.
+        // Emit the literal bytes as a static raw template, GC-allocate a managed
+        // buffer sized to hold them (including the trailing NUL), copy the bytes
+        // in, then wrap the buffer in a fresh `string` object. The buffer and
+        // the object are real managed allocations the collector can relocate.
         let text = string_value.to_string();
-        let byte_len = text.len() + 1; // include the trailing '\0'
+        let char_len = text.len(); // logical byte count, excluding the NUL
+        let byte_len = char_len + 1; // include the trailing '\0'
 
         // 1. Static raw template: an address-space-0 i8* to the literal bytes.
         //    An empty literal uses an explicit NUL global so the template
@@ -207,12 +277,9 @@ impl LlvmConstantBuilder for PekoCodegenContext {
             .llvm_module;
         self.module_context.step_forward(post_stack);
         let byte_count = self.create_constant_int(byte_len as i32);
+        let buffer_type = managed_pointer_type(PekoType::simple_type("i8"));
         let buffer = self
-            .allocate_managed_object_sized(
-                &array_descriptor,
-                &byte_count,
-                &PekoType::simple_type("string"),
-            )
+            .allocate_managed_object_sized(&array_descriptor, &byte_count, &buffer_type)
             .unwrap_or_else(|| self.create_error_value());
 
         // 3. memcpy the literal bytes from the raw template (as0) into the
@@ -270,6 +337,22 @@ impl LlvmConstantBuilder for PekoCodegenContext {
                 memcpy_args.len() as u32,
                 c"".as_ptr(),
             );
+        }
+
+        // 4. Wrap the buffer in a `string` object. Allocate the std::core
+        //    `string` class, store the managed buffer into `data` and the byte
+        //    count into `length`. These initializing stores go into a fresh,
+        //    not-yet-reachable object. When the class is out of scope (no-std
+        //    snippet harness) fall back to the raw buffer typed `string`.
+        let string_type = PekoType::simple_type("string");
+        if let Some(string_class) = self.get_class_by_type(&string_type)
+            && let Some(string_object) = self.allocate_class(&string_class)
+        {
+            let buffer_value = CodegenValue::new(buffer.llvm_value, buffer_type);
+            let length_value = self.create_constant_int64(char_len as i32);
+            self.set_object_attribute(&string_object, "data", &buffer_value);
+            self.set_object_attribute(&string_object, "length", &length_value);
+            return string_object;
         }
 
         CodegenValue::new(buffer.llvm_value, PekoType::simple_type("string"))
@@ -728,8 +811,168 @@ impl LlvmConstantBuilder for PekoCodegenContext {
             let g = core::LLVMAddGlobal(module, array_type, global_name.as_ptr());
             core::LLVMSetInitializer(g, witness_array);
             core::LLVMSetGlobalConstant(g, 1);
-            core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMPrivateLinkage);
+            // External linkage so a trait cast (`x as Trait`) in another module
+            // can reference this witness. The name is unique per (class, trait)
+            // and emitted once in the class's own module, so there is one
+            // definition to resolve against.
+            core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
             g
+        };
+
+        CodegenValue::new(global, PekoType::simple_type("opaque"))
+    }
+
+    fn emit_type_info(
+        &mut self,
+        mangled_name: &str,
+        parent_mangled: Option<&str>,
+        descriptor: &CodegenValue,
+        vtable: Option<&CodegenValue>,
+        itable_entries: Vec<(i32, CodegenValue)>,
+    ) -> CodegenValue {
+        let i32_type = unsafe { core::LLVMInt32Type() };
+        let ptr_type = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 0) };
+        let typeinfo_type = self.type_info_struct_type();
+        // ITableEntry = { i32 trait_id, ptr witness }.
+        let mut entry_field_types = [i32_type, ptr_type];
+        let entry_type = unsafe {
+            core::LLVMStructType(entry_field_types.as_mut_ptr(), entry_field_types.len() as u32, 0)
+        };
+
+        let post_stack = self.module_context.step_back_generics();
+        let module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        self.module_context.step_forward(post_stack);
+
+        let global_name = cstr(format!("peko_typeinfo_{mangled_name}"));
+
+        // The itable global, or a null pointer when the class implements no
+        // traits.
+        let itable_count = itable_entries.len();
+        let itable_pointer = if itable_entries.is_empty() {
+            unsafe { core::LLVMConstPointerNull(ptr_type) }
+        } else {
+            let mut entry_consts = itable_entries
+                .iter()
+                .map(|(trait_id, witness)| {
+                    let mut fields =
+                        [unsafe { core::LLVMConstInt(i32_type, *trait_id as u64, 1) }, witness.llvm_value];
+                    unsafe {
+                        core::LLVMConstNamedStruct(entry_type, fields.as_mut_ptr(), fields.len() as u32)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let itable_array = unsafe {
+                core::LLVMConstArray2(entry_type, entry_consts.as_mut_ptr(), entry_consts.len() as u64)
+            };
+            let itable_array_type = unsafe { core::LLVMArrayType2(entry_type, itable_count as u64) };
+            let itable_name = cstr(format!("peko_itable_{mangled_name}"));
+            unsafe {
+                let g = core::LLVMAddGlobal(module, itable_array_type, itable_name.as_ptr());
+                core::LLVMSetInitializer(g, itable_array);
+                core::LLVMSetGlobalConstant(g, 1);
+                core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMPrivateLinkage);
+                g
+            }
+        };
+
+        // The parent's TypeInfo pointer (declared external when not already in
+        // this module, so the linker resolves it to the owner's definition), or
+        // null at the root.
+        let parent_pointer = match parent_mangled {
+            Some(parent) => {
+                let parent_name = cstr(format!("peko_typeinfo_{parent}"));
+                unsafe {
+                    let existing = core::LLVMGetNamedGlobal(module, parent_name.as_ptr());
+                    if existing.is_null() {
+                        let g = core::LLVMAddGlobal(module, typeinfo_type, parent_name.as_ptr());
+                        core::LLVMSetGlobalConstant(g, 1);
+                        core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
+                        g
+                    } else {
+                        existing
+                    }
+                }
+            }
+            None => unsafe { core::LLVMConstPointerNull(ptr_type) },
+        };
+
+        let vtable_pointer = vtable
+            .map(|value| value.llvm_value)
+            .unwrap_or_else(|| unsafe { core::LLVMConstPointerNull(ptr_type) });
+
+        let mut fields = [
+            unsafe { core::LLVMConstInt(i32_type, stable_type_id(mangled_name) as u64, 1) },
+            parent_pointer,
+            descriptor.llvm_value,
+            vtable_pointer,
+            itable_pointer,
+            unsafe { core::LLVMConstInt(i32_type, itable_count as u64, 1) },
+        ];
+        let typeinfo_const = unsafe {
+            core::LLVMConstNamedStruct(typeinfo_type, fields.as_mut_ptr(), fields.len() as u32)
+        };
+
+        // External linkage so a dispatch site in another module can reference
+        // this same handle; the owning module supplies the initializer. Reuse
+        // and upgrade an existing declaration rather than emitting a duplicate.
+        let global = unsafe {
+            let existing = core::LLVMGetNamedGlobal(module, global_name.as_ptr());
+            if !existing.is_null() {
+                core::LLVMSetInitializer(existing, typeinfo_const);
+                core::LLVMSetGlobalConstant(existing, 1);
+                core::LLVMSetLinkage(existing, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
+                existing
+            } else {
+                let g = core::LLVMAddGlobal(module, typeinfo_type, global_name.as_ptr());
+                core::LLVMSetInitializer(g, typeinfo_const);
+                core::LLVMSetGlobalConstant(g, 1);
+                core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
+                g
+            }
+        };
+
+        CodegenValue::new(global, PekoType::simple_type("opaque"))
+    }
+
+    fn type_info_struct_type(&mut self) -> LLVMTypeRef {
+        let i32_type = unsafe { core::LLVMInt32Type() };
+        let ptr_type = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 0) };
+        let mut field_types = [i32_type, ptr_type, ptr_type, ptr_type, ptr_type, i32_type];
+        unsafe { core::LLVMStructType(field_types.as_mut_ptr(), field_types.len() as u32, 0) }
+    }
+
+    fn reference_type_info(&mut self, mangled_name: &str) -> CodegenValue {
+        let typeinfo_type = self.type_info_struct_type();
+
+        let post_stack = self.module_context.step_back_generics();
+        let module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .get_top_level()
+            .unwrap()
+            .llvm_module;
+        self.module_context.step_forward(post_stack);
+
+        let global_name = cstr(format!("peko_typeinfo_{mangled_name}"));
+        let global = unsafe {
+            let existing = core::LLVMGetNamedGlobal(module, global_name.as_ptr());
+            if existing.is_null() {
+                let g = core::LLVMAddGlobal(module, typeinfo_type, global_name.as_ptr());
+                core::LLVMSetGlobalConstant(g, 1);
+                core::LLVMSetLinkage(g, llvm_sys_180::LLVMLinkage::LLVMExternalLinkage);
+                g
+            } else {
+                existing
+            }
         };
 
         CodegenValue::new(global, PekoType::simple_type("opaque"))

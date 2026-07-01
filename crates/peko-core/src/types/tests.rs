@@ -235,9 +235,13 @@ fn depth_excludes_predicates_from_matching() {
 }
 
 #[test]
-fn is_pointer_includes_string_and_opaque() {
-    assert!(PekoType::simple_type("string").is_pointer());
+fn is_pointer_covers_raw_pointer_forms_not_string() {
+    // `opaque`, `cstr`, and `pointer` are raw pointer forms. `string` is a
+    // std::core class (impl Index/Equals/Hash), not a builtin pointer.
     assert!(PekoType::simple_type("opaque").is_pointer());
+    assert!(PekoType::simple_type("cstr").is_pointer());
+    assert!(PekoType::simple_type("pointer").is_pointer());
+    assert!(!PekoType::simple_type("string").is_pointer());
     assert!(!PekoType::simple_type("i32").is_pointer());
 }
 

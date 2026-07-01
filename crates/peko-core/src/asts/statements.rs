@@ -13,7 +13,7 @@ use super::data_structures::{ConditionBody, PositionData, PositionedValue, Spann
 /// A platform-specific block.
 ///
 /// `architecture_test` distinguishes `arch { ... }` (architecture filter)
-/// from `platform { … }` (operating-system filter). `targets` lists the
+/// from `platform { ... }` (operating-system filter). `targets` lists the
 /// platform or architecture names the block applies to; `body` is the
 /// statements executed when at least one target matches.
 #[derive(Clone, new)]
@@ -38,7 +38,7 @@ impl Spanned for PlatformStatementAST {
 /// A variable reassignment: `x = value`, `x += value`, etc.
 ///
 /// `assignment_operator` is `None` for plain `=`, and `Some("+")`,
-/// `Some("-")`, etc. for compound assignments (`+=`, `-=`, …).
+/// `Some("-")`, etc. for compound assignments (`+=`, `-=`, ...).
 ///
 /// `VariableReassignmentAST` derives its span from its children: start from
 /// the variable reference, end from the assigned value.

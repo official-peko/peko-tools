@@ -102,6 +102,20 @@ impl LlvmTypeBuilder for PekoCodegenContext {
 
         let fully_qualified_type = self.expand_type(type1)?;
 
+        // An erased generic parameter lowers to a thin managed (address-space-1)
+        // object pointer: every instantiation shares one 8-byte slot, and its
+        // bounds drive dispatch at the call site. Extra depth wraps it in raw
+        // (address-space-0) pointers.
+        if fully_qualified_type.is_generic_param() {
+            let mut base = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 1) };
+            for _ in
+                0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth)
+            {
+                base = unsafe { core::LLVMPointerType(base, 0) };
+            }
+            return Some(base);
+        }
+
         // Closure types: lower to a struct containing
         // { closure_context: managed i8*, function: <function_pointer> }.
         if fully_qualified_type.is_closure() {
@@ -232,11 +246,9 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         let mut base_llvm_type = unsafe {
             if fully_qualified_type.declutter().is_builtin_type() {
                 match fully_qualified_type.declutter().to_string().as_str() {
-                    // `string` is a managed char buffer in address space 1
-                    // (GC-allocated, relocatable). `cstr` is the raw,
-                    // unmanaged char* in address space 0 (a C string), as is
-                    // `opaque`.
-                    "string" => core::LLVMPointerType(core::LLVMInt8Type(), 1),
+                    // `cstr` is the raw, unmanaged char* in address space 0 (a C
+                    // string), as is `opaque`. `string` is not a builtin: it is
+                    // the std::core object and lowers through the class branch.
                     "cstr" | "opaque" => core::LLVMPointerType(core::LLVMInt8Type(), 0),
                     "i32" => core::LLVMInt32Type(),
                     "i16" => core::LLVMInt16Type(),
@@ -288,13 +300,14 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             return false;
         }
 
-        // `Pointer<T>` and the builtin `string` are managed address-space-1
-        // buffers; closures are managed {context, fn} values; class instances
-        // are managed. `string` MUST be included here (it lowers to
-        // addrspace(1)) so that string-typed fields are traced and relocated by
-        // the collector (matching is_managed_pointer, which already lists it).
+        // `Pointer<T>` is a managed address-space-1 buffer; closures are managed
+        // {context, fn} values; class instances are managed. `string` is now the
+        // std::core object, so it is caught by the class check below; the
+        // explicit name also keeps the no-std fallback buffer managed.
+        // An erased generic parameter is a thin managed object pointer.
         type1.name() == "pointer"
             || type1.name() == "string"
+            || type1.is_generic_param()
             || type1.is_closure()
             || self.get_class_by_type(type1).is_some()
     }
@@ -367,13 +380,13 @@ impl LlvmTypeBuilder for PekoCodegenContext {
                 return core::LLVMStructType(fields.as_mut_ptr(), 2, 0);
             }
             // Pointer-shaped builtins, handled explicitly so they never route
-            // through get_llvm_type: `string` is a managed (as1) char-buffer
-            // pointer; `cstr`/`opaque` are raw (as0) pointers. All 8 bytes.
-            // `void` has no size; it must never reach LLVMABISizeOfType (that is
-            // the "Invalid size request" error). A bare void field cannot be
-            // stored anyway, so fall back to an 8-byte pointer placeholder.
+            // through get_llvm_type: `cstr`/`opaque` are raw (as0) pointers,
+            // 8 bytes. `void` has no size; it must never reach LLVMABISizeOfType
+            // (that is the "Invalid size request" error). A bare void field
+            // cannot be stored anyway, so fall back to an 8-byte pointer
+            // placeholder. `string` is the std::core object and lowers to a
+            // managed (as1) pointer through the final fall-through below.
             match resolved.declutter().to_string().as_str() {
-                "string" => return core::LLVMPointerType(core::LLVMInt8Type(), 1),
                 "cstr" | "opaque" => return core::LLVMPointerType(core::LLVMInt8Type(), 0),
                 "void" => return core::LLVMPointerType(core::LLVMInt8Type(), 0),
                 _ => {}
