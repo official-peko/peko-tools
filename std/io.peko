@@ -1,3 +1,0 @@
-//! std::io: console input and output.
-//!
-//! The V2 home of the V1 console package. Used through the std::io prefix.

@@ -441,7 +441,11 @@ impl PekoType {
         index_forward: &mut usize,
     ) -> bool {
         // Eat a leading `const` modifier.
-        if parser.tokens.get_token_forward(*index_forward).equals("const") {
+        if parser
+            .tokens
+            .get_token_forward(*index_forward)
+            .equals("const")
+        {
             parser.tokens.index_increase_index(index_forward);
         }
 
@@ -834,10 +838,7 @@ impl PekoType {
             return false;
         }
 
-        matches!(
-            self.name(),
-            "i32" | "i16" | "i128" | "i64" | "i1" | "i8"
-        )
+        matches!(self.name(), "i32" | "i16" | "i128" | "i64" | "i1" | "i8")
     }
 
     /// Returns `true` if this is a base type (a built-in primitive, a
@@ -920,8 +921,18 @@ impl PekoType {
 
         matches!(
             self.name(),
-            "i32" | "i64" | "i16" | "i128" | "f32" | "f64" | "f16" | "cstr" | "opaque" | "void"
-                | "i1" | "i8"
+            "i32"
+                | "i64"
+                | "i16"
+                | "i128"
+                | "f32"
+                | "f64"
+                | "f16"
+                | "cstr"
+                | "opaque"
+                | "void"
+                | "i1"
+                | "i8"
         )
     }
 
@@ -1018,8 +1029,11 @@ impl PekoType {
             final_type.push_str("closure");
             final_type.push_str(PAREN_OPEN);
 
-            let mangled_args: Vec<String> =
-                self.generics().iter().map(PekoType::to_mangled_string).collect();
+            let mangled_args: Vec<String> = self
+                .generics()
+                .iter()
+                .map(PekoType::to_mangled_string)
+                .collect();
             final_type.push_str(&mangled_args.join(TYPE_SEPERATOR));
 
             final_type.push_str(PAREN_CLOSE);
@@ -1034,8 +1048,11 @@ impl PekoType {
             final_type.push_str(PAREN_CLOSE);
             final_type.push_str(PAREN_OPEN);
 
-            let arg_strs: Vec<String> =
-                self.generics().iter().map(PekoType::to_mangled_string).collect();
+            let arg_strs: Vec<String> = self
+                .generics()
+                .iter()
+                .map(PekoType::to_mangled_string)
+                .collect();
             final_type.push_str(&arg_strs.join(TYPE_SEPERATOR));
 
             final_type.push_str(PAREN_CLOSE);
@@ -1050,8 +1067,11 @@ impl PekoType {
             if !self.generics().is_empty() {
                 final_type.push_str(GENERIC_SEPERATOR_LEFT);
 
-                let mangled_generics: Vec<String> =
-                    self.generics().iter().map(PekoType::to_mangled_string).collect();
+                let mangled_generics: Vec<String> = self
+                    .generics()
+                    .iter()
+                    .map(PekoType::to_mangled_string)
+                    .collect();
                 final_type.push_str(&mangled_generics.join(TYPE_SEPERATOR));
 
                 final_type.push_str(GENERIC_SEPERATOR_RIGHT);
@@ -1196,7 +1216,10 @@ fn eat_depth_suffixes(parser: &mut parser::PekoParser, index_forward: &mut usize
     while !parser.tokens.finished()
         && parser.tokens.get_index() + *index_forward < parser.tokens.length()
         && ((parser.tokens.get_token_forward(*index_forward).equals("[")
-            && parser.tokens.get_token_forward(*index_forward + 1).equals("]"))
+            && parser
+                .tokens
+                .get_token_forward(*index_forward + 1)
+                .equals("]"))
             || parser.tokens.get_token_forward(*index_forward).equals("?"))
     {
         if parser.tokens.get_token_forward(*index_forward).equals("[") {

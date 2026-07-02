@@ -84,6 +84,9 @@ macro_rules! dispatch_build_value {
         match $self {
             $(PekoAST::$variant(ast) => ast.build_value($ctx),)*
             PekoAST::Placeholder(_) => $ctx.create_error_value(),
+            // Comments are captured only for formatting; ordinary compilation
+            // never routes one here.
+            PekoAST::Comment(_) => $ctx.create_error_value(),
         }
     };
 }

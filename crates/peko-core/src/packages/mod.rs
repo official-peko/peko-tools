@@ -59,7 +59,10 @@ impl PekoPackageIndex {
         local_peko_root: Option<impl AsRef<Path>>,
     ) -> PekoResult<Self> {
         let mut modules = HashMap::new();
-        scan_source_root(&registry_source_root(global_peko_root.as_ref()), &mut modules);
+        scan_source_root(
+            &registry_source_root(global_peko_root.as_ref()),
+            &mut modules,
+        );
         if let Some(local) = local_peko_root {
             scan_source_root(&registry_source_root(local.as_ref()), &mut modules);
         }
@@ -151,7 +154,11 @@ fn discover_package(name: &str, package_dir: &Path) -> Option<ExternalModuleInfo
     if versions.is_empty() {
         return None;
     }
-    Some(ExternalModuleInfo::new(name.to_owned(), description, versions))
+    Some(ExternalModuleInfo::new(
+        name.to_owned(),
+        description,
+        versions,
+    ))
 }
 
 /// Build an [`ExternalModuleInfo`] for a single version directory.

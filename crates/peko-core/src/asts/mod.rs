@@ -40,6 +40,30 @@ pub struct PlaceholderAST {
     pub value: String,
 }
 
+/// A source comment (`// ...`), captured as a first-class node so a formatter
+/// can reproduce it. The parser only emits these when comment capture is
+/// requested; ordinary compilation still skips comments, so the simulator and
+/// code generator never receive one.
+///
+/// The `text` is the whole comment line including the leading `//` marker, with
+/// surrounding indentation and the trailing newline stripped.
+#[derive(Clone, new)]
+pub struct CommentAST {
+    pub text: String,
+    pub start: PositionData,
+    pub end: PositionData,
+}
+
+impl Spanned for CommentAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
 /// The structural representation of any Pekoscript AST.
 ///
 /// Each variant wraps a concrete AST type defined in one of the four
@@ -99,6 +123,9 @@ pub enum PekoAST {
 
     // Placeholder
     Placeholder(PlaceholderAST),
+
+    // Comment (only present when comment capture is requested, e.g. formatting)
+    Comment(CommentAST),
 }
 
 impl Spanned for PekoAST {
@@ -156,6 +183,9 @@ impl Spanned for PekoAST {
 
             // Placeholder (synthetic, no real span).
             Self::Placeholder(_) => placeholder_position(),
+
+            // Comment carries a real span.
+            Self::Comment(ast) => ast.get_start(),
         }
     }
 
@@ -213,6 +243,9 @@ impl Spanned for PekoAST {
 
             // Placeholder (synthetic, no real span).
             Self::Placeholder(_) => placeholder_position(),
+
+            // Comment carries a real span.
+            Self::Comment(ast) => ast.get_end(),
         }
     }
 }

@@ -1,4 +1,0 @@
-//! std::collections: the standard collection types.
-//!
-//! Holds the array, map, and set types built on the core object model.
-//! Auto-imported and used bare.

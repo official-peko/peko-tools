@@ -104,7 +104,11 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         for version in &modules[*name].versions {
             let entry = version.source_root.join(&version.entry_file);
             let status = if entry.is_file() { "ok" } else { "MISSING" };
-            println!("  {name} {} -> {} [{status}]", version.version, entry.display());
+            println!(
+                "  {name} {} -> {} [{status}]",
+                version.version,
+                entry.display()
+            );
         }
     }
 

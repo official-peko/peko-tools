@@ -27,8 +27,9 @@ use indexmap::IndexMap;
 use crate::asts::data_structures::{DocInfo, PositionData, PositionedValue, VisibilityData};
 use crate::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use crate::execution::data_structures::{
-    ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassVirtualTable,
-    EnumDefinition, ExecutionFunction, ExecutionModule, ExecutionVariable, TraitDefinition,
+    EnumDefinition, ExecutionArgument, ExecutionClass, ExecutionClassAttribute,
+    ExecutionClassVirtualTable, ExecutionFunction, ExecutionModule, ExecutionVariable,
+    TraitDefinition,
 };
 use crate::types::{self, PekoType};
 
@@ -382,7 +383,6 @@ impl
     }
 }
 
-
 /// A single Pekoscript module which holds every declaration that lives at
 /// this module's scope, plus links to parent / submodules / importers.
 #[derive(Clone, new)]
@@ -664,6 +664,14 @@ pub struct ScopeClass {
     /// tooling can show constructor signatures without descending into
     /// the full method table.
     pub first_constructor_arguments: IndexMap<String, PekoType>,
+
+    /// Base names of the superclasses and traits this class derives from
+    /// (`from` and `impl` clauses), in declaration order.
+    pub parents: Vec<String>,
+
+    /// The class's own method signatures, surfaced so tooling can offer them as
+    /// override stubs in a deriving class.
+    pub methods: Vec<ScopeMethodSignature>,
 }
 
 /// A module as surfaced to tooling.
@@ -701,6 +709,45 @@ pub struct ScopeEnum {
     pub variants: Vec<String>,
 }
 
+/// One method slot of a trait, kept in a form ready for tooling to render an
+/// override stub.
+#[derive(Clone, new)]
+pub struct ScopeMethodSignature {
+    /// The method name.
+    pub name: String,
+
+    /// `(argument_name, argument_type)` pairs, in declaration order.
+    pub arguments: Vec<(String, String)>,
+
+    /// The declared return type, rendered as a string. `void` when none was
+    /// declared.
+    pub return_type: String,
+
+    /// A `static` slot is called at the type level and has no `this` receiver.
+    pub is_static: bool,
+
+    /// Whether the trait supplies a default body for this slot.
+    pub has_default: bool,
+}
+
+#[derive(Clone, new)]
+pub struct ScopeTrait {
+    /// Doc-info comment block preceding the declaration, if any.
+    pub docinfo: Option<DocInfo>,
+
+    /// Trait name.
+    pub name: String,
+
+    /// Start of the declaration's span.
+    pub definition_start: PositionData,
+
+    /// End of the declaration's span.
+    pub definition_end: PositionData,
+
+    /// The trait's method slots, in declaration order.
+    pub methods: Vec<ScopeMethodSignature>,
+}
+
 /// Tagged-union view of any kind of scoped symbol.
 ///
 /// Each variant pairs the symbol-specific info with the visibility flags
@@ -722,6 +769,9 @@ pub enum ScopeSymbol {
 
     /// An enum.
     Enum(ScopeEnum, VisibilityData),
+
+    /// A trait.
+    Trait(ScopeTrait, VisibilityData),
 }
 
 impl ScopeSymbol {
@@ -757,6 +807,16 @@ impl ScopeSymbol {
             }
             Self::Module(_, _) => "module",
             Self::Enum(_, _) => "enum",
+            Self::Trait(_, _) => "trait",
+        }
+    }
+
+    /// Returns this symbol's trait view if it's a trait, else `None`.
+    #[must_use]
+    pub fn as_trait(&self) -> Option<ScopeTrait> {
+        match self {
+            Self::Trait(symbol, _) => Some(symbol.clone()),
+            _ => None,
         }
     }
 
@@ -796,6 +856,15 @@ impl ScopeSymbol {
         }
     }
 
+    /// Returns this symbol's enum view if it's an enum, else `None`.
+    #[must_use]
+    pub fn as_enum(&self) -> Option<ScopeEnum> {
+        match self {
+            Self::Enum(symbol, _) => Some(symbol.clone()),
+            _ => None,
+        }
+    }
+
     /// Returns the start position of this symbol's declaration span.
     #[must_use]
     pub fn get_start(&self) -> PositionData {
@@ -805,6 +874,7 @@ impl ScopeSymbol {
             Self::Class(scoped, _) => scoped.definition_start.clone(),
             Self::Module(scoped, _) => scoped.definition_start.clone(),
             Self::Enum(scoped, _) => scoped.definition_start.clone(),
+            Self::Trait(scoped, _) => scoped.definition_start.clone(),
         }
     }
 
@@ -817,6 +887,7 @@ impl ScopeSymbol {
             Self::Class(scoped, _) => scoped.definition_end.clone(),
             Self::Module(scoped, _) => scoped.definition_end.clone(),
             Self::Enum(scoped, _) => scoped.definition_end.clone(),
+            Self::Trait(scoped, _) => scoped.definition_end.clone(),
         }
     }
 
@@ -829,6 +900,7 @@ impl ScopeSymbol {
             Self::Class(_, vis) => vis.clone(),
             Self::Module(_, vis) => vis.clone(),
             Self::Enum(_, vis) => vis.clone(),
+            Self::Trait(_, vis) => vis.clone(),
         }
     }
 
@@ -842,6 +914,7 @@ impl ScopeSymbol {
             Self::Class(class, _) => class.docinfo.clone(),
             Self::Module(module, _) => module.docinfo.clone(),
             Self::Enum(scoped, _) => scoped.docinfo.clone(),
+            Self::Trait(scoped, _) => scoped.docinfo.clone(),
         }
     }
 
@@ -854,6 +927,7 @@ impl ScopeSymbol {
             Self::Class(scoped, _) => scoped.name.clone(),
             Self::Module(scoped, _) => scoped.name.clone(),
             Self::Enum(scoped, _) => scoped.name.clone(),
+            Self::Trait(scoped, _) => scoped.name.clone(),
         }
     }
 }

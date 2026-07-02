@@ -257,7 +257,10 @@ fn pick_version(
         if !compiler_satisfies(entry, compiler) {
             continue;
         }
-        if best.as_ref().is_none_or(|(best_version, _)| version > *best_version) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_version, _)| version > *best_version)
+        {
             best = Some((version, entry));
         }
     }
@@ -300,7 +303,9 @@ fn pick_version(
 /// A missing or unparseable requirement is treated as no constraint.
 fn compiler_satisfies(entry: &IndexEntry, compiler: &Version) -> bool {
     match entry.min_compiler.as_deref() {
-        Some(text) => VersionReq::parse(text).map(|req| req.matches(compiler)).unwrap_or(true),
+        Some(text) => VersionReq::parse(text)
+            .map(|req| req.matches(compiler))
+            .unwrap_or(true),
         None => true,
     }
 }

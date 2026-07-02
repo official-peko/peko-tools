@@ -111,8 +111,7 @@ fn tokenize(source: &str) -> Vec<Token> {
             c if c.is_alphabetic() || c == '_' => {
                 let start_column = column;
                 let mut ident = String::new();
-                while index < chars.len()
-                    && (chars[index].is_alphanumeric() || chars[index] == '_')
+                while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_')
                 {
                     ident.push(chars[index]);
                     index += 1;
@@ -142,7 +141,13 @@ fn tokenize(source: &str) -> Vec<Token> {
 }
 
 /// Push a single-character token and advance.
-fn push_simple(tokens: &mut Vec<Token>, tok: Tok, line: usize, index: &mut usize, column: &mut usize) {
+fn push_simple(
+    tokens: &mut Vec<Token>,
+    tok: Tok,
+    line: usize,
+    index: &mut usize,
+    column: &mut usize,
+) {
     tokens.push(Token {
         tok,
         line,
@@ -273,7 +278,9 @@ impl Parser {
         }
 
         if self.check(&Tok::Star) {
-            return Err(self.error("raw pointers are not allowed; use p_gc(T), p_gc_opaque, or p_opaque"));
+            return Err(
+                self.error("raw pointers are not allowed; use p_gc(T), p_gc_opaque, or p_opaque")
+            );
         }
 
         match map_bare_type(&name) {
@@ -285,7 +292,13 @@ impl Parser {
     /// `true` if the next two tokens are `void )`, the C empty-parameter form.
     fn is_void_param_list(&self) -> bool {
         matches!(self.tokens.get(self.position), Some(Token { tok: Tok::Ident(name), .. }) if name == "void")
-            && matches!(self.tokens.get(self.position + 1), Some(Token { tok: Tok::RParen, .. }))
+            && matches!(
+                self.tokens.get(self.position + 1),
+                Some(Token {
+                    tok: Tok::RParen,
+                    ..
+                })
+            )
     }
 
     fn check(&self, tok: &Tok) -> bool {

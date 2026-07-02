@@ -108,9 +108,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
         // (address-space-0) pointers.
         if fully_qualified_type.is_generic_param() {
             let mut base = unsafe { core::LLVMPointerType(core::LLVMInt8Type(), 1) };
-            for _ in
-                0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth)
-            {
+            for _ in 0..(fully_qualified_type.array_depth + fully_qualified_type.reference_depth) {
                 base = unsafe { core::LLVMPointerType(base, 0) };
             }
             return Some(base);
@@ -427,11 +425,7 @@ impl LlvmTypeBuilder for PekoCodegenContext {
             } as usize;
         }
 
-        if !base_type
-            || type1.is_function()
-            || type1.array_depth > 0
-            || type1.reference_depth > 0
-        {
+        if !base_type || type1.is_function() || type1.array_depth > 0 || type1.reference_depth > 0 {
             return 8;
         }
 

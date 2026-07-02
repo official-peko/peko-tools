@@ -26,8 +26,8 @@ use llvm_sys_180::core;
 use llvm_sys_180::prelude::LLVMModuleRef;
 use llvm_sys_180::target_machine::LLVMTargetRef;
 use peko_core::asts::data_structures::{PositionedValue, UnpackItem};
-use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::execution::ExecutionContextAlgorithms;
+use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::target::{OperatingSystem, PekoTarget};
 use peko_core::types::PekoType;
 
@@ -236,7 +236,10 @@ impl ModuleManager for PekoCodegenContext {
             if to.read().unwrap().traits.contains_key(&trait_name) {
                 continue;
             }
-            to.write().unwrap().traits.insert(trait_name, trait_definition);
+            to.write()
+                .unwrap()
+                .traits
+                .insert(trait_name, trait_definition);
         }
 
         // Import enums. Like traits, an enum is stored by value and resolved by

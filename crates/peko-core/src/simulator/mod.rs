@@ -99,6 +99,10 @@ impl PekoValueSimulator for PekoAST {
                             ))
                         }
                     }
+
+                    // Comments are captured only for formatting and carry no
+                    // runtime meaning. Ordinary compilation never reaches here.
+                    PekoAST::Comment(_) => value::SimulatorValue::Null,
                 }
             };
         }

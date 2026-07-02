@@ -8,10 +8,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::RegistryError;
 use super::cache::Cache;
 use super::index::{self, IndexEntry};
 use super::pack;
-use super::RegistryError;
 
 /// The registry base URL used until the platform ships a real one.
 // TODO(platform): point PEKO_REGISTRY_URL at the live R2/CDN base; this

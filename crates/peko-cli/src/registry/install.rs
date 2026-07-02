@@ -54,8 +54,14 @@ pub async fn update(
         match package.source {
             LockSource::Registry => {
                 let checksum = package.checksum.clone().unwrap_or_default();
-                fetch_registry(&client, &package.name, &package.version, &checksum, progress)
-                    .await?;
+                fetch_registry(
+                    &client,
+                    &package.name,
+                    &package.version,
+                    &checksum,
+                    progress,
+                )
+                .await?;
                 locked.push(LockedPackage {
                     name: package.name,
                     version: package.version,
@@ -113,7 +119,14 @@ async fn fetch_locked(
     for package in &lockfile.packages {
         if package.source == LockSource::Registry {
             let checksum = package.checksum.clone().unwrap_or_default();
-            fetch_registry(&client, &package.name, &package.version, &checksum, progress).await?;
+            fetch_registry(
+                &client,
+                &package.name,
+                &package.version,
+                &checksum,
+                progress,
+            )
+            .await?;
         }
     }
     Ok(())

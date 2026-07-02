@@ -22,8 +22,9 @@ use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
 use peko_core::asts::declarations::{ClassAST, FunctionDeclarationAST};
 use peko_core::execution::data_structures::{
-    EnumDefinition, ExecutionArgument, ExecutionClass, ExecutionClassAttribute, ExecutionClassVirtualTable,
-    ExecutionFunction, ExecutionModule, ExecutionValue, ExecutionVariable, TraitDefinition,
+    EnumDefinition, ExecutionArgument, ExecutionClass, ExecutionClassAttribute,
+    ExecutionClassVirtualTable, ExecutionFunction, ExecutionModule, ExecutionValue,
+    ExecutionVariable, TraitDefinition,
 };
 use peko_core::target::{OperatingSystem, PekoTarget};
 use peko_core::types::PekoType;

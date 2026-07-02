@@ -319,9 +319,8 @@ impl PekoCodegenContext {
         // Reuse an existing declaration of this symbol in the module rather than
         // adding a second one (LLVM would rename the duplicate), so declaring on
         // demand is idempotent.
-        let existing = unsafe {
-            core::LLVMGetNamedFunction(llvm_module, function_qualified_name.as_ptr())
-        };
+        let existing =
+            unsafe { core::LLVMGetNamedFunction(llvm_module, function_qualified_name.as_ptr()) };
         if !existing.is_null() {
             return CodegenValue::new(existing, function_type);
         }
@@ -545,6 +544,10 @@ impl
 
     fn get_root_folder_mut(&mut self) -> &mut PathBuf {
         &mut self.root_folder
+    }
+
+    fn get_diagnostics_mut(&mut self) -> &mut peko_core::diagnostics::DiagnosticList {
+        &mut self.diagnostics
     }
 
     /// Generates a generic function with the provided type parameters.
@@ -818,6 +821,17 @@ impl
             return None;
         }
 
+        // Enforce each parameter's bounds against the concrete arguments. The
+        // erased class compiles once against carriers, so this call site is the
+        // only place a concrete argument is checked for bound conformance. It
+        // runs before the compiled-class reuse below so every instantiation is
+        // checked, not just the first.
+        self.check_generic_bounds(
+            &generic.generic_typenames,
+            &source.generic_bounds,
+            &type_parameters_expanded,
+        );
+
         // An erased generic class compiles ONCE under a name carrying its
         // generic typenames. Every instantiation resolves to this one struct,
         // descriptor, vtable, and TypeInfo.
@@ -848,8 +862,7 @@ impl
         match self.erased_generic_classes.get(&generic_class_name.value) {
             Some(true) => {
                 return Some(
-                    generic.parent.read().unwrap().get_classes()
-                        [&generic_class_name.value]
+                    generic.parent.read().unwrap().get_classes()[&generic_class_name.value]
                         .read()
                         .unwrap()
                         .clone(),
@@ -857,8 +870,7 @@ impl
             }
             Some(false) if self.building_class_signatures => {
                 return Some(
-                    generic.parent.read().unwrap().get_classes()
-                        [&generic_class_name.value]
+                    generic.parent.read().unwrap().get_classes()[&generic_class_name.value]
                         .read()
                         .unwrap()
                         .clone(),
@@ -979,7 +991,10 @@ impl
                     .iter()
                     .enumerate()
                     .map(|(index, typename)| {
-                        (typename.value.clone(), type_parameters_expanded[index].clone())
+                        (
+                            typename.value.clone(),
+                            type_parameters_expanded[index].clone(),
+                        )
                     })
                     .collect()
             } else {
@@ -1013,15 +1028,13 @@ impl
             };
             for option in method_options {
                 let mut function = option.write().unwrap();
-                function.return_type =
-                    substitute_generic_params(&function.return_type, &carriers);
+                function.return_type = substitute_generic_params(&function.return_type, &carriers);
                 for (_, argument) in function.arguments.iter_mut() {
                     argument.argument_type =
                         substitute_generic_params(&argument.argument_type, &carriers);
                 }
                 if let Some(var_args) = function.var_args_type.clone() {
-                    function.var_args_type =
-                        Some(substitute_generic_params(&var_args, &carriers));
+                    function.var_args_type = Some(substitute_generic_params(&var_args, &carriers));
                 }
             }
 
@@ -1397,8 +1410,7 @@ impl
         if self.get_class_by_type(&lhs.value_type).is_some() {
             let method_name = peko_core::types::operator_trait_method(&operator_str)
                 .map_or_else(|| format!("[operator {operator_str}]"), str::to_string);
-            let call_overload =
-                self.call_object_method(&lhs, method_name, vec![rhs.clone()], None);
+            let call_overload = self.call_object_method(&lhs, method_name, vec![rhs.clone()], None);
 
             if let Ok(value) = call_overload {
                 return Some(value);
@@ -1534,13 +1546,11 @@ impl
         }
 
         // Pick the best-matching overload from the function's option set.
-        let function_options: Vec<Arc<RwLock<CodegenFunction>>> = next_module
-            .read()
-            .unwrap()
-            .get_functions()[function_name_type.name()]
-            .iter()
-            .map(Arc::clone)
-            .collect();
+        let function_options: Vec<Arc<RwLock<CodegenFunction>>> =
+            next_module.read().unwrap().get_functions()[function_name_type.name()]
+                .iter()
+                .map(Arc::clone)
+                .collect();
         let mut function_to_call = self.choose_function(
             function_options
                 .iter()

@@ -24,7 +24,6 @@ use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::execution::data_structures::{ExecutionClass, TraitMethodSlot};
 use peko_core::types::PekoType;
 
-use crate::codegen::cstr;
 use crate::codegen::builders::llvm_arithmetic::LlvmArithmeticBuilder;
 use crate::codegen::builders::llvm_constants::LlvmConstantBuilder;
 use crate::codegen::builders::llvm_instructions::LlvmInstructionBuilder;
@@ -32,6 +31,7 @@ use crate::codegen::builders::llvm_memory::LlvmMemoryBuilder;
 use crate::codegen::builders::llvm_types::LlvmTypeBuilder;
 use crate::codegen::builders::modules::ModuleManager;
 use crate::codegen::context::PekoCodegenContext;
+use crate::codegen::cstr;
 use crate::codegen::data_structures::{CodegenClass, CodegenValue, is_managed_pointer};
 
 /// High-level codegen orchestrators that span lower layers.
@@ -657,7 +657,14 @@ impl HighLevelCodegen for PekoCodegenContext {
             )
         };
 
-        self.dispatch_through_witness(self_value, witness_ptr, &slot, slot_index, slot_count, &arguments)
+        self.dispatch_through_witness(
+            self_value,
+            witness_ptr,
+            &slot,
+            slot_index,
+            slot_count,
+            &arguments,
+        )
     }
 
     fn call_trait_method_erased(
@@ -683,7 +690,14 @@ impl HighLevelCodegen for PekoCodegenContext {
         let trait_id = crate::codegen::builders::llvm_constants::trait_dispatch_id(trait_type);
         let witness_ptr = self.runtime_itable_lookup(self_value, trait_id);
 
-        self.dispatch_through_witness(self_value, witness_ptr, &slot, slot_index, slot_count, &arguments)
+        self.dispatch_through_witness(
+            self_value,
+            witness_ptr,
+            &slot,
+            slot_index,
+            slot_count,
+            &arguments,
+        )
     }
 
     fn to_raw_bool(&mut self, value: &CodegenValue) -> CodegenValue {

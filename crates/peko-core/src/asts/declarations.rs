@@ -8,7 +8,7 @@
 use derive_new::new;
 use indexmap::IndexMap;
 
-use super::PekoAST;
+use super::{CommentAST, PekoAST};
 use super::data_structures::{
     ClassAttributeData, ClassMethod, DeclarationArgumentData, DocInfo, PositionData,
     PositionedValue, Spanned, VisibilityData,
@@ -161,6 +161,11 @@ pub struct ClassAST {
     /// Trait/inheritance bounds per generic parameter (`T: impl Trait, from
     /// Class`), keyed by the parameter name.
     pub generic_bounds: IndexMap<String, Vec<types::TypeRestraint>>,
+    /// Comments captured inside the class body, in source order. Populated only
+    /// when comment capture is requested (formatting); empty otherwise, so the
+    /// simulator and code generator ignore it.
+    #[new(default)]
+    pub comments: Vec<CommentAST>,
 }
 
 impl Spanned for ClassAST {
@@ -188,6 +193,10 @@ pub struct TraitDeclarationAST {
     pub trait_name: PositionedValue<String>,
     pub generics: Vec<PositionedValue<String>>,
     pub methods: Vec<FunctionDeclarationAST>,
+    /// Comments captured inside the trait body, in source order. Populated only
+    /// when comment capture is requested (formatting).
+    #[new(default)]
+    pub comments: Vec<CommentAST>,
 }
 
 impl Spanned for TraitDeclarationAST {
@@ -212,6 +221,10 @@ pub struct EnumDeclarationAST {
     pub docinfo: Option<DocInfo>,
     pub enum_name: PositionedValue<String>,
     pub variants: Vec<PositionedValue<String>>,
+    /// Comments captured inside the enum body, in source order. Populated only
+    /// when comment capture is requested (formatting).
+    #[new(default)]
+    pub comments: Vec<CommentAST>,
 }
 
 impl Spanned for EnumDeclarationAST {

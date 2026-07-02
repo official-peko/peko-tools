@@ -212,7 +212,7 @@ impl<T> PositionedValue<T> {
 /// (`[private]`, `[constant]`, etc). The struct stores every modifier as an
 /// independent `bool` rather than as a single enum because many modifiers
 /// can apply simultaneously (e.g. `[external constant]`).
-#[derive(Clone, Debug, new)]
+#[derive(Clone, Debug, Default, new)]
 pub struct VisibilityData {
     /// `[private]` -- only allows local access.
     pub private: bool,

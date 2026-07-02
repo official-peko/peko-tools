@@ -1363,7 +1363,10 @@ pub fn compile_project(
     let resolved = match resolve_for_target(peko_root, &target) {
         Ok(resolved) => resolved,
         Err(e) => {
-            eprintln!("could not resolve toolchain for {}: {e}", target.to_triple());
+            eprintln!(
+                "could not resolve toolchain for {}: {e}",
+                target.to_triple()
+            );
             return Ok((imported_styles, None));
         }
     };

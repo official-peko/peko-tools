@@ -130,7 +130,9 @@ impl PekoValueSimulator for StringAST {
                 let last_value_type = simulated_values.last().unwrap().get_type();
                 let convertible = simulator_context
                     .types_similar(&last_value_type, &types::PekoType::simple_type("string"))
-                    || simulator_context.get_class_by_type(&last_value_type).is_some();
+                    || simulator_context
+                        .get_class_by_type(&last_value_type)
+                        .is_some();
                 if !convertible && !last_value_type.is_error_type() {
                     let last_ast = interpolated_asts.last().unwrap();
                     simulator_context

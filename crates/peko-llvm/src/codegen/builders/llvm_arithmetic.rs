@@ -452,8 +452,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
         // bool and i1 always short-circuit on the raw i1, bypassing the And/Or
         // trait. Only a non-bool object operand routes through the trait (both
         // operands evaluated; no short-circuit).
-        let lhs_is_bool_like =
-            lhs.value_type.name() == "bool" || lhs.value_type.name() == "i1";
+        let lhs_is_bool_like = lhs.value_type.name() == "bool" || lhs.value_type.name() == "i1";
         if !lhs_is_bool_like && self.get_class_by_type(&lhs.value_type).is_some() {
             let rhs = bool2.build_value(self);
             let operator = match operation {
@@ -651,10 +650,7 @@ impl LlvmArithmeticBuilder for PekoCodegenContext {
 /// pointer is cast down to address space 0; the comparison that consumes it is
 /// synchronous and allocates nothing, so no collection can move the buffer
 /// across the call.
-fn string_data_as_cstr(
-    context: &mut PekoCodegenContext,
-    value: &CodegenValue,
-) -> CodegenValue {
+fn string_data_as_cstr(context: &mut PekoCodegenContext, value: &CodegenValue) -> CodegenValue {
     let raw_pointer = if context.get_class_by_type(&value.value_type).is_some() {
         context
             .get_object_attribute(value, "data", true)

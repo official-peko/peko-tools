@@ -99,8 +99,9 @@ impl Lockfile {
     /// Write the lockfile under `root`.
     pub fn save_to_root(&self, root: &Path) -> Result<(), ConfigError> {
         let path = Lockfile::path_in(root);
-        let text = toml::to_string_pretty(self)
-            .map_err(|err| ConfigError::invalid(&path, format!("could not serialize lockfile: {err}")))?;
+        let text = toml::to_string_pretty(self).map_err(|err| {
+            ConfigError::invalid(&path, format!("could not serialize lockfile: {err}"))
+        })?;
         std::fs::write(&path, text).map_err(|source| ConfigError::Io { path, source })
     }
 }

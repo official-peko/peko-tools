@@ -10,8 +10,8 @@ use toml_edit::DocumentMut;
 
 use super::container::{Compression, encode_container};
 use super::{ConfigError, MANIFEST_FILE, SOURCE_DIR, operating_system_from_str};
-use crate::{ExternalModuleInfo, ExternalModuleVersion};
 use crate::target::{Architecture, OperatingSystem};
+use crate::{ExternalModuleInfo, ExternalModuleVersion};
 
 /// How far up the directory tree discovery searches for a manifest.
 const DISCOVERY_DEPTH: usize = 16;
@@ -585,10 +585,11 @@ fn read_document(path: &Path) -> Result<DocumentMut, ConfigError> {
         path: path.to_path_buf(),
         source,
     })?;
-    text.parse::<DocumentMut>().map_err(|source| ConfigError::Edit {
-        path: path.to_path_buf(),
-        source,
-    })
+    text.parse::<DocumentMut>()
+        .map_err(|source| ConfigError::Edit {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Write an edited document back to disk.

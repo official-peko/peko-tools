@@ -32,8 +32,9 @@ use crate::types::{self, PekoType};
 use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{
-    DefinedObject, Scope, ScopeEnum, ScopeFunction, ScopeModule, ScopeSymbol, ScopeVariable, SimulatorArg,
-    SimulatorFunction, SimulatorModule, SimulatorVariable,
+    DefinedObject, Scope, ScopeEnum, ScopeFunction, ScopeModule, ScopeSymbol, ScopeTrait,
+    ScopeMethodSignature, ScopeVariable, SimulatorArg, SimulatorFunction, SimulatorModule,
+    SimulatorVariable,
 };
 
 /// Builds a generic-class template: a `SimulatorClass` stored under its bare
@@ -123,42 +124,38 @@ impl PekoValueSimulator for DestructureAST {
                 0 => "get_first",
                 1 => "get_second",
                 _ => {
-                    simulator_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             name.start.clone(),
                             name.end.clone(),
                             "destructuring binds at most two names".to_string(),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file(),
-                        ));
+                        ),
+                    );
                     continue;
                 }
             };
 
-            let element_type = match simulator_context.call_object_method(
-                &value,
-                accessor,
-                Vec::new(),
-                None,
-            ) {
-                Ok(element) => element.get_type(),
-                Err(_) => {
-                    simulator_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                            self.value.get_start().clone(),
-                            self.value.get_end().clone(),
-                            format!(
-                                "cannot destructure a value of type `{}`; it is not a Pair",
-                                value.get_type()
+            let element_type =
+                match simulator_context.call_object_method(&value, accessor, Vec::new(), None) {
+                    Ok(element) => element.get_type(),
+                    Err(_) => {
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.value.get_start().clone(),
+                                self.value.get_end().clone(),
+                                format!(
+                                    "cannot destructure a value of type `{}`; it is not a Pair",
+                                    value.get_type()
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                simulator_context.get_current_file(),
                             ),
-                            diagnostics::DiagnosticType::Error,
-                            simulator_context.get_current_file(),
-                        ));
-                    types::PekoType::error_type()
-                }
-            };
+                        );
+                        types::PekoType::error_type()
+                    }
+                };
 
             if let Some(scope) = simulator_context.current_scope.as_mut() {
                 scope.write().unwrap().symbols.insert(
@@ -311,7 +308,8 @@ impl PekoValueSimulator for NewVariableAST {
                     variable_value = simulator_context.create_error_value();
                 } else if simulator_context.types_similar(&variable_value.get_type(), variable_type)
                 {
-                    if !simulator_context.const_compatible(&variable_value.get_type(), variable_type)
+                    if !simulator_context
+                        .const_compatible(&variable_value.get_type(), variable_type)
                     {
                         simulator_context.diagnostics.report_diagnostic(
                             diagnostics::PekoDiagnostic::new(
@@ -1433,7 +1431,11 @@ impl PekoValueSimulator for EnumDeclarationAST {
                 variant_names.push(variant.value.clone());
             }
         }
-        simulator_context.register_enum(self.enum_name.value.clone(), variant_names, self.visibility.private);
+        simulator_context.register_enum(
+            self.enum_name.value.clone(),
+            variant_names,
+            self.visibility.private,
+        );
     }
 
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
@@ -1585,8 +1587,101 @@ impl PekoValueSimulator for TraitDeclarationAST {
             methods: slots,
         });
 
+        // Surface the trait to tooling as a scope symbol so the language server
+        // can list it as a type, offer it after `impl` / `from`, and render its
+        // methods as override stubs. Method argument names come from the AST,
+        // which the flattened trait slots do not keep.
+        let scope_methods: Vec<ScopeMethodSignature> = self
+            .methods
+            .iter()
+            .map(|method| {
+                let arguments = method
+                    .arguments
+                    .iter()
+                    .map(|(name, argument)| {
+                        (name.value.clone(), argument.argument_type.to_string())
+                    })
+                    .collect();
+                ScopeMethodSignature::new(
+                    method.function_name.value.clone(),
+                    arguments,
+                    method
+                        .return_type
+                        .clone()
+                        .map(|return_type| return_type.to_string())
+                        .unwrap_or_else(|| "void".to_string()),
+                    method.is_static,
+                    method.function_body.is_some(),
+                )
+            })
+            .collect();
+
+        if let Some(scope) = simulator_context.current_scope.as_mut() {
+            scope.write().unwrap().symbols.insert(
+                self.trait_name.value.clone(),
+                ScopeSymbol::Trait(
+                    ScopeTrait::new(
+                        self.docinfo.clone(),
+                        self.trait_name.value.clone(),
+                        self.start.clone(),
+                        self.end.clone(),
+                        scope_methods,
+                    ),
+                    self.visibility.clone(),
+                ),
+            );
+        }
+
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
+}
+
+/// Base names of a class's superclasses and traits, from its `from` and `impl`
+/// clauses. Generic arguments are stripped so `Base<T>` yields `Base`.
+fn scope_class_parents(class: &ClassAST) -> Vec<String> {
+    class
+        .derives_from
+        .iter()
+        .chain(class.implements.iter())
+        .map(|parent| {
+            parent
+                .to_string()
+                .split('<')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// A class's own method signatures, for surfacing as override stubs in a
+/// deriving class. Constructors are excluded.
+fn scope_class_methods(class: &ClassAST) -> Vec<ScopeMethodSignature> {
+    class
+        .methods
+        .iter()
+        .filter_map(|method| match method {
+            ClassMethod::Method(info, _) => {
+                let arguments = info
+                    .arguments
+                    .iter()
+                    .map(|(name, argument)| {
+                        (name.value.clone(), argument.argument_type.to_string())
+                    })
+                    .collect();
+                Some(ScopeMethodSignature::new(
+                    info.name.value.clone(),
+                    arguments,
+                    method.get_return_type().to_string(),
+                    info.is_static,
+                    true,
+                ))
+            }
+            ClassMethod::Constructor(_, _) => None,
+        })
+        .collect()
 }
 
 /// Generic class declarations are tracked but not simulated until
@@ -1700,8 +1795,7 @@ impl PekoValueSimulator for ClassAST {
                 class_method.get_info().varargs_type.clone(),
                 simulator_context.module_context.current_module().clone(),
             );
-            simulator_function.method_generic_typenames =
-                class_method.get_generic_types().clone();
+            simulator_function.method_generic_typenames = class_method.get_generic_types().clone();
             simulator_function.is_static = is_static;
 
             methods
@@ -1893,17 +1987,20 @@ impl PekoValueSimulator for ClassAST {
                     } else {
                         let parent_class =
                             simulator_context.get_class_by_type(&self.derives_from[0]);
-                        if parent_class.is_none()
-                            || !parent_class
-                                .as_ref()
-                                .unwrap()
-                                .main_virtual_table
-                                .methods
-                                .contains_key("constructor")
+
+                        // An unresolved parent (a `from Base` where `Base` is not
+                        // defined) contributes no attributes or constructor, so
+                        // the inheritance search ends here rather than panicking.
+                        let Some(parent_class) = parent_class else {
+                            break;
+                        };
+
+                        if !parent_class
+                            .main_virtual_table
+                            .methods
+                            .contains_key("constructor")
                         {
-                            for (attribute_name, attribute_info) in
-                                &parent_class.unwrap().attributes
-                            {
+                            for (attribute_name, attribute_info) in &parent_class.attributes {
                                 inherited_attributes.insert(
                                     attribute_name.clone(),
                                     attribute_info.attribute_type.clone(),
@@ -1914,8 +2011,6 @@ impl PekoValueSimulator for ClassAST {
                         }
 
                         for (argument_name, argument_info) in &parent_class
-                            .as_ref()
-                            .unwrap()
                             .main_virtual_table
                             .methods["constructor"][0]
                             .read()
@@ -1944,6 +2039,10 @@ impl PekoValueSimulator for ClassAST {
                 constructor_arguments = inherited_attributes;
             }
 
+            // The synthetic vtable slot can enter through an inherited class's
+            // attributes; it is not a real constructor parameter.
+            constructor_arguments.shift_remove("<main_virtual_table>");
+
             // Register the generic class symbol.
             simulator_context
                 .current_scope
@@ -1966,6 +2065,8 @@ impl PekoValueSimulator for ClassAST {
                                 .map(|generic| generic.value.clone())
                                 .collect::<Vec<String>>(),
                             constructor_arguments,
+                            scope_class_parents(self),
+                            scope_class_methods(self),
                         ),
                         self.visibility.clone(),
                     ),
@@ -2237,8 +2338,7 @@ impl PekoValueSimulator for ClassAST {
                 class_method.get_info().varargs_type.clone(),
                 simulator_context.module_context.current_module().clone(),
             );
-            simulator_function.method_generic_typenames =
-                class_method.get_generic_types().clone();
+            simulator_function.method_generic_typenames = class_method.get_generic_types().clone();
             simulator_function.is_static = is_static;
 
             let mut function_added_to_vtable = false;
@@ -2595,8 +2695,7 @@ impl PekoValueSimulator for ClassAST {
             // Track whether this method's body reassigns an attribute of
             // `this`, seeding from any hand-written `[mutates]` modifier.
             let previous_method_mutates = simulator_context.current_method_mutates;
-            simulator_context.current_method_mutates =
-                class_method.get_info().visibility.mutates;
+            simulator_context.current_method_mutates = class_method.get_info().visibility.mutates;
 
             let previous_method_name = simulator_context.current_method_name.clone();
             simulator_context.current_method_name =
@@ -2608,8 +2707,11 @@ impl PekoValueSimulator for ClassAST {
             // is an uninitialized attribute.
             let is_constructor = matches!(class_method, ClassMethod::Constructor(_, _));
             if is_constructor {
-                simulator_context.attributes_to_set =
-                    self.attributes.keys().map(|name| name.value.clone()).collect();
+                simulator_context.attributes_to_set = self
+                    .attributes
+                    .keys()
+                    .map(|name| name.value.clone())
+                    .collect();
             }
 
             // Simulate the method body and check for unreachable code.
@@ -2722,8 +2824,9 @@ impl PekoValueSimulator for ClassAST {
                     }
 
                     let mut signatures_equal = true;
-                    for (vtable_type, ast_type) in
-                        overload_argument_types.iter().zip(ast_argument_types.iter())
+                    for (vtable_type, ast_type) in overload_argument_types
+                        .iter()
+                        .zip(ast_argument_types.iter())
                     {
                         if !simulator_context.types_equal(vtable_type, ast_type) {
                             signatures_equal = false;
@@ -2861,6 +2964,11 @@ impl PekoValueSimulator for ClassAST {
             }
         } else {
             for (attribute_name, attribute_info) in class_ref.read().unwrap().attributes.clone() {
+                // The synthetic vtable slot is not a real constructor parameter;
+                // the implicit constructor takes one argument per real attribute.
+                if attribute_name == "<main_virtual_table>" {
+                    continue;
+                }
                 constructor_arguments.insert(attribute_name, attribute_info.attribute_type);
             }
         }
@@ -2884,6 +2992,8 @@ impl PekoValueSimulator for ClassAST {
                         false,
                         Vec::new(),
                         constructor_arguments,
+                        scope_class_parents(self),
+                        scope_class_methods(self),
                     ),
                     self.visibility.clone(),
                 ),

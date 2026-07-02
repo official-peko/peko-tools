@@ -11,8 +11,8 @@ use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
 use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
 use peko_core::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
-    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST, VariableReassignmentAST,
-    WhileLoopAST,
+    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
+    VariableReassignmentAST, WhileLoopAST,
 };
 use peko_core::asts::{self, PekoAST};
 use peko_core::diagnostics;
@@ -487,8 +487,9 @@ impl PekoValueBuilder for IfStatementAST {
                 codegen_context.if_expression_value_type(self.else_body.is_some(), &branch_tails)
             && let Some(llvm_type) = codegen_context.get_llvm_type(&value_type)
         {
-            let phi =
-                unsafe { core::LLVMBuildPhi(codegen_context.llvm_builder, llvm_type, c"".as_ptr()) };
+            let phi = unsafe {
+                core::LLVMBuildPhi(codegen_context.llvm_builder, llvm_type, c"".as_ptr())
+            };
             let mut values: Vec<LLVMValueRef> =
                 phi_incomings.iter().map(|(value, _)| *value).collect();
             let mut blocks: Vec<LLVMBasicBlockRef> =
@@ -1042,15 +1043,15 @@ impl PekoValueBuilder for ImportStatementAST {
             let source = if is_ffi {
                 let parsed = peko_core::ffi::parse_header(&raw_source);
                 for error in &parsed.errors {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    codegen_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             self.start.clone(),
                             self.end.clone(),
                             format!("FFI header `{}`: {error}", module_entry_file_path.display()),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
-                        ));
+                        ),
+                    );
                 }
                 peko_core::ffi::header_to_peko_source(&parsed)
             } else {

@@ -169,6 +169,11 @@ impl IndicatifSink {
 
 impl ProgressSink for IndicatifSink {
     fn start_phase(&self, name: &str) {
+        // Clear any finished state from a previous phase. A bar that was ended
+        // with finish_and_clear is otherwise inert, so a later phase's draws
+        // (this is the build phase, after the dependency-resolution phase
+        // finished) would be silently dropped and no bar would appear.
+        self.bar.reset();
         // Reveal the bar in case it was hidden, reset position and length.
         self.bar
             .set_draw_target(indicatif::ProgressDrawTarget::stderr());

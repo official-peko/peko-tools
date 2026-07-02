@@ -12,43 +12,18 @@ use std::str::FromStr;
 use tower_lsp_server::ls_types::{self as lsp, Uri};
 
 use crate::server::analysis;
-
-// ---------------------------------------------------------------------------
-// Positions and ranges
-// ---------------------------------------------------------------------------
-
-/// Convert a neutral [`analysis::Position`] to an LSP `Position`.
-pub fn position_to_lsp(p: &analysis::Position) -> lsp::Position {
-    lsp::Position {
-        line: p.line,
-        character: p.character,
-    }
-}
-
-/// Convert an LSP `Position` to a neutral [`analysis::Position`].
-pub fn position_from_lsp(p: lsp::Position) -> analysis::Position {
-    analysis::Position {
-        line: p.line,
-        character: p.character,
-    }
-}
-
-/// Convert a neutral [`analysis::Range`] to an LSP `Range`.
-pub fn range_to_lsp(r: &analysis::Range) -> lsp::Range {
-    lsp::Range {
-        start: position_to_lsp(&r.start),
-        end: position_to_lsp(&r.end),
-    }
-}
+use crate::server::encoding::{PosMapper, WireEncoding, wire_len};
 
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
 
-/// Convert a neutral [`analysis::Diagnostic`] to an LSP `Diagnostic`.
-pub fn diagnostic_to_lsp(d: &analysis::Diagnostic) -> lsp::Diagnostic {
+/// Convert a neutral [`analysis::Diagnostic`] to an LSP `Diagnostic`. Ranges
+/// are mapped from the internal char-based form to the negotiated wire
+/// encoding via `map`.
+pub fn diagnostic_to_lsp(d: &analysis::Diagnostic, map: &PosMapper) -> lsp::Diagnostic {
     lsp::Diagnostic {
-        range: range_to_lsp(&d.range),
+        range: map.range(&d.range),
         severity: Some(severity_to_lsp(&d.severity)),
         code: d
             .code
@@ -105,7 +80,7 @@ pub fn symbol_kind_to_lsp(k: &analysis::SymbolKind) -> lsp::SymbolKind {
 }
 
 /// Recursively convert a tree of neutral symbols into LSP `DocumentSymbol`s.
-pub fn document_symbol_to_lsp(s: &analysis::Symbol) -> lsp::DocumentSymbol {
+pub fn document_symbol_to_lsp(s: &analysis::Symbol, map: &PosMapper) -> lsp::DocumentSymbol {
     #[allow(deprecated)]
     lsp::DocumentSymbol {
         name: s.name.clone(),
@@ -113,12 +88,17 @@ pub fn document_symbol_to_lsp(s: &analysis::Symbol) -> lsp::DocumentSymbol {
         kind: symbol_kind_to_lsp(&s.kind),
         tags: None,
         deprecated: None,
-        range: range_to_lsp(&s.range),
-        selection_range: range_to_lsp(&s.selection_range),
+        range: map.range(&s.range),
+        selection_range: map.range(&s.selection_range),
         children: if s.children.is_empty() {
             None
         } else {
-            Some(s.children.iter().map(document_symbol_to_lsp).collect())
+            Some(
+                s.children
+                    .iter()
+                    .map(|child| document_symbol_to_lsp(child, map))
+                    .collect(),
+            )
         },
     }
 }
@@ -128,13 +108,13 @@ pub fn document_symbol_to_lsp(s: &analysis::Symbol) -> lsp::DocumentSymbol {
 // ---------------------------------------------------------------------------
 
 /// Convert a neutral [`analysis::HoverInfo`] to an LSP `Hover`.
-pub fn hover_to_lsp(h: &analysis::HoverInfo) -> lsp::Hover {
+pub fn hover_to_lsp(h: &analysis::HoverInfo, map: &PosMapper) -> lsp::Hover {
     lsp::Hover {
         contents: lsp::HoverContents::Markup(lsp::MarkupContent {
             kind: lsp::MarkupKind::Markdown,
             value: h.contents.clone(),
         }),
-        range: h.range.as_ref().map(range_to_lsp),
+        range: h.range.as_ref().map(|r| map.range(r)),
     }
 }
 
@@ -174,7 +154,12 @@ pub fn completion_kind_to_lsp(k: &analysis::CompletionKind) -> lsp::CompletionIt
 }
 
 /// Convert a neutral [`analysis::CompletionItem`] to an LSP `CompletionItem`.
-pub fn completion_item_to_lsp(item: &analysis::CompletionItem) -> lsp::CompletionItem {
+/// A `text_edit` range is mapped from the internal char-based form to the
+/// negotiated wire encoding via `map`.
+pub fn completion_item_to_lsp(
+    item: &analysis::CompletionItem,
+    map: &PosMapper,
+) -> lsp::CompletionItem {
     lsp::CompletionItem {
         label: item.label.clone(),
         kind: Some(completion_kind_to_lsp(&item.kind)),
@@ -196,6 +181,19 @@ pub fn completion_item_to_lsp(item: &analysis::CompletionItem) -> lsp::Completio
             command: cmd.command.clone(),
             arguments: None,
         }),
+        additional_text_edits: if item.additional_text_edits.is_empty() {
+            None
+        } else {
+            Some(
+                item.additional_text_edits
+                    .iter()
+                    .map(|edit| lsp::TextEdit {
+                        range: map.range(&edit.range),
+                        new_text: edit.new_text.clone(),
+                    })
+                    .collect(),
+            )
+        },
         ..Default::default()
     }
 }
@@ -204,11 +202,13 @@ pub fn completion_item_to_lsp(item: &analysis::CompletionItem) -> lsp::Completio
 // Locations
 // ---------------------------------------------------------------------------
 
-/// Convert a neutral [`analysis::Location`] to an LSP `Location`.
-pub fn location_to_lsp(loc: &analysis::Location) -> lsp::Location {
+/// Convert a neutral [`analysis::Location`] to an LSP `Location`. Because a
+/// location can point into a different file than the one under the cursor,
+/// `map` must be built from the text of `loc.file`, not the request document.
+pub fn location_to_lsp(loc: &analysis::Location, map: &PosMapper) -> lsp::Location {
     lsp::Location {
         uri: path_to_uri(&loc.file),
-        range: range_to_lsp(&loc.range),
+        range: map.range(&loc.range),
     }
 }
 
@@ -220,11 +220,15 @@ pub fn location_to_lsp(loc: &analysis::Location) -> lsp::Location {
 ///
 /// Parameter labels are resolved by searching for each `ParameterInfo::label`
 /// as a substring of the parent `SignatureInfo::label` and encoding the result
-/// as a byte-offset pair `[start, end]`, which is what `ls-types` expects for
-/// `SignatureInformation::parameters`.
-pub fn signature_help_to_lsp(sh: &analysis::SignatureHelp) -> lsp::SignatureHelp {
-    let signatures: Vec<lsp::SignatureInformation> =
-        sh.signatures.iter().map(signature_info_to_lsp).collect();
+/// as an offset pair `[start, end]`, which is what `ls-types` expects for
+/// `SignatureInformation::parameters`. The offsets count code units in the
+/// negotiated wire encoding.
+pub fn signature_help_to_lsp(sh: &analysis::SignatureHelp, enc: WireEncoding) -> lsp::SignatureHelp {
+    let signatures: Vec<lsp::SignatureInformation> = sh
+        .signatures
+        .iter()
+        .map(|sig| signature_info_to_lsp(sig, enc))
+        .collect();
 
     lsp::SignatureHelp {
         signatures,
@@ -233,11 +237,11 @@ pub fn signature_help_to_lsp(sh: &analysis::SignatureHelp) -> lsp::SignatureHelp
     }
 }
 
-fn signature_info_to_lsp(sig: &analysis::SignatureInfo) -> lsp::SignatureInformation {
+fn signature_info_to_lsp(sig: &analysis::SignatureInfo, enc: WireEncoding) -> lsp::SignatureInformation {
     let parameters: Vec<lsp::ParameterInformation> = sig
         .parameters
         .iter()
-        .map(|p| parameter_info_to_lsp(p, &sig.label))
+        .map(|p| parameter_info_to_lsp(p, &sig.label, enc))
         .collect();
 
     lsp::SignatureInformation {
@@ -257,14 +261,18 @@ fn signature_info_to_lsp(sig: &analysis::SignatureInfo) -> lsp::SignatureInforma
 fn parameter_info_to_lsp(
     param: &analysis::ParameterInfo,
     sig_label: &str,
+    enc: WireEncoding,
 ) -> lsp::ParameterInformation {
     // Locate the parameter label inside the full signature string and encode
-    // it as `[start_byte, end_byte]` so the editor can highlight it. Falls
-    // back to a plain string label if the substring is not found.
+    // it as a `[start, end]` code-unit range so the editor can highlight it.
+    // The offsets are measured in the negotiated wire encoding, counted over
+    // the label prefix rather than raw bytes. Falls back to a plain string
+    // label if the substring is not found.
     let label = match sig_label.find(param.label.as_str()) {
-        Some(start) => {
-            let end = start + param.label.len();
-            lsp::ParameterLabel::LabelOffsets([start as u32, end as u32])
+        Some(byte_start) => {
+            let start = wire_len(&sig_label[..byte_start], enc);
+            let end = start + wire_len(&param.label, enc);
+            lsp::ParameterLabel::LabelOffsets([start, end])
         }
         None => lsp::ParameterLabel::Simple(param.label.clone()),
     };

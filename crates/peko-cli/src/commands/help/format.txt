@@ -1,0 +1,15 @@
+peko format - normalize the formatting of Pekoscript files
+
+USAGE
+    peko format <file.peko> [more.peko ...] [flags]
+
+DESCRIPTION
+    Re-indents each file to its bracket-nesting depth, trims trailing
+    whitespace, and collapses runs of blank lines. Only leading indentation is
+    rewritten, so comments and string contents are preserved exactly. By
+    default each file is formatted in place.
+
+FLAGS
+    --check     Report files that are not formatted and write nothing. Exits
+                with a non-zero status when any file would change.
+    --stdout    Print the formatted text to stdout instead of writing it back.

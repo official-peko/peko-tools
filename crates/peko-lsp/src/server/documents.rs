@@ -145,4 +145,11 @@ impl DocumentStore {
         let path = uri_to_path(uri);
         self.docs.get(&path).map(|d| d.full_text())
     }
+
+    /// Return the full current text for a tracked document by path, or `None`
+    /// if the document is not open. Used to map positions that point into a
+    /// file other than the request document.
+    pub fn get_text_by_path(&self, path: &std::path::Path) -> Option<String> {
+        self.docs.get(path).map(|d| d.full_text())
+    }
 }

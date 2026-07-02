@@ -245,8 +245,10 @@ const CLI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                      [dependencies]\n";
 
 /// The `source/main.peko` scaffolded for a CLI project.
-const CLI_MAIN_PEKO_TEMPLATE: &str = "fn OnStart() {\n\
-                                      \tconsole::println(\"Hello World!\");\n\
+const CLI_MAIN_PEKO_TEMPLATE: &str = "import std::io;\n\
+                                      \n\
+                                      fn on_start() {\n\
+                                      \tio::println(\"Hello World!\")\n\
                                       }\n";
 
 /// The starter page scaffolded for a UI project.

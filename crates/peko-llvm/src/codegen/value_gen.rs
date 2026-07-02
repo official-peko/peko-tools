@@ -116,16 +116,16 @@ impl PekoValueBuilder for StringAST {
             match codegen_context.expand_type(&PekoType::simple_type("StringBuilder")) {
                 Some(builder_type) if builder_type.name() == "StringBuilder" => builder_type,
                 _ => {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    codegen_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             self.start.clone(),
                             self.end.clone(),
                             "string interpolation needs std::collections::StringBuilder in scope"
                                 .to_string(),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
-                        ));
+                        ),
+                    );
                     return codegen_context.create_error_value();
                 }
             };
@@ -146,15 +146,15 @@ impl PekoValueBuilder for StringAST {
                 }
 
                 let Some(value) = built_values.last().cloned() else {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    codegen_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             chunk.start.clone(),
                             chunk.end.clone(),
                             "expected a value to interpolate but got nothing".to_string(),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
-                        ));
+                        ),
+                    );
                     continue;
                 };
 
@@ -163,12 +163,8 @@ impl PekoValueBuilder for StringAST {
                 {
                     value
                 } else {
-                    match codegen_context.call_object_method(
-                        &value,
-                        "to_string",
-                        Vec::new(),
-                        None,
-                    ) {
+                    match codegen_context.call_object_method(&value, "to_string", Vec::new(), None)
+                    {
                         Ok(as_string) => as_string,
                         Err(_) => {
                             codegen_context.diagnostics.report_diagnostic(

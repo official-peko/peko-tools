@@ -131,9 +131,8 @@ pub fn encode_container(
     };
     let signature = signature.unwrap_or_default();
 
-    let mut bytes = Vec::with_capacity(
-        CONTAINER_HEADER_LEN + manifest.len() + payload.len() + signature.len(),
-    );
+    let mut bytes =
+        Vec::with_capacity(CONTAINER_HEADER_LEN + manifest.len() + payload.len() + signature.len());
     bytes.extend_from_slice(&header.encode());
     bytes.extend_from_slice(manifest.as_bytes());
     bytes.extend_from_slice(payload);

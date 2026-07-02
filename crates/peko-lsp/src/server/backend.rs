@@ -9,19 +9,21 @@
 //! Heavy lifting lives in [`crate::analyzer`] and [`crate::server::converters`];
 //! this file is intentionally thin.
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 use tower_lsp_server::jsonrpc::Result as LspResult;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
-use crate::server::analysis::AnalysisHost;
+use crate::server::analysis::{self, AnalysisHost};
 use crate::server::converters::{
     completion_item_to_lsp, diagnostic_to_lsp, document_symbol_to_lsp, hover_to_lsp,
-    location_to_lsp, position_from_lsp, signature_help_to_lsp, uri_to_path,
+    location_to_lsp, signature_help_to_lsp, uri_to_path,
 };
 use crate::server::documents::DocumentStore;
+use crate::server::encoding::{LineIndex, PosMapper, WireEncoding};
 
 // ---------------------------------------------------------------------------
 // State shared across all async handlers
@@ -41,6 +43,10 @@ pub struct Backend {
     /// `tokio::task::spawn_blocking` and grab the lock with `blocking_write`
     /// / `blocking_read`.
     analysis: Arc<RwLock<AnalysisHost>>,
+
+    /// Position encoding negotiated with the client during `initialize`.
+    /// Defaults to UTF-16 (the mandatory LSP default) until negotiation runs.
+    encoding: OnceLock<WireEncoding>,
 }
 
 impl Backend {
@@ -52,12 +58,44 @@ impl Backend {
             client,
             documents: Arc::new(DocumentStore::new()),
             analysis: Arc::new(RwLock::new(AnalysisHost::new()?)),
+            encoding: OnceLock::new(),
         })
     }
 
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
+
+    /// Position encoding negotiated with the client, or the UTF-16 default if
+    /// negotiation has not run yet.
+    fn encoding(&self) -> WireEncoding {
+        self.encoding.get().copied().unwrap_or_default()
+    }
+
+    /// Build a line index over the current text of an open document. Falls back
+    /// to an empty index when the document is not tracked.
+    fn line_index_for_uri(&self, uri: &Uri) -> LineIndex {
+        LineIndex::new(&self.documents.get_text(uri).unwrap_or_default())
+    }
+
+    /// Build a line index over a file's text for mapping positions that point
+    /// into it. Prefers the open-document copy, then the on-disk contents, then
+    /// an empty index.
+    fn line_index_for_path(&self, path: &Path) -> LineIndex {
+        let text = self
+            .documents
+            .get_text_by_path(path)
+            .or_else(|| std::fs::read_to_string(path).ok())
+            .unwrap_or_default();
+        LineIndex::new(&text)
+    }
+
+    /// Convert a wire position from the client into an internal char-based
+    /// position, using the text of the open document `uri`.
+    fn to_internal(&self, uri: &Uri, wire: Position) -> analysis::Position {
+        self.line_index_for_uri(uri)
+            .wire_to_internal(wire, self.encoding())
+    }
 
     /// Feed updated text into the analysis engine and publish fresh diagnostics
     /// back to the client. Called after every `did_open` / `did_change` /
@@ -81,15 +119,20 @@ impl Backend {
 
         let analysis = Arc::clone(&self.analysis);
         let path_for_task = path.clone();
+        let text_for_task = text.clone();
         let raw_diags = tokio::task::spawn_blocking(move || {
             let mut guard = analysis.blocking_write();
-            guard.engine.update_file(&path_for_task, &text);
+            guard.engine.update_file(&path_for_task, &text_for_task);
             guard.engine.diagnostics(&path_for_task)
         })
         .await
         .unwrap_or_default();
 
-        let lsp_diags: Vec<Diagnostic> = raw_diags.iter().map(diagnostic_to_lsp).collect();
+        // Diagnostics are scoped to this file, so map them with an index over
+        // the same text that produced them.
+        let index = LineIndex::new(&text);
+        let map = PosMapper::new(&index, self.encoding());
+        let lsp_diags: Vec<Diagnostic> = raw_diags.iter().map(|d| diagnostic_to_lsp(d, &map)).collect();
 
         self.client
             .publish_diagnostics(uri.clone(), lsp_diags, None)
@@ -108,6 +151,19 @@ impl LanguageServer for Backend {
 
     async fn initialize(&self, params: InitializeParams) -> LspResult<InitializeResult> {
         tracing::info!(workspace_folders = ?params.workspace_folders, "initialize");
+
+        // Negotiate the position encoding. The client advertises the encodings
+        // it supports under `general.position_encodings`; pick one (preferring
+        // UTF-8) and advertise the same choice back below.
+        let encoding = WireEncoding::negotiate(
+            params
+                .capabilities
+                .general
+                .as_ref()
+                .and_then(|general| general.position_encodings.as_deref()),
+        );
+        let _ = self.encoding.set(encoding);
+        tracing::info!(?encoding, "negotiated position encoding");
 
         // Pick the first workspace folder as the project root. Multi-root
         // workspaces are not yet first-class; the analyzer's
@@ -134,6 +190,10 @@ impl LanguageServer for Backend {
             }),
             offset_encoding: None,
             capabilities: ServerCapabilities {
+                // Advertise the negotiated position encoding so the client
+                // sends and receives `character` offsets in the same units.
+                position_encoding: Some(encoding.as_kind()),
+
                 // Send full document text on every change (simplest).
                 // Switch to `TextDocumentSyncKind::INCREMENTAL` once incremental
                 // edits are validated end-to-end with the engine.
@@ -230,12 +290,17 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> LspResult<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let path = uri_to_path(uri);
-        let pos = position_from_lsp(params.text_document_position_params.position);
+        let pos = self.to_internal(uri, params.text_document_position_params.position);
 
         tracing::debug!(uri = %uri.as_str(), ?pos, "hover");
 
+        let index = self.line_index_for_uri(uri);
+        let map = PosMapper::new(&index, self.encoding());
         let analysis = self.analysis.read().await;
-        Ok(analysis.engine.hover(&path, &pos).map(|h| hover_to_lsp(&h)))
+        Ok(analysis
+            .engine
+            .hover(&path, &pos)
+            .map(|h| hover_to_lsp(&h, &map)))
     }
 
     // ------------------------------------------------------------------
@@ -245,10 +310,12 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let path = uri_to_path(uri);
-        let pos = position_from_lsp(params.text_document_position.position);
+        let pos = self.to_internal(uri, params.text_document_position.position);
 
         tracing::debug!(uri = %uri.as_str(), ?pos, "completion");
 
+        let index = self.line_index_for_uri(uri);
+        let map = PosMapper::new(&index, self.encoding());
         let items: Vec<CompletionItem> = self
             .analysis
             .read()
@@ -256,7 +323,7 @@ impl LanguageServer for Backend {
             .engine
             .completions(&path, &pos)
             .iter()
-            .map(completion_item_to_lsp)
+            .map(|item| completion_item_to_lsp(item, &map))
             .collect();
 
         Ok(Some(CompletionResponse::Array(items)))
@@ -272,18 +339,26 @@ impl LanguageServer for Backend {
     ) -> LspResult<Option<GotoDefinitionResponse>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let path = uri_to_path(uri);
-        let pos = position_from_lsp(params.text_document_position_params.position);
+        let pos = self.to_internal(uri, params.text_document_position_params.position);
 
         tracing::debug!(uri = %uri.as_str(), ?pos, "goto_definition");
 
-        let locations: Vec<Location> = self
+        let raw_locations = self
             .analysis
             .read()
             .await
             .engine
-            .goto_definition(&path, &pos)
+            .goto_definition(&path, &pos);
+
+        // Each location may point into a different file, so map its range with
+        // an index built from that file's own text.
+        let encoding = self.encoding();
+        let locations: Vec<Location> = raw_locations
             .iter()
-            .map(location_to_lsp)
+            .map(|loc| {
+                let index = self.line_index_for_path(&loc.file);
+                location_to_lsp(loc, &PosMapper::new(&index, encoding))
+            })
             .collect();
 
         if locations.is_empty() {
@@ -306,6 +381,8 @@ impl LanguageServer for Backend {
 
         tracing::debug!(uri = %uri.as_str(), "document_symbol");
 
+        let index = self.line_index_for_uri(uri);
+        let map = PosMapper::new(&index, self.encoding());
         let symbols: Vec<DocumentSymbol> = self
             .analysis
             .read()
@@ -313,7 +390,7 @@ impl LanguageServer for Backend {
             .engine
             .document_symbols(&path)
             .iter()
-            .map(document_symbol_to_lsp)
+            .map(|s| document_symbol_to_lsp(s, &map))
             .collect();
 
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
@@ -329,17 +406,18 @@ impl LanguageServer for Backend {
     ) -> LspResult<Option<SignatureHelp>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let path = uri_to_path(uri);
-        let pos = position_from_lsp(params.text_document_position_params.position);
+        let pos = self.to_internal(uri, params.text_document_position_params.position);
 
         tracing::debug!(uri = %uri.as_str(), ?pos, "signature_help");
 
+        let encoding = self.encoding();
         Ok(self
             .analysis
             .read()
             .await
             .engine
             .signature_help(&path, &pos)
-            .map(|sh| signature_help_to_lsp(&sh)))
+            .map(|sh| signature_help_to_lsp(&sh, encoding)))
     }
 
     // ------------------------------------------------------------------
@@ -360,14 +438,23 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let formatted = match self.analysis.read().await.engine.format(&path, &original) {
+        let indent_size = params.options.tab_size.max(1) as usize;
+        let use_spaces = params.options.insert_spaces;
+        let formatted = match self.analysis.read().await.engine.format(
+            &path,
+            &original,
+            indent_size,
+            use_spaces,
+        ) {
             Some(f) => f,
             None => return Ok(None),
         };
 
-        // Return a single edit that replaces the entire document.
-        let end_line = original.lines().count().saturating_sub(1) as u32;
-        let end_char = original.lines().last().map(|l| l.len() as u32).unwrap_or(0);
+        // Return a single edit that replaces the entire document. The end of
+        // the replacement range is the end of the source, expressed in the
+        // negotiated wire encoding.
+        let index = LineIndex::new(&original);
+        let end = index.end_of_source(self.encoding());
 
         Ok(Some(vec![TextEdit {
             range: Range {
@@ -375,10 +462,7 @@ impl LanguageServer for Backend {
                     line: 0,
                     character: 0,
                 },
-                end: Position {
-                    line: end_line,
-                    character: end_char,
-                },
+                end,
             },
             new_text: formatted,
         }]))

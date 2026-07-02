@@ -135,18 +135,14 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
 ) -> HashMap<String, ExternalModuleInfo> {
     let mut modules = HashMap::new();
 
-    // TEMPORARY dev override: resolve the `std` package from the compiler
-    // repo's own std/ directory rather than an installed package, so the V2
-    // standard library is the one being developed here. This makes std
-    // available on every path, including load_required_packages (which passes
-    // no compilation root). Remove once std is published and locked normally.
-    let repo_std = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("std").join("peko.toml"));
-    if let Some(repo_std) = repo_std
-        && let Ok(loaded) = peko_core::config::Manifest::load(&repo_std)
-    {
+    // Resolve the auto-imported `std` package from the installed registry cache
+    // under the Peko root, rather than requiring it in every project lockfile.
+    // This makes std available on every path, including load_required_packages
+    // (which passes no compilation root). Remove once std is published and
+    // locked normally.
+    let installed_std =
+        peko_core::packages::registry_source_dir(peko_root, "std", "0.1.0").join("peko.toml");
+    if let Ok(loaded) = peko_core::config::Manifest::load(&installed_std) {
         let info = loaded.manifest.to_external_module(&loaded.root);
         modules.insert(info.module_name.clone(), info);
     }
@@ -529,7 +525,28 @@ pub fn test(
         ast.simulate(&mut simulator_context);
     }
 
+    // Propagate `[mutates]` across recorded call edges to a fixpoint, so a
+    // method that calls another method inferred `[mutates]` only later in the
+    // file is itself marked. The single simulation pass cannot see that
+    // forward reference.
+    simulator_context.propagate_mutates_fixpoint();
+
+    // Report the user's diagnostics, but not those originating inside an
+    // installed package under the Peko root (std and any resolved
+    // dependency). A `peko test` of the user's file should surface the user's
+    // errors, not a trusted dependency's internal analysis noise, which the
+    // code generator does not surface either.
+    let peko_root_canon = peko_root
+        .canonicalize()
+        .unwrap_or_else(|_| peko_root.to_path_buf());
     for error in simulator_context.diagnostics.get_diagnostics() {
+        let error_file = error
+            .file
+            .canonicalize()
+            .unwrap_or_else(|_| error.file.clone());
+        if error_file.starts_with(&peko_root_canon) {
+            continue;
+        }
         diagnostics.report_diagnostic(error.clone());
     }
 

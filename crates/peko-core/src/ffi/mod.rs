@@ -216,7 +216,10 @@ mod tests {
         assert!(parsed.errors.is_empty());
 
         let source = header_to_peko_source(&parsed);
-        assert_eq!(source, "[external variadic] fn printf(format: cstr) => i32;\n");
+        assert_eq!(
+            source,
+            "[external variadic] fn printf(format: cstr) => i32;\n"
+        );
     }
 
     #[test]

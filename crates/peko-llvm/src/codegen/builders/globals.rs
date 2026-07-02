@@ -209,12 +209,9 @@ impl GlobalBuilder for PekoCodegenContext {
         ["runtime", "core", "collections"]
             .iter()
             .for_each(|modname| {
-                let Some((index, _)) = global_sets
-                    .iter()
-                    .find_position(|global_set| {
-                        global_set.as_str() == format!("{modname}::set_globals")
-                    })
-                else {
+                let Some((index, _)) = global_sets.iter().find_position(|global_set| {
+                    global_set.as_str() == format!("{modname}::set_globals")
+                }) else {
                     return;
                 };
                 let global_method = global_sets.remove(index);

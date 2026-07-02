@@ -100,17 +100,17 @@ impl ProjectIcon {
             });
         };
 
-        ProjectIcon::from_bgra_bin(Path::new(&peko_root).join(DEFAULT_ICON_BIN), DEFAULT_ICON_SIZE)
+        ProjectIcon::from_bgra_bin(
+            Path::new(&peko_root).join(DEFAULT_ICON_BIN),
+            DEFAULT_ICON_SIZE,
+        )
     }
 
     /// Load a square app icon from a raw BGRA pixel blob.
     ///
     /// The file holds `width * width * 4` bytes in BGRA order. The pixels are
     /// converted to RGBA.
-    pub fn from_bgra_bin<P: AsRef<Path>>(
-        path: P,
-        width: u32,
-    ) -> Result<ProjectIcon, ProjectError> {
+    pub fn from_bgra_bin<P: AsRef<Path>>(path: P, width: u32) -> Result<ProjectIcon, ProjectError> {
         let path = path.as_ref();
         let mut pixels = std::fs::read(path).map_err(|source| ProjectError::Icon {
             path: path.to_path_buf(),

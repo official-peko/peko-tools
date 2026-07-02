@@ -400,102 +400,100 @@ impl PekoValueBuilder for ObjectConstructionAST {
 
         // Either reuse previously generated argument values (generic
         // class path) or generate them now.
-        let (constructor_arguments, constructor_keyword_arguments) =
-            if codegen_context.generated_kw_args.is_some() {
-                (
-                    codegen_context.generated_args.clone(),
-                    codegen_context.generated_kw_args.clone().unwrap(),
-                )
-            } else {
-                let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
+        let (constructor_arguments, constructor_keyword_arguments) = if codegen_context
+            .generated_kw_args
+            .is_some()
+        {
+            (
+                codegen_context.generated_args.clone(),
+                codegen_context.generated_kw_args.clone().unwrap(),
+            )
+        } else {
+            let mut argument_type_options = vec![Vec::new(); self.arguments.len()];
 
-                if get_codegen_class
+            if get_codegen_class
+                .as_ref()
+                .unwrap()
+                .main_virtual_table
+                .methods
+                .contains_key("constructor")
+            {
+                let method_options: Vec<CodegenFunction> = get_codegen_class
                     .as_ref()
                     .unwrap()
                     .main_virtual_table
-                    .methods
-                    .contains_key("constructor")
-                {
-                    let method_options: Vec<CodegenFunction> = get_codegen_class
-                        .as_ref()
-                        .unwrap()
-                        .main_virtual_table
-                        .methods["constructor"]
-                        .iter()
-                        .map(|option| option.read().unwrap().clone())
-                        .collect();
+                    .methods["constructor"]
+                    .iter()
+                    .map(|option| option.read().unwrap().clone())
+                    .collect();
 
-                    for method_option in method_options {
-                        if (method_option.arguments.len() - 1) != self.arguments.len()
-                            || (self.arguments.len() > (method_option.arguments.len() - 1)
-                                && method_option.var_args_type.is_none())
-                        {
-                            continue;
-                        }
-
-                        for (idx, (_, argument)) in
-                            method_option.arguments.iter().skip(1).enumerate()
-                        {
-                            argument_type_options[idx].push(argument.argument_type.clone());
-                        }
-
-                        if self.arguments.len() > (method_option.arguments.len() - 1)
-                            && method_option.var_args_type.is_some()
-                        {
-                            for argument_type_option in argument_type_options
-                                .iter_mut()
-                                .take(self.arguments.len())
-                                .skip(method_option.arguments.len() - 1)
-                            {
-                                argument_type_option
-                                    .push(method_option.var_args_type.clone().unwrap());
-                            }
-                        }
-                    }
-                } else {
-                    // Implicit constructor: each positional argument is expected
-                    // to match the corresponding attribute's type, in
-                    // declaration order (the synthetic vtable slot is skipped).
-                    for (idx, (_, attribute)) in get_codegen_class
-                        .as_ref()
-                        .unwrap()
-                        .attributes
-                        .iter()
-                        .filter(|(name, _)| name.as_str() != "<main_virtual_table>")
-                        .enumerate()
+                for method_option in method_options {
+                    if (method_option.arguments.len() - 1) != self.arguments.len()
+                        || (self.arguments.len() > (method_option.arguments.len() - 1)
+                            && method_option.var_args_type.is_none())
                     {
-                        if idx < argument_type_options.len() {
-                            argument_type_options[idx].push(attribute.attribute_type.clone());
+                        continue;
+                    }
+
+                    for (idx, (_, argument)) in method_option.arguments.iter().skip(1).enumerate() {
+                        argument_type_options[idx].push(argument.argument_type.clone());
+                    }
+
+                    if self.arguments.len() > (method_option.arguments.len() - 1)
+                        && method_option.var_args_type.is_some()
+                    {
+                        for argument_type_option in argument_type_options
+                            .iter_mut()
+                            .take(self.arguments.len())
+                            .skip(method_option.arguments.len() - 1)
+                        {
+                            argument_type_option.push(method_option.var_args_type.clone().unwrap());
                         }
                     }
                 }
-
-                let mut constructor_arguments = Vec::new();
-                let mut constructor_keyword_arguments = HashMap::new();
-
-                let post_stack = codegen_context.module_context.step_back();
-                for ((argument_name, argument), expected_type_options) in
-                    self.arguments.iter().zip(argument_type_options)
+            } else {
+                // Implicit constructor: each positional argument is expected
+                // to match the corresponding attribute's type, in
+                // declaration order (the synthetic vtable slot is skipped).
+                for (idx, (_, attribute)) in get_codegen_class
+                    .as_ref()
+                    .unwrap()
+                    .attributes
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "<main_virtual_table>")
+                    .enumerate()
                 {
-                    let current_expected_types =
-                        codegen_context.current_expected_type_options.clone();
-                    codegen_context.current_expected_type_options = Some(expected_type_options);
-
-                    constructor_arguments.push(argument.build_value(codegen_context));
-
-                    codegen_context.current_expected_type_options = current_expected_types;
-
-                    if let Some(name) = argument_name {
-                        constructor_keyword_arguments.insert(
-                            name.value.clone(),
-                            constructor_arguments.last().unwrap().clone(),
-                        );
+                    if idx < argument_type_options.len() {
+                        argument_type_options[idx].push(attribute.attribute_type.clone());
                     }
                 }
-                codegen_context.module_context.step_forward(post_stack);
+            }
 
-                (constructor_arguments, constructor_keyword_arguments)
-            };
+            let mut constructor_arguments = Vec::new();
+            let mut constructor_keyword_arguments = HashMap::new();
+
+            let post_stack = codegen_context.module_context.step_back();
+            for ((argument_name, argument), expected_type_options) in
+                self.arguments.iter().zip(argument_type_options)
+            {
+                let current_expected_types = codegen_context.current_expected_type_options.clone();
+                codegen_context.current_expected_type_options = Some(expected_type_options);
+
+                constructor_arguments.push(argument.build_value(codegen_context));
+
+                codegen_context.current_expected_type_options = current_expected_types;
+
+                if let Some(name) = argument_name {
+                    constructor_keyword_arguments.insert(
+                        name.value.clone(),
+                        constructor_arguments.last().unwrap().clone(),
+                    );
+                }
+            }
+            codegen_context.module_context.step_forward(post_stack);
+
+            (constructor_arguments, constructor_keyword_arguments)
+        };
 
         let (previous_line, previous_file) = codegen_context.track_call_position(
             self.start.file.to_string_lossy().into_owned(),
@@ -600,7 +598,8 @@ impl PekoValueBuilder for ObjectConstructionAST {
                 }
             } else {
                 // Keyword form: missing keys take the attribute's zero value.
-                for (idx, (attribute_name, attribute)) in constructor_attributes.iter().enumerate() {
+                for (idx, (attribute_name, attribute)) in constructor_attributes.iter().enumerate()
+                {
                     let value_to_set = if constructor_keyword_arguments.contains_key(attribute_name)
                     {
                         constructor_keyword_arguments[attribute_name].clone()
@@ -737,8 +736,7 @@ impl PekoValueBuilder for ObjectAccessAST {
                     codegen_context.primary_object = None;
                     codegen_context.accessed_state = None;
 
-                    let restraints =
-                        codegen_context.generic_param_restraints(&object.value_type);
+                    let restraints = codegen_context.generic_param_restraints(&object.value_type);
                     for restraint in &restraints {
                         if let TypeRestraint::Impl(trait_type) = restraint
                             && codegen_context
@@ -1462,9 +1460,8 @@ impl PekoValueBuilder for UnwrapAST {
 
             codegen_context.goto_block_end(merge_block);
             let phi_type = unsafe { core::LLVMTypeOf(unwrapped.llvm_value) };
-            let phi = unsafe {
-                core::LLVMBuildPhi(codegen_context.llvm_builder, phi_type, c"".as_ptr())
-            };
+            let phi =
+                unsafe { core::LLVMBuildPhi(codegen_context.llvm_builder, phi_type, c"".as_ptr()) };
             unsafe {
                 core::LLVMAddIncoming(
                     phi,
@@ -1503,8 +1500,7 @@ impl PekoValueBuilder for UnwrapAST {
                 .unwrap_or_else(|| optional.clone());
             codegen_context.build_return(Some(propagated));
         } else {
-            let _ =
-                codegen_context.call_object_method(&optional, "halt", Vec::new(), None);
+            let _ = codegen_context.call_object_method(&optional, "halt", Vec::new(), None);
             unsafe {
                 core::LLVMBuildUnreachable(codegen_context.llvm_builder);
             }
@@ -1655,7 +1651,7 @@ impl PekoValueBuilder for ModuleAccessAST {
                 &format!("deserialize_enum_{}", self.module_names[0].value),
                 call.arguments.clone(),
                 PositionData::default(),
-                        PositionData::default(),
+                PositionData::default(),
             );
             return helper_call.build_value(codegen_context);
         }
@@ -1718,9 +1714,7 @@ impl PekoValueBuilder for ModuleAccessAST {
                         "method `{method_name}` on type `{type_name}` is not static, so it cannot be called as `{type_name}::{method_name}(...)`. Call it on an instance instead",
                     )
                 } else {
-                    format!(
-                        "type `{type_name}` has no static method `{method_name}`",
-                    )
+                    format!("type `{type_name}` has no static method `{method_name}`",)
                 };
                 codegen_context
                     .diagnostics
@@ -1942,11 +1936,7 @@ impl PekoValueBuilder for VariableReferenceAST {
                 if expand_option.name() == "Option" && expand_option.generics().len() == 1 {
                     let create_option = codegen_context.create_object(&expand_option, Vec::new());
                     if let Some(v) = create_option {
-                        capture_optional_origin(
-                            codegen_context,
-                            &v,
-                            &self.variable_name.start,
-                        );
+                        capture_optional_origin(codegen_context, &v, &self.variable_name.start);
                         return v;
                     }
                 }
@@ -2277,15 +2267,15 @@ impl PekoValueBuilder for FunctionCallAST {
             ) {
                 Ok(value) => value,
                 Err(message) => {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    codegen_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             self.start.clone(),
                             self.end.clone(),
                             message,
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
-                        ));
+                        ),
+                    );
                     codegen_context.create_error_value()
                 }
             };
@@ -2527,8 +2517,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 // Building the message argument clobbered the call-site hint;
                 // restore it so the Option type infers from the surrounding
                 // context (a declared type or the function return type).
-                codegen_context.current_expected_type_options =
-                    entry_expected_type_options.clone();
+                codegen_context.current_expected_type_options = entry_expected_type_options.clone();
 
                 if codegen_context.current_expected_type_options.is_none() {
                     codegen_context.diagnostics.report_diagnostic(
@@ -2554,8 +2543,7 @@ impl PekoValueBuilder for FunctionCallAST {
 
                     let expand_option = codegen_context.expand_type(expected_type).unwrap();
 
-                    if expand_option.name() == "Option" || expand_option.generics().len() == 1
-                    {
+                    if expand_option.name() == "Option" || expand_option.generics().len() == 1 {
                         let create_error_optional =
                             codegen_context.create_object(&expand_option, arguments.clone());
                         if let Some(v) = create_error_optional {
@@ -2619,7 +2607,8 @@ impl PekoValueBuilder for FunctionCallAST {
                     .unwrap()
                     .get_classes()
                     .contains_key(&function_full_name)
-                && !codegen_context.module_has_function_template(&function_module, &function_base_name)
+                && !codegen_context
+                    .module_has_function_template(&function_module, &function_base_name)
                 && !codegen_context.module_has_class_template(&function_module, &function_base_name)
             {
                 // Remember if the name resolves to a variable (case 2,
@@ -2831,8 +2820,8 @@ impl PekoValueBuilder for FunctionCallAST {
             codegen_context.module_context.step_forward(post_stack);
 
             // Collect the generic typenames declared on the function/class.
-            let is_function_template = codegen_context
-                .module_has_function_template(&function_module, &function_base_name);
+            let is_function_template =
+                codegen_context.module_has_function_template(&function_module, &function_base_name);
             let needed_generics = if is_function_template {
                 codegen_context
                     .module_function_template(&function_module, &function_base_name)
@@ -2864,21 +2853,16 @@ impl PekoValueBuilder for FunctionCallAST {
                     })
                     .collect()
             } else {
-                let class_generic = function_module.read().unwrap().get_classes()
-                    [&function_base_name]
-                    .clone();
+                let class_generic =
+                    function_module.read().unwrap().get_classes()[&function_base_name].clone();
                 let class_generic_read = class_generic.read().unwrap();
                 let source = class_generic_read.source_class.clone().unwrap();
-                let find_matching_constructor =
-                    source
-                        .methods
-                        .iter()
-                        .find(|method| match method {
-                            ClassMethod::Constructor(constructor_info, _) => {
-                                constructor_info.arguments.len() == arguments.len()
-                            }
-                            _ => false,
-                        });
+                let find_matching_constructor = source.methods.iter().find(|method| match method {
+                    ClassMethod::Constructor(constructor_info, _) => {
+                        constructor_info.arguments.len() == arguments.len()
+                    }
+                    _ => false,
+                });
 
                 if find_matching_constructor.is_none() {
                     codegen_context
@@ -2970,7 +2954,8 @@ impl PekoValueBuilder for FunctionCallAST {
             // Stash the generated argument values for the
             // ObjectConstructionAST path to reuse.
             if found_function
-                && (codegen_context.module_has_class_template(&function_module, &function_base_name)
+                && (codegen_context
+                    .module_has_class_template(&function_module, &function_base_name)
                     || function_module
                         .read()
                         .unwrap()
@@ -3100,34 +3085,56 @@ impl PekoValueBuilder for FunctionCallAST {
         } else {
             // Step 2b: resolve a function overload from the module's
             // function list, materializing the generic if needed.
-            if codegen_context.module_has_function_template(&function_module, &function_base_name)
-                && !function_module
-                    .read()
-                    .unwrap()
-                    .get_functions()
-                    .contains_key(&function_full_name)
-            {
+            if codegen_context.module_has_function_template(&function_module, &function_base_name) {
                 let function_reference = codegen_context
                     .module_function_template(&function_module, &function_base_name)
                     .unwrap();
 
-                let generated_function = codegen_context
-                    .create_generic_function(&function_reference, function_generics.clone());
-
-                if generated_function.is_none() {
-                    codegen_context.diagnostics.report_diagnostic(
-                        diagnostics::PekoDiagnostic::new(
-                            self.start.clone(),
-                            self.end.clone(),
-                            format!(
-                                "couldn't create generic `{}` due to incorrect type parameters",
-                                function_full_name
-                            ),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ),
+                // Enforce the parameter bounds against the concrete type
+                // arguments at the call site. A generic function body compiles
+                // once against carriers and is reused, so the call site is the
+                // point where a concrete argument's bound conformance is
+                // checked, independent of whether the body already exists.
+                if let Some(source) = function_reference.source_function.clone() {
+                    let expanded_arguments: Vec<PekoType> = function_generics
+                        .iter()
+                        .map(|parameter| {
+                            codegen_context
+                                .expand_type(parameter)
+                                .unwrap_or_else(|| parameter.clone())
+                        })
+                        .collect();
+                    codegen_context.check_generic_bounds(
+                        &function_reference.generic_typenames,
+                        &source.generic_bounds,
+                        &expanded_arguments,
                     );
-                    return codegen_context.create_error_value();
+                }
+
+                if !function_module
+                    .read()
+                    .unwrap()
+                    .get_functions()
+                    .contains_key(&function_full_name)
+                {
+                    let generated_function = codegen_context
+                        .create_generic_function(&function_reference, function_generics.clone());
+
+                    if generated_function.is_none() {
+                        codegen_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.start.clone(),
+                                self.end.clone(),
+                                format!(
+                                    "couldn't create generic `{}` due to incorrect type parameters",
+                                    function_full_name
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                codegen_context.get_current_file().to_path_buf(),
+                            ),
+                        );
+                        return codegen_context.create_error_value();
+                    }
                 }
             }
 
@@ -3281,9 +3288,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 .zip(function_type.generics().iter())
                 .enumerate()
             {
-                if function_var_args_type.is_some()
-                    && index == function_type.generics().len() - 1
-                {
+                if function_var_args_type.is_some() && index == function_type.generics().len() - 1 {
                     break;
                 }
 
@@ -3427,8 +3432,7 @@ fn capture_optional_origin(
     if !codegen_context.local_scope {
         return;
     }
-    let file_value =
-        codegen_context.create_string(position.file.to_string_lossy().into_owned());
+    let file_value = codegen_context.create_string(position.file.to_string_lossy().into_owned());
     let line_value = codegen_context.create_constant_int(position.line as i32);
     let column_value = codegen_context.create_constant_int(position.column as i32);
     let _ = codegen_context.call_object_method(
@@ -3571,7 +3575,9 @@ impl PekoValueBuilder for UnaryExpressionAST {
 
                 // An object operand routes through the Not trait; a raw i1 is
                 // negated by comparing it against false.
-                if codegen_context.get_class_by_type(&negate.value_type).is_some()
+                if codegen_context
+                    .get_class_by_type(&negate.value_type)
+                    .is_some()
                     && let Ok(value) =
                         codegen_context.call_object_method(&negate, "not", Vec::new(), None)
                 {

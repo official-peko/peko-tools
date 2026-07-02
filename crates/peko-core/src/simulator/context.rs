@@ -589,7 +589,10 @@ impl PekoSimulatorContext {
                 current_symbols.remove(index);
             }
 
-            to.write().unwrap().enums.insert(enum_name.clone(), variants);
+            to.write()
+                .unwrap()
+                .enums
+                .insert(enum_name.clone(), variants);
         }
 
         // Lastly, import each submodule. This branch is more involved
@@ -856,10 +859,17 @@ impl PekoSimulatorContext {
             return Vec::new();
         };
 
-        // Ensure the object actually has a class type.
         let mut object_symbols = Vec::new();
+
+        // A generic-parameter-typed object has no class. Its accessible surface
+        // is whatever its bounds grant: the methods of every `impl Trait` bound.
+        // A `from Class` bound erases to the class itself, so it resolves as a
+        // class through the branch below instead.
         let Some(object_class) = self.get_class_by_type(&object.object_type) else {
-            return Vec::new();
+            if object.object_type.is_generic_param() {
+                object_symbols.extend(self.symbols_from_bounds(&object.object_type));
+            }
+            return object_symbols;
         };
 
         // Surface every accessible method.
@@ -914,6 +924,78 @@ impl PekoSimulatorContext {
         }
 
         object_symbols
+    }
+
+    /// The methods reachable through a generic parameter's bounds, as scope
+    /// symbols for completion. Each `impl Trait` bound contributes that trait's
+    /// method slots. Slot arguments carry no source names, so they are surfaced
+    /// as positional `arg0`, `arg1`, and so on. Static slots are included so a
+    /// type-level bound method appears alongside the instance methods.
+    fn symbols_from_bounds(&self, generic_type: &types::PekoType) -> Vec<ScopeSymbol> {
+        let mut symbols = Vec::new();
+
+        for restraint in generic_type.restraints() {
+            let types::TypeRestraint::Impl(trait_type) = restraint else {
+                continue;
+            };
+            let Some(trait_definition) = self.get_trait(trait_type.name()) else {
+                continue;
+            };
+
+            for slot in &trait_definition.methods {
+                let mut arguments = IndexMap::new();
+                for (index, argument_type) in slot.argument_types.iter().enumerate() {
+                    arguments.insert(
+                        format!("arg{index}"),
+                        (VisibilityData::default(), argument_type.clone()),
+                    );
+                }
+
+                let visibility = VisibilityData {
+                    is_static: slot.is_static,
+                    ..VisibilityData::default()
+                };
+
+                symbols.push(ScopeSymbol::Function(
+                    ScopeFunction::new(
+                        None,
+                        slot.name.clone(),
+                        slot.return_type.clone(),
+                        PositionData::default(),
+                        PositionData::default(),
+                        false,
+                        arguments,
+                        Vec::new(),
+                    ),
+                    visibility,
+                ));
+            }
+        }
+
+        symbols
+    }
+
+    /// Records a value's type as a completion-source object at `position`.
+    ///
+    /// The type is expanded first so a generic parameter resolves to its bound
+    /// carrier, whose restraints drive member completion. Only a class type or
+    /// a generic-parameter type is recorded; any other type (a scalar, an enum,
+    /// a closure) records nothing, so non-object values are ignored. This is
+    /// the single place the object-access completion path is fed from, so every
+    /// value-producing site records consistently.
+    pub fn record_defined_object(
+        &mut self,
+        object_type: &types::PekoType,
+        is_this: bool,
+        position: PositionData,
+    ) {
+        let recorded = self
+            .expand_type(object_type)
+            .unwrap_or_else(|| object_type.clone());
+        if self.get_class_by_type(&recorded).is_some() || recorded.is_generic_param() {
+            self.defined_objects
+                .push(DefinedObject::new(is_this, recorded, position));
+        }
     }
 
     /// Walks down the scope tree from `lowest_scope` searching for a
@@ -1012,9 +1094,26 @@ impl PekoSimulatorContext {
                 }
             }
 
-            // Collect symbols visible at the resolved scope.
+            // Collect symbols visible at the resolved scope, but only those
+            // declared IN this module. A module that unpacks another
+            // (`import { * } from collections`) copies those symbols into its
+            // own scope; `mod::` access should list only the module's own
+            // declarations, not what it re-imported. The module's own source is
+            // its scope's end position file (the import binds the scope's start
+            // to the import site but its end to the module's own file).
             if found {
+                let module_own_file = current_scope.as_ref().read().unwrap().end.file.clone();
                 for (_, symbol) in current_scope.as_ref().read().unwrap().symbols.iter() {
+                    // List only the module's own declarations. A symbol brought
+                    // in by an unpack keeps its origin file, so a symbol whose
+                    // file differs from this module's is not a member. A module
+                    // brought in by `import name` is an alias, not a member of
+                    // this module, so module-kind symbols are dropped as well.
+                    if symbol.get_kind() == "module"
+                        || symbol.get_start().file != module_own_file
+                    {
+                        continue;
+                    }
                     if symbol.get_start().file != position.file
                         || symbol.get_start().positioned_before(position.clone())
                     {
@@ -1064,19 +1163,19 @@ impl PekoSimulatorContext {
                 }
             }
 
-            // If found, surface all symbols from the resolved module's
-            // scope.
+            // If found, surface the resolved module's own declarations. As in
+            // the scope-tree branch above, a symbol whose start or end lies in
+            // another file was pulled in by an import and is not a member of
+            // this module.
             if found {
-                for (_, symbol) in &module_referenced
-                    .as_ref()
-                    .read()
-                    .unwrap()
-                    .scope
-                    .as_ref()
-                    .read()
-                    .unwrap()
-                    .symbols
-                {
+                let module_scope = module_referenced.as_ref().read().unwrap().scope.clone();
+                let module_own_file = module_scope.as_ref().read().unwrap().end.file.clone();
+                for (_, symbol) in &module_scope.as_ref().read().unwrap().symbols {
+                    if symbol.get_kind() == "module"
+                        || symbol.get_start().file != module_own_file
+                    {
+                        continue;
+                    }
                     available_symbols.push(symbol.clone());
                 }
             }
@@ -1540,104 +1639,9 @@ impl PekoSimulatorContext {
     }
 }
 
-// ----- Generic bound checking ----------------------------------------------
+// ----- Generic instantiation helpers ---------------------------------------
 
 impl PekoSimulatorContext {
-    /// Verify each concrete type argument satisfies its generic parameter's
-    /// declared bounds. `impl Trait` requires the argument's class (or an
-    /// ancestor) to implement the trait; `from Class` requires it to be that
-    /// class or a descendant. A violated bound is reported as an error. Bound
-    /// checking is compile-time only and is identical under monomorphization
-    /// and erasure (the type arguments do compile-time checking only).
-    fn check_generic_bounds(
-        &mut self,
-        generic_typenames: &[PositionedValue<String>],
-        generic_bounds: &IndexMap<String, Vec<types::TypeRestraint>>,
-        concrete_types: &[types::PekoType],
-    ) {
-        for (typename, concrete) in generic_typenames.iter().zip(concrete_types.iter()) {
-            let Some(bounds) = generic_bounds.get(&typename.value) else {
-                continue;
-            };
-
-            for bound in bounds {
-                match bound {
-                    types::TypeRestraint::Impl(trait_type) => {
-                        if !self.concrete_satisfies_impl(concrete, trait_type.name()) {
-                            self.diagnostics.report_diagnostic(diagnostics::PekoDiagnostic::new(
-                                concrete.start_position.clone(),
-                                concrete.end_position.clone(),
-                                format!(
-                                    "type `{concrete}` does not satisfy the bound `{}: impl {trait_type}`. The type must implement trait `{trait_type}`",
-                                    typename.value,
-                                ),
-                                diagnostics::DiagnosticType::Error,
-                                self.get_current_file(),
-                            ));
-                        }
-                    }
-                    types::TypeRestraint::From(parent_type) => {
-                        if !self.concrete_satisfies_from(concrete, parent_type.name()) {
-                            self.diagnostics.report_diagnostic(diagnostics::PekoDiagnostic::new(
-                                concrete.start_position.clone(),
-                                concrete.end_position.clone(),
-                                format!(
-                                    "type `{concrete}` does not satisfy the bound `{}: from {parent_type}`. The type must be `{parent_type}` or inherit from it",
-                                    typename.value,
-                                ),
-                                diagnostics::DiagnosticType::Error,
-                                self.get_current_file(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Walk the concrete type's class hierarchy; satisfied when any level lists
-    /// the trait in its `impl` clause.
-    fn concrete_satisfies_impl(&mut self, concrete: &types::PekoType, trait_name: &str) -> bool {
-        // A value already typed as the trait itself (a trait object, or the
-        // erased carrier used to type-check a generic body) satisfies the bound.
-        if concrete.name() == trait_name {
-            return true;
-        }
-
-        // An erased carrier satisfies a bound when the trait is among the
-        // restraints it carries (a `KT: impl Hash, impl Equals` carrier
-        // satisfies both Hash and Equals).
-        if concrete.is_generic_param()
-            && concrete.restraints().iter().any(|restraint| {
-                matches!(restraint, types::TypeRestraint::Impl(trait_type) if trait_type.name() == trait_name)
-            })
-        {
-            return true;
-        }
-
-        let mut class = self.get_class_by_type(concrete);
-        while let Some(current) = class {
-            if current.implements.iter().any(|name| name == trait_name) {
-                return true;
-            }
-            class = current.parent_class.map(|boxed| *boxed);
-        }
-        false
-    }
-
-    /// Walk the concrete type's class hierarchy; satisfied when any level's
-    /// class name matches the bound class.
-    fn concrete_satisfies_from(&mut self, concrete: &types::PekoType, parent_name: &str) -> bool {
-        let mut class = self.get_class_by_type(concrete);
-        while let Some(current) = class {
-            if current.class_type.name() == parent_name {
-                return true;
-            }
-            class = current.parent_class.map(|boxed| *boxed);
-        }
-        false
-    }
-
     /// The type a generic parameter erases to for body type-checking. An
     /// unbounded parameter erases to the root `Object`; a `from Class` bound
     /// carries the class (granting its fields and methods); an `impl Trait`
@@ -1780,6 +1784,10 @@ impl
 
     fn get_current_this_mut(&mut self) -> &mut Option<SimulatorVariable> {
         &mut self.current_this
+    }
+
+    fn get_diagnostics_mut(&mut self) -> &mut crate::diagnostics::DiagnosticList {
+        &mut self.diagnostics
     }
 
     // ----- Custom algorithm implementations --------------------------------
@@ -2157,12 +2165,7 @@ impl
         // constrained to the supplied argument's type. The caller back-patches
         // these into the receiver variable. `this` is the first parameter, so
         // it is skipped to align with the explicit argument types.
-        for (param, argument_type) in method
-            .arguments
-            .values()
-            .skip(1)
-            .zip(argument_types.iter())
-        {
+        for (param, argument_type) in method.arguments.values().skip(1).zip(argument_types.iter()) {
             let param_name = param.argument_type.name();
             if param_name.starts_with('?') {
                 self.last_call_inference
@@ -2273,9 +2276,7 @@ impl
                 .map(|name| name.value.clone())
                 .collect();
             let mut method_substitution = HashMap::new();
-            for (declared, actual) in
-                method.arguments.values().skip(1).zip(argument_types.iter())
-            {
+            for (declared, actual) in method.arguments.values().skip(1).zip(argument_types.iter()) {
                 types::infer_generic_bindings(
                     &declared.argument_type,
                     actual,
@@ -2441,8 +2442,7 @@ impl
         // `&&` / `||` between bool and i1 (in any mix) short-circuit on the raw
         // i1 rather than routing through the And/Or trait, yielding i1.
         let operator_is_logical = matches!(operator.to_string().as_str(), "&&" | "||");
-        let is_bool_like =
-            |t: &PekoType| t.name() == "bool" || t.name() == "i1";
+        let is_bool_like = |t: &PekoType| t.name() == "bool" || t.name() == "i1";
         if operator_is_logical && is_bool_like(&lhs_value_type) && is_bool_like(&rhs_value_type) {
             return Some(SimulatorValue::Value(types::PekoType::simple_type("i1")));
         }

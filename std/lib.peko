@@ -1,6 +1,0 @@
-//! The Pekoscript standard library entry.
-//!
-//! Submodules resolve as sibling files: std::core is core.peko, std::io is
-//! io.peko, and so on. std::core and std::collections are auto-imported and
-//! used bare. std::runtime, std::xml, and std::json are auto-imported and used
-//! through their prefix. Every other module needs an explicit import.

@@ -212,6 +212,50 @@ fn test_string_parsing() {
 }
 
 #[test]
+fn test_unicode_escape_parsing() {
+    // A BMP scalar and an astral scalar (a grinning face) in one string.
+    let mut parser = create_parser_with_source("\"A\\u{41}\\u{1F600}B\"endtest");
+    let string = parser.parse_string();
+
+    assert_eq!(string.chunks.len(), 1);
+    assert!(string.chunks[0].is_text());
+    assert_eq!(string.chunks[0].get_text(), "AA\u{1f600}B");
+    assert_eq!(parser.tokens.current_token().get_value(), "endtest");
+    assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+}
+
+#[test]
+fn test_unicode_escape_rejects_bad_code_point() {
+    // A surrogate code point is not a Unicode scalar value.
+    let mut parser = create_parser_with_source("\"\\u{D800}\"endtest");
+    let _ = parser.parse_string();
+    assert!(parser.get_diagnostics().get_error_count() > 0);
+}
+
+#[test]
+fn test_unicode_escape_requires_braces() {
+    let mut parser = create_parser_with_source("\"\\uABCD\"endtest");
+    let _ = parser.parse_string();
+    assert!(parser.get_diagnostics().get_error_count() > 0);
+}
+
+#[test]
+fn test_non_ascii_identifier_reports_targeted_diagnostic() {
+    // A bare non-ASCII character is not a valid identifier character.
+    let mut parser = create_parser_with_source("\u{e9}");
+    let _ = parser.parse();
+
+    assert!(parser.get_diagnostics().get_error_count() > 0);
+    assert!(
+        parser
+            .get_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("non-ASCII")),
+        "expected a non-ASCII identifier diagnostic",
+    );
+}
+
+#[test]
 fn test_char_parsing() {
     let mut parser = create_parser_with_source("'a'endtest'\n' ' '");
     let char1 = parser.parse_char();
@@ -259,8 +303,7 @@ fn test_variable_declaration_parsing() {
 fn test_cast_forms_parsing() {
     use crate::asts::expressions::CastKind;
 
-    let mut parser =
-        create_parser_with_source("x as i64 danger_cast<i32>(y) constant<f64>(1.3)");
+    let mut parser = create_parser_with_source("x as i64 danger_cast<i32>(y) constant<f64>(1.3)");
 
     match parser.parse_expression() {
         PekoAST::Cast(cast) => {
@@ -291,8 +334,7 @@ fn test_cast_forms_parsing() {
 
 #[test]
 fn test_new_object_construction_parsing() {
-    let mut parser =
-        create_parser_with_source("new Box(5) new Sorter<i32, string>(a, b)");
+    let mut parser = create_parser_with_source("new Box(5) new Sorter<i32, string>(a, b)");
 
     match parser.parse_expression() {
         PekoAST::ObjectConstruction(construction) => {
@@ -1202,4 +1244,17 @@ fn test_expression_parsing() {
     }
 
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+}
+
+#[test]
+fn trailing_question_mark_at_eof_terminates() {
+    // A bare `?` as the final token of input used to spin the identifier
+    // suffix loop forever (it re-read the last token at end of input).
+    // Parsing must now terminate and yield an unwrap.
+    let mut parser = create_parser_with_source("x?");
+    let ast = parser.parse();
+    assert!(
+        matches!(ast, PekoAST::Unwrap(_)),
+        "a trailing `?` must parse as an unwrap"
+    );
 }

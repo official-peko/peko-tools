@@ -1,3 +1,0 @@
-//! std::sockets: network sockets.
-//!
-//! Ported from the V1 sockets package.

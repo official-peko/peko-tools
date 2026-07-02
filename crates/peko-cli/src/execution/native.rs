@@ -62,9 +62,13 @@ pub(crate) fn compile_native_sources(
         let package_name = loaded.manifest.name().to_owned();
         let package_root = loaded.root;
 
-        // Include directories: the package's own (relative to its root) plus
-        // the toolchain's (relative to the toolchain dir).
-        let mut include_flags = Vec::new();
+        // Include directories: the global FFI header directory
+        // (Compiler/include, which holds peko.h), the package's own (relative
+        // to its root), and the toolchain's (relative to the toolchain dir).
+        let mut include_flags = vec![format!(
+            "-I{}",
+            peko_root.join("Compiler").join("include").display()
+        )];
         for include in &native.include {
             include_flags.push(format!("-I{}", package_root.join(include).display()));
         }
@@ -185,15 +189,12 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
 
     add(project_root.to_path_buf(), &mut roots, &mut seen);
 
-    // The temporary development override: resolve `std` from the compiler
-    // repo's own std/ directory rather than an installed package. Mirrors
-    // `external_modules_for`. Remove once std is published and locked normally.
-    if let Some(repo_std) = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("std"))
-    {
-        add(repo_std, &mut roots, &mut seen);
+    // Resolve `std` from the installed registry cache under the Peko root, so
+    // its native C sources compile even when the package is not in the
+    // project's lockfile (std is auto-imported). Mirrors `external_modules_for`.
+    let installed_std = registry_source_dir(peko_root, "std", "0.1.0");
+    if installed_std.join("peko.toml").is_file() {
+        add(installed_std, &mut roots, &mut seen);
     }
 
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {

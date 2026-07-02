@@ -11,7 +11,14 @@
 use std::path::PathBuf;
 
 /// The LLD driver libraries linked from the LLVM prefix.
-const LLD_LIBS: &[&str] = &["lldMachO", "lldCOFF", "lldELF", "lldMinGW", "lldWasm", "lldCommon"];
+const LLD_LIBS: &[&str] = &[
+    "lldMachO",
+    "lldCOFF",
+    "lldELF",
+    "lldMinGW",
+    "lldWasm",
+    "lldCommon",
+];
 
 fn main() {
     let llvm_prefix = PathBuf::from(env_var(

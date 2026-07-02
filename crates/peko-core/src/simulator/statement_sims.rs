@@ -166,9 +166,13 @@ impl PekoValueSimulator for VariableReassignmentAST {
 
         // A direct assignment to a local definitely initializes it.
         if is_direct_assignment
-            && simulator_context.scoped_variables.contains_key(&variable_name)
+            && simulator_context
+                .scoped_variables
+                .contains_key(&variable_name)
         {
-            simulator_context.uninitialized_variables.remove(&variable_name);
+            simulator_context
+                .uninitialized_variables
+                .remove(&variable_name);
         }
 
         simulator_context.current_expected_type_options = previous_expected_type;
@@ -596,16 +600,16 @@ impl PekoValueSimulator for SwitchStatementAST {
             match &arm.pattern {
                 None => {
                     if has_default {
-                        simulator_context
-                            .diagnostics
-                            .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        simulator_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
                                 arm.start.clone(),
                                 arm.end.clone(),
                                 "duplicate `_` arm. A `switch` can have at most one default arm"
                                     .to_string(),
                                 diagnostics::DiagnosticType::Error,
                                 simulator_context.get_current_file(),
-                            ));
+                            ),
+                        );
                     }
                     has_default = true;
                 }
@@ -886,12 +890,8 @@ impl PekoValueSimulator for ForLoopAST {
         // the codegen. A type is iterable when `iter` returns an iterator whose
         // `next` yields `T?`; the loop runs until `next` yields None.
         let iterable = self.iterator.simulate(simulator_context);
-        let get_iterator = simulator_context.call_object_method(
-            &iterable,
-            String::from("iter"),
-            Vec::new(),
-            None,
-        );
+        let get_iterator =
+            simulator_context.call_object_method(&iterable, String::from("iter"), Vec::new(), None);
 
         let iterator = match get_iterator {
             Ok(iter) => iter,
@@ -1218,18 +1218,15 @@ impl PekoValueSimulator for ImportStatementAST {
             let module_source = if ffi::is_ffi_header(&module_entry_file_path) {
                 let parsed = ffi::parse_header(&raw_source);
                 for error in &parsed.errors {
-                    simulator_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    simulator_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             self.start.clone(),
                             self.end.clone(),
-                            format!(
-                                "FFI header `{}`: {error}",
-                                module_entry_file_path.display(),
-                            ),
+                            format!("FFI header `{}`: {error}", module_entry_file_path.display(),),
                             diagnostics::DiagnosticType::Error,
                             simulator_context.get_current_file(),
-                        ));
+                        ),
+                    );
                 }
                 ffi::header_to_peko_source(&parsed)
             } else {
@@ -1246,13 +1243,12 @@ impl PekoValueSimulator for ImportStatementAST {
 
             // Pull the module's docinfo first if present. An empty module has
             // no tokens, so the docinfo peek is guarded against an empty list.
-            let module_docinfo = if parser.tokens.length() != 0
-                && parser.tokens.current_token().equals("//!")
-            {
-                Some(parser.parse_module_doc_info())
-            } else {
-                None
-            };
+            let module_docinfo =
+                if parser.tokens.length() != 0 && parser.tokens.current_token().equals("//!") {
+                    Some(parser.parse_module_doc_info())
+                } else {
+                    None
+                };
 
             while (parser.tokens.length() != 0
                 && parser.tokens.get_index() != parser.tokens.length() - 1)
@@ -1283,7 +1279,19 @@ impl PekoValueSimulator for ImportStatementAST {
                     break;
                 }
 
+                // Popping a queued (derive-generated) declaration makes progress
+                // without consuming a token, so only force a token of progress
+                // when nothing was queued. Otherwise a genuine no-progress parse
+                // step on malformed source could spin this loop forever.
+                let had_pending = parser.has_pending();
+                let index_before = parser.tokens.get_index();
                 asts.push(parser.parse());
+                if !had_pending
+                    && !parser.tokens.finished()
+                    && parser.tokens.get_index() == index_before
+                {
+                    parser.tokens.increase_index();
+                }
             }
 
             // Forward parser diagnostics into the main context unless
@@ -1301,14 +1309,15 @@ impl PekoValueSimulator for ImportStatementAST {
 
             // Create a new scope for the imported module's top-level
             // declarations.
+            // The scope starts at the import statement (in the importing file)
+            // so tooling reports the import on its own line. The end stays at
+            // the parsed module's own file, which marks this as an imported
+            // scope and identifies the module's source for symbol filtering.
             let scope_reference = Arc::new(RwLock::new(Scope::new(
                 true,
                 false,
                 VisibilityData::open_visibility(),
-                PositionData {
-                    file: simulator_context.get_current_file(),
-                    ..PositionData::default()
-                },
+                self.start.clone(),
                 parser.get_current_position(),
                 import_as_module_name.clone(),
             )));

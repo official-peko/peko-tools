@@ -12,8 +12,7 @@ fn create_parser_with_source(source: &str) -> PekoParser {
 
 #[test]
 fn test_builtin_types_parsing() {
-    let mut types_parser =
-        create_parser_with_source("i32 i64 f32 bool char f64 opaque cstr");
+    let mut types_parser = create_parser_with_source("i32 i64 f32 bool char f64 opaque cstr");
     let builtin_int = PekoType::from_tokens(&mut types_parser);
     let builtin_int64 = PekoType::from_tokens(&mut types_parser);
     let builtin_float = PekoType::from_tokens(&mut types_parser);
@@ -88,7 +87,10 @@ fn test_closure_types_parsing() {
     assert_eq!(closure_type1.generics()[1].to_string(), "string");
 
     assert!(closure_type2.is_function());
-    assert_eq!(closure_type2.function_return().unwrap().to_string(), "string");
+    assert_eq!(
+        closure_type2.function_return().unwrap().to_string(),
+        "string"
+    );
 
     assert_eq!(types_parser.get_diagnostics().get_error_count(), 0);
 }
@@ -107,7 +109,10 @@ fn test_function_types_parsing() {
     assert_eq!(function_type2.generics()[0].to_string(), "opaque");
 
     assert!(function_type1.is_function());
-    assert_eq!(function_type1.function_return().unwrap().to_string(), "void");
+    assert_eq!(
+        function_type1.function_return().unwrap().to_string(),
+        "void"
+    );
 
     assert!(function_type2.is_function());
     assert_eq!(function_type2.function_return().unwrap().to_string(), "i32");

@@ -35,12 +35,14 @@ use data_structures::{
 };
 use indexmap::IndexMap;
 
-use crate::{ExternalModuleInfo, ExternalModuleVersion};
 use crate::asts::PekoAST;
 use crate::asts::data_structures::{PositionData, PositionedValue, StringChunk};
+use crate::diagnostics;
+use crate::types::TypeRestraint;
 use crate::asts::expressions::ObjectConstructionAST;
 use crate::asts::values::StringAST;
 use crate::types::PekoType;
+use crate::{ExternalModuleInfo, ExternalModuleVersion};
 
 /// One frame of the module-resolution stack.
 ///
@@ -362,6 +364,123 @@ pub trait ExecutionContextAlgorithms<
             .unwrap()
             .get_file()
             .to_path_buf()
+    }
+
+    /// Backend hook: the diagnostic sink the current pass writes errors and
+    /// warnings into. The simulator and the code generator each own a list, so
+    /// the shared algorithms can report against whichever pass is running.
+    fn get_diagnostics_mut(&mut self) -> &mut diagnostics::DiagnosticList;
+
+    /// Verify each concrete type argument satisfies its generic parameter's
+    /// declared bounds. `impl Trait` requires the argument's class (or an
+    /// ancestor) to implement the trait; `from Class` requires it to be that
+    /// class or a descendant. A violated bound is reported as an error. Bound
+    /// checking is compile-time only and is identical under the simulator and
+    /// the code generator, so it lives on the shared trait and both call it
+    /// from their instantiation path.
+    fn check_generic_bounds(
+        &mut self,
+        generic_typenames: &[PositionedValue<String>],
+        generic_bounds: &IndexMap<String, Vec<TypeRestraint>>,
+        concrete_types: &[PekoType],
+    ) {
+        for (typename, concrete) in generic_typenames.iter().zip(concrete_types.iter()) {
+            let Some(bounds) = generic_bounds.get(&typename.value) else {
+                continue;
+            };
+
+            for bound in bounds {
+                let message = match bound {
+                    TypeRestraint::Impl(trait_type) => {
+                        if self.concrete_satisfies_impl(concrete, trait_type.name()) {
+                            continue;
+                        }
+                        format!(
+                            "type `{concrete}` does not satisfy the bound `{}: impl {trait_type}`. The type must implement trait `{trait_type}`",
+                            typename.value,
+                        )
+                    }
+                    TypeRestraint::From(parent_type) => {
+                        if self.concrete_satisfies_from(concrete, parent_type.name()) {
+                            continue;
+                        }
+                        format!(
+                            "type `{concrete}` does not satisfy the bound `{}: from {parent_type}`. The type must be `{parent_type}` or inherit from it",
+                            typename.value,
+                        )
+                    }
+                };
+
+                let file = self.get_current_file();
+                let diagnostic = diagnostics::PekoDiagnostic::new(
+                    concrete.start_position.clone(),
+                    concrete.end_position.clone(),
+                    message,
+                    diagnostics::DiagnosticType::Error,
+                    file,
+                );
+
+                // The erased backend re-resolves a generic type at every use, so
+                // the same violation can reach this point many times. Report it
+                // once per source site: skip it when an identical diagnostic
+                // (same span, file, and message) is already recorded.
+                let already_reported = self.get_diagnostics_mut().iter().any(|existing| {
+                    existing.start.index == diagnostic.start.index
+                        && existing.start.file == diagnostic.start.file
+                        && existing.message == diagnostic.message
+                });
+                if !already_reported {
+                    self.get_diagnostics_mut().report_diagnostic(diagnostic);
+                }
+            }
+        }
+    }
+
+    /// Walk the concrete type's class hierarchy; satisfied when any level lists
+    /// the trait in its `impl` clause.
+    fn concrete_satisfies_impl(&mut self, concrete: &PekoType, trait_name: &str) -> bool {
+        // A value already typed as the trait itself (a trait object, or the
+        // erased carrier used to type-check a generic body) satisfies the bound.
+        if concrete.name() == trait_name {
+            return true;
+        }
+
+        // An erased carrier satisfies a bound when the trait is among the
+        // restraints it carries (a `KT: impl Hash, impl Equals` carrier
+        // satisfies both Hash and Equals).
+        if concrete.is_generic_param()
+            && concrete.restraints().iter().any(|restraint| {
+                matches!(restraint, TypeRestraint::Impl(trait_type) if trait_type.name() == trait_name)
+            })
+        {
+            return true;
+        }
+
+        let mut class = self.get_class_by_type(concrete);
+        while let Some(current) = class {
+            if current
+                .get_implemented_trait_names()
+                .iter()
+                .any(|name| name == trait_name)
+            {
+                return true;
+            }
+            class = current.get_parent_class().cloned();
+        }
+        false
+    }
+
+    /// Walk the concrete type's class hierarchy; satisfied when any level's
+    /// class name matches the bound class.
+    fn concrete_satisfies_from(&mut self, concrete: &PekoType, parent_name: &str) -> bool {
+        let mut class = self.get_class_by_type(concrete);
+        while let Some(current) = class {
+            if current.get_class_type().name() == parent_name {
+                return true;
+            }
+            class = current.get_parent_class().cloned();
+        }
+        false
     }
 
     /// Parses a version string of the form `v1.2.3` into its numeric
@@ -714,7 +833,11 @@ pub trait ExecutionContextAlgorithms<
             ExternalModuleInfo::new(
                 String::from(path_ids.last().map(String::as_str).unwrap_or(first)),
                 String::from("local module"),
-                vec![ExternalModuleVersion::new(String::new(), entry_dir, entry_name)],
+                vec![ExternalModuleVersion::new(
+                    String::new(),
+                    entry_dir,
+                    entry_name,
+                )],
             )
         };
 
@@ -756,10 +879,7 @@ pub trait ExecutionContextAlgorithms<
     /// first segment is found in the current module tree or the top-level
     /// modules, and each further segment steps into a submodule. Returns `None`
     /// when any segment does not resolve.
-    fn resolve_qualified_module(
-        &self,
-        module_names: &[String],
-    ) -> Option<Arc<RwLock<ModuleType>>> {
+    fn resolve_qualified_module(&self, module_names: &[String]) -> Option<Arc<RwLock<ModuleType>>> {
         if module_names.is_empty() {
             return None;
         }
@@ -809,7 +929,13 @@ pub trait ExecutionContextAlgorithms<
         !type1.module_names().is_empty()
             && self
                 .resolve_qualified_module(type1.module_names())
-                .map(|module| module.read().unwrap().get_enums().contains_key(type1.name()))
+                .map(|module| {
+                    module
+                        .read()
+                        .unwrap()
+                        .get_enums()
+                        .contains_key(type1.name())
+                })
                 .unwrap_or(false)
     }
 
@@ -913,7 +1039,10 @@ pub trait ExecutionContextAlgorithms<
     /// Walks up the module tree looking for a generic-function template named
     /// `generic_name`: an overload stored under the bare name that still holds
     /// its source AST.
-    fn find_function_generic_in_current(&self, generic_name: impl ToString) -> Option<FunctionType> {
+    fn find_function_generic_in_current(
+        &self,
+        generic_name: impl ToString,
+    ) -> Option<FunctionType> {
         let mut current = self.get_module_context().current_module();
         let target = generic_name.to_string();
 
@@ -988,8 +1117,7 @@ pub trait ExecutionContextAlgorithms<
             // carrier of its own name. It is terminal: adopt the carrier
             // (keeping its bounds) and stop, so the parameter is not chased
             // into an infinite self-substitution.
-            let self_mapped =
-                replacement.is_generic_param() && replacement.name() == type1.name();
+            let self_mapped = replacement.is_generic_param() && replacement.name() == type1.name();
 
             array_depth = replacement.array_depth;
             reference_depth = replacement.reference_depth;
@@ -1399,12 +1527,11 @@ pub trait ExecutionContextAlgorithms<
                 // the type parameters.
                 let next_generic = next_module.clone().read().unwrap().get_classes()
                     [type_expanded.name()]
-                    .read()
-                    .unwrap()
-                    .clone();
+                .read()
+                .unwrap()
+                .clone();
 
-                return self
-                    .create_generic_class(&next_generic, type_expanded.generics().to_vec());
+                return self.create_generic_class(&next_generic, type_expanded.generics().to_vec());
             }
 
             return None;

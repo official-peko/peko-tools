@@ -339,6 +339,13 @@ impl Token {
         matches!(self.token_type, TokenType::Comment)
     }
 
+    /// Returns `true` if this token is a `///` doc-comment marker. Distinct from
+    /// [`Self::is_comment`], which covers only plain `//` comments.
+    #[must_use]
+    pub fn is_doc_comment(&self) -> bool {
+        matches!(self.token_type, TokenType::DocComment)
+    }
+
     /// Returns `true` if either the preceding or following whitespace of this
     /// token contains a newline.
     ///

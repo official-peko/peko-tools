@@ -752,7 +752,8 @@ impl LlvmConstantBuilder for PekoCodegenContext {
             .map(|(index, _)| index + 1)
             .max()
             .unwrap_or(0);
-        let null_pointer = unsafe { core::LLVMConstPointerNull(core::LLVMPointerType(core::LLVMInt8Type(), 0)) };
+        let null_pointer =
+            unsafe { core::LLVMConstPointerNull(core::LLVMPointerType(core::LLVMInt8Type(), 0)) };
         let mut slots = vec![null_pointer; slot_count];
         for (index, function_value) in method_pointers {
             slots[index] = function_value;
@@ -803,7 +804,11 @@ impl LlvmConstantBuilder for PekoCodegenContext {
             .map(|index| unsafe { core::LLVMConstInt(i32_type, *index as u64, 1) })
             .collect::<Vec<_>>();
         let witness_array = unsafe {
-            core::LLVMConstArray2(i32_type, index_consts.as_mut_ptr(), index_consts.len() as u64)
+            core::LLVMConstArray2(
+                i32_type,
+                index_consts.as_mut_ptr(),
+                index_consts.len() as u64,
+            )
         };
         let array_type = unsafe { core::LLVMArrayType2(i32_type, slot_indices.len() as u64) };
 
@@ -836,7 +841,11 @@ impl LlvmConstantBuilder for PekoCodegenContext {
         // ITableEntry = { i32 trait_id, ptr witness }.
         let mut entry_field_types = [i32_type, ptr_type];
         let entry_type = unsafe {
-            core::LLVMStructType(entry_field_types.as_mut_ptr(), entry_field_types.len() as u32, 0)
+            core::LLVMStructType(
+                entry_field_types.as_mut_ptr(),
+                entry_field_types.len() as u32,
+                0,
+            )
         };
 
         let post_stack = self.module_context.step_back_generics();
@@ -861,17 +870,28 @@ impl LlvmConstantBuilder for PekoCodegenContext {
             let mut entry_consts = itable_entries
                 .iter()
                 .map(|(trait_id, witness)| {
-                    let mut fields =
-                        [unsafe { core::LLVMConstInt(i32_type, *trait_id as u64, 1) }, witness.llvm_value];
+                    let mut fields = [
+                        unsafe { core::LLVMConstInt(i32_type, *trait_id as u64, 1) },
+                        witness.llvm_value,
+                    ];
                     unsafe {
-                        core::LLVMConstNamedStruct(entry_type, fields.as_mut_ptr(), fields.len() as u32)
+                        core::LLVMConstNamedStruct(
+                            entry_type,
+                            fields.as_mut_ptr(),
+                            fields.len() as u32,
+                        )
                     }
                 })
                 .collect::<Vec<_>>();
             let itable_array = unsafe {
-                core::LLVMConstArray2(entry_type, entry_consts.as_mut_ptr(), entry_consts.len() as u64)
+                core::LLVMConstArray2(
+                    entry_type,
+                    entry_consts.as_mut_ptr(),
+                    entry_consts.len() as u64,
+                )
             };
-            let itable_array_type = unsafe { core::LLVMArrayType2(entry_type, itable_count as u64) };
+            let itable_array_type =
+                unsafe { core::LLVMArrayType2(entry_type, itable_count as u64) };
             let itable_name = cstr(format!("peko_itable_{mangled_name}"));
             unsafe {
                 let g = core::LLVMAddGlobal(module, itable_array_type, itable_name.as_ptr());

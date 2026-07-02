@@ -41,7 +41,8 @@ fn build_generic_class_template(
     let current_module = codegen_context.module_context.current_module().clone();
     let current_file = codegen_context.get_current_file().to_path_buf();
     let class_type = PekoType::from_string(ast.class_name.value.as_str(), &current_file);
-    let placeholder = codegen_context.create_named_struct(format!("template.{}", ast.class_name.value));
+    let placeholder =
+        codegen_context.create_named_struct(format!("template.{}", ast.class_name.value));
 
     let mut class = CodegenClass::new(
         class_type,
@@ -328,7 +329,11 @@ impl PekoValueBuilder for NewVariableAST {
                     self.variable_value
                         .as_ref()
                         .map(|value| value.as_ref().clone())
-                        .unwrap_or_else(|| PekoAST::Placeholder(PlaceholderAST { value: String::new() })),
+                        .unwrap_or_else(|| {
+                            PekoAST::Placeholder(PlaceholderAST {
+                                value: String::new(),
+                            })
+                        }),
                 ));
         }
 
@@ -362,42 +367,38 @@ impl PekoValueBuilder for DestructureAST {
                 0 => "get_first",
                 1 => "get_second",
                 _ => {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                    codegen_context.diagnostics.report_diagnostic(
+                        diagnostics::PekoDiagnostic::new(
                             name.start.clone(),
                             name.end.clone(),
                             "destructuring binds at most two names".to_string(),
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
-                        ));
+                        ),
+                    );
                     continue;
                 }
             };
 
-            let element = match codegen_context.call_object_method(
-                &value,
-                accessor,
-                Vec::new(),
-                None,
-            ) {
-                Ok(element) => element,
-                Err(_) => {
-                    codegen_context
-                        .diagnostics
-                        .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                            self.value.get_start().clone(),
-                            self.value.get_end().clone(),
-                            format!(
-                                "cannot destructure a value of type `{}`; it is not a Pair",
-                                value.value_type
+            let element =
+                match codegen_context.call_object_method(&value, accessor, Vec::new(), None) {
+                    Ok(element) => element,
+                    Err(_) => {
+                        codegen_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                self.value.get_start().clone(),
+                                self.value.get_end().clone(),
+                                format!(
+                                    "cannot destructure a value of type `{}`; it is not a Pair",
+                                    value.value_type
+                                ),
+                                diagnostics::DiagnosticType::Error,
+                                codegen_context.get_current_file().to_path_buf(),
                             ),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ));
-                    codegen_context.create_error_value()
-                }
-            };
+                        );
+                        codegen_context.create_error_value()
+                    }
+                };
 
             let element_type = element.value_type.clone();
             let slot = codegen_context.build_stack_allocation(&element_type);
@@ -1333,7 +1334,11 @@ impl PekoValueBuilder for EnumDeclarationAST {
             .map(|variant| variant.value.clone())
             .collect();
 
-        codegen_context.register_enum(self.enum_name.value.clone(), variant_names, self.visibility.private);
+        codegen_context.register_enum(
+            self.enum_name.value.clone(),
+            variant_names,
+            self.visibility.private,
+        );
 
         codegen_context.create_error_value()
     }
@@ -1423,8 +1428,10 @@ impl PekoValueBuilder for ClassAST {
         // Register an empty shell carrying only the class's named struct types,
         // so the class resolves as a type from any other declaration's
         // signature (forward references) before the signature pass lays it out.
-        let mut class_type =
-            PekoType::from_string(self.class_name.value.as_str(), codegen_context.get_current_file());
+        let mut class_type = PekoType::from_string(
+            self.class_name.value.as_str(),
+            codegen_context.get_current_file(),
+        );
         let mut next_module = codegen_context.module_context.current_module().clone();
         loop {
             class_type
@@ -1540,53 +1547,52 @@ impl PekoValueBuilder for ClassAST {
                 .and_then(|class| class.read().unwrap().parent_class.clone());
             (function_values, parent_class)
         } else {
+            let mut virtual_table_methods = IndexMap::new();
+            let mut class_attributes = IndexMap::new();
+            let mut parent_class = None;
 
-        let mut virtual_table_methods = IndexMap::new();
-        let mut class_attributes = IndexMap::new();
-        let mut parent_class = None;
+            // Reuse the struct types created by the header pass (`declare`) so a
+            // forward reference resolved earlier points at the same struct. Falls
+            // back to creating them when running without a header pass.
+            let declared_shell = codegen_context
+                .module_context
+                .current_module()
+                .read()
+                .unwrap()
+                .get_classes()
+                .get(&self.class_name.value)
+                .cloned();
 
-        // Reuse the struct types created by the header pass (`declare`) so a
-        // forward reference resolved earlier points at the same struct. Falls
-        // back to creating them when running without a header pass.
-        let declared_shell = codegen_context
-            .module_context
-            .current_module()
-            .read()
-            .unwrap()
-            .get_classes()
-            .get(&self.class_name.value)
-            .cloned();
+            let main_virtual_table_struct_type = match &declared_shell {
+                Some(shell) => shell.read().unwrap().main_virtual_table.llvm_type,
+                None => codegen_context
+                    .create_named_struct(format!("{}::<<main_virtual_table>>", class_type)),
+            };
 
-        let main_virtual_table_struct_type = match &declared_shell {
-            Some(shell) => shell.read().unwrap().main_virtual_table.llvm_type,
-            None => codegen_context
-                .create_named_struct(format!("{}::<<main_virtual_table>>", class_type)),
-        };
+            // Only add the vtable slot when the class actually has methods
+            // or inherits from a class that does. The vtable is static data: the
+            // slot is a raw (address-space-0) pointer to the static vtable, and
+            // the collector does not trace it. The descriptor emission excludes
+            // this slot from the traced offsets.
+            if !self.methods.is_empty() || self.derives_from.len() == 1 {
+                class_attributes.insert(
+                    "<main_virtual_table>".to_string(),
+                    CodegenClassAttribute::new(
+                        VisibilityData::open_visibility(),
+                        managed_pointer_type(PekoType::simple_type("void")),
+                        0,
+                        codegen_context.pointer_type_of(main_virtual_table_struct_type),
+                    ),
+                );
+            }
 
-        // Only add the vtable slot when the class actually has methods
-        // or inherits from a class that does. The vtable is static data: the
-        // slot is a raw (address-space-0) pointer to the static vtable, and
-        // the collector does not trace it. The descriptor emission excludes
-        // this slot from the traced offsets.
-        if !self.methods.is_empty() || self.derives_from.len() == 1 {
-            class_attributes.insert(
-                "<main_virtual_table>".to_string(),
-                CodegenClassAttribute::new(
-                    VisibilityData::open_visibility(),
-                    managed_pointer_type(PekoType::simple_type("void")),
-                    0,
-                    codegen_context.pointer_type_of(main_virtual_table_struct_type),
-                ),
-            );
-        }
+            // Single inheritance: derive parent's attributes and methods.
+            if self.derives_from.len() == 1 {
+                let find_parent_class = codegen_context.get_class_by_type(&self.derives_from[0]);
 
-        // Single inheritance: derive parent's attributes and methods.
-        if self.derives_from.len() == 1 {
-            let find_parent_class = codegen_context.get_class_by_type(&self.derives_from[0]);
-
-            match find_parent_class {
-                None => {
-                    codegen_context
+                match find_parent_class {
+                    None => {
+                        codegen_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
                             self.derives_from[0].start_position.clone(),
@@ -1598,115 +1604,115 @@ impl PekoValueBuilder for ClassAST {
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ));
-                }
-                Some(parent) => {
-                    parent_class = Some(Box::new(parent.clone()));
-
-                    // Inherit attributes (except the vtable slot).
-                    for (attribute_name, attribute) in &parent.attributes {
-                        if attribute_name != "<main_virtual_table>" {
-                            class_attributes.insert(attribute_name.clone(), attribute.clone());
-                        }
                     }
+                    Some(parent) => {
+                        parent_class = Some(Box::new(parent.clone()));
 
-                    // Inherit methods.
-                    virtual_table_methods.extend(parent.main_virtual_table.methods);
+                        // Inherit attributes (except the vtable slot).
+                        for (attribute_name, attribute) in &parent.attributes {
+                            if attribute_name != "<main_virtual_table>" {
+                                class_attributes.insert(attribute_name.clone(), attribute.clone());
+                            }
+                        }
+
+                        // Inherit methods.
+                        virtual_table_methods.extend(parent.main_virtual_table.methods);
+                    }
                 }
+            } else if self.derives_from.len() > 1 {
+                // Multiple inheritance is not currently supported.
+                codegen_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.derives_from[0].start_position.clone(),
+                        self.derives_from.last().unwrap().end_position.clone(),
+                        "cannot inherit from multiple classes".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        codegen_context.get_current_file().to_path_buf(),
+                    ));
             }
-        } else if self.derives_from.len() > 1 {
-            // Multiple inheritance is not currently supported.
+
+            // Pre-add the class to the context so methods can reference the
+            // class type during their own codegen (self-reference). Reuse the
+            // struct type created by the header pass so a forward reference
+            // resolved earlier points at the same struct.
+            let class_struct_type = match &declared_shell {
+                Some(shell) => shell.read().unwrap().struct_type,
+                None => codegen_context.create_named_struct(class_type.to_string()),
+            };
+            let mut class = CodegenClass::new(
+                class_type.clone(),
+                parent_class.clone(),
+                class_attributes.clone(),
+                CodegenVirtualTable::new(virtual_table_methods, 0, main_virtual_table_struct_type),
+                class_struct_type,
+                codegen_context.module_context.current_module().clone(),
+                None,
+                // Descriptors are emitted per module after the struct body is
+                // materialized (owner) or at import time (importer); start
+                // empty.
+                HashMap::new(),
+            );
+            class.implements = self
+                .implements
+                .iter()
+                .map(|implemented| implemented.name().to_string())
+                .collect();
             codegen_context
-                .diagnostics
-                .report_diagnostic(diagnostics::PekoDiagnostic::new(
-                    self.derives_from[0].start_position.clone(),
-                    self.derives_from.last().unwrap().end_position.clone(),
-                    "cannot inherit from multiple classes".to_string(),
-                    diagnostics::DiagnosticType::Error,
-                    codegen_context.get_current_file().to_path_buf(),
-                ));
-        }
+                .module_context
+                .current_module()
+                .write()
+                .unwrap()
+                .get_classes_mut()
+                .insert(self.class_name.value.clone(), Arc::new(RwLock::new(class)));
 
-        // Pre-add the class to the context so methods can reference the
-        // class type during their own codegen (self-reference). Reuse the
-        // struct type created by the header pass so a forward reference
-        // resolved earlier points at the same struct.
-        let class_struct_type = match &declared_shell {
-            Some(shell) => shell.read().unwrap().struct_type,
-            None => codegen_context.create_named_struct(class_type.to_string()),
-        };
-        let mut class = CodegenClass::new(
-            class_type.clone(),
-            parent_class.clone(),
-            class_attributes.clone(),
-            CodegenVirtualTable::new(virtual_table_methods, 0, main_virtual_table_struct_type),
-            class_struct_type,
-            codegen_context.module_context.current_module().clone(),
-            None,
-            // Descriptors are emitted per module after the struct body is
-            // materialized (owner) or at import time (importer); start
-            // empty.
-            HashMap::new(),
-        );
-        class.implements = self
-            .implements
-            .iter()
-            .map(|implemented| implemented.name().to_string())
-            .collect();
-        codegen_context
-            .module_context
-            .current_module()
-            .write()
-            .unwrap()
-            .get_classes_mut()
-            .insert(self.class_name.value.clone(), Arc::new(RwLock::new(class)));
-
-        // Shared handle to the class just inserted. Method-signature
-        // generation mutates the class through this handle.
-        let stored_class = codegen_context
-            .module_context
-            .current_module()
-            .read()
-            .unwrap()
-            .get_classes()[&self.class_name.value]
-            .clone();
-
-        // --- Materialize the class struct body (layout pass) ---
-        //
-        // This runs BEFORE method-signature generation. A method that refers to
-        // the class by value (e.g. returns `Option<Self>`) triggers a layout
-        // query on the class during signature gen; if the class struct body is
-        // still opaque at that point the query returns a wrong/zero size and the
-        // instance is under-allocated, so later field writes overflow into the
-        // next heap object and corrupt the heap. Setting the struct body here
-        // guarantees the layout exists before any such query.
-        //
-        // CRITICAL: this pass must NOT call expand_type or get_llvm_type on the
-        // attribute types. For a generic field those force instantiation of the
-        // generic class (the very recursion we are avoiding). Each own-declared
-        // field is mapped to a layout PLACEHOLDER via layout_placeholder_type,
-        // which takes the RAW (unexpanded) attribute type and resolves only
-        // generic type parameters via the cheap generic-context lookup -- never
-        // expand_type. A placeholder has the same size/alignment as the field's
-        // real lowering, so the struct layout (size + field offsets) is exact.
-        //
-        // The attributes map already contains element 0 (the vtable slot, when
-        // present) and any inherited attributes, inserted at class creation. We
-        // append the class's own declared attributes here -- storing the RAW
-        // attribute type for now (expansion is deferred to the post-method-gen
-        // "Resolve attributes" pass) plus the placeholder llvm_type and the
-        // struct index -- then build the body from the complete map in order, so
-        // the body has the vtable slot, inherited fields, and own fields in the
-        // same order and count the rest of codegen expects.
-        for (attribute_name, attribute) in &self.attributes {
-            // Reject duplicate attribute names (against the slots already in the
-            // map: vtable + inherited).
-            let already_present = stored_class
+            // Shared handle to the class just inserted. Method-signature
+            // generation mutates the class through this handle.
+            let stored_class = codegen_context
+                .module_context
+                .current_module()
                 .read()
                 .unwrap()
-                .attributes
-                .contains_key(&attribute_name.value);
-            if already_present || class_attributes.contains_key(&attribute_name.value) {
-                codegen_context
+                .get_classes()[&self.class_name.value]
+                .clone();
+
+            // --- Materialize the class struct body (layout pass) ---
+            //
+            // This runs BEFORE method-signature generation. A method that refers to
+            // the class by value (e.g. returns `Option<Self>`) triggers a layout
+            // query on the class during signature gen; if the class struct body is
+            // still opaque at that point the query returns a wrong/zero size and the
+            // instance is under-allocated, so later field writes overflow into the
+            // next heap object and corrupt the heap. Setting the struct body here
+            // guarantees the layout exists before any such query.
+            //
+            // CRITICAL: this pass must NOT call expand_type or get_llvm_type on the
+            // attribute types. For a generic field those force instantiation of the
+            // generic class (the very recursion we are avoiding). Each own-declared
+            // field is mapped to a layout PLACEHOLDER via layout_placeholder_type,
+            // which takes the RAW (unexpanded) attribute type and resolves only
+            // generic type parameters via the cheap generic-context lookup -- never
+            // expand_type. A placeholder has the same size/alignment as the field's
+            // real lowering, so the struct layout (size + field offsets) is exact.
+            //
+            // The attributes map already contains element 0 (the vtable slot, when
+            // present) and any inherited attributes, inserted at class creation. We
+            // append the class's own declared attributes here -- storing the RAW
+            // attribute type for now (expansion is deferred to the post-method-gen
+            // "Resolve attributes" pass) plus the placeholder llvm_type and the
+            // struct index -- then build the body from the complete map in order, so
+            // the body has the vtable slot, inherited fields, and own fields in the
+            // same order and count the rest of codegen expects.
+            for (attribute_name, attribute) in &self.attributes {
+                // Reject duplicate attribute names (against the slots already in the
+                // map: vtable + inherited).
+                let already_present = stored_class
+                    .read()
+                    .unwrap()
+                    .attributes
+                    .contains_key(&attribute_name.value);
+                if already_present || class_attributes.contains_key(&attribute_name.value) {
+                    codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
                         attribute_name.start.clone(),
@@ -1718,111 +1724,118 @@ impl PekoValueBuilder for ClassAST {
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
-                continue;
-            }
+                    continue;
+                }
 
-            // struct index = current attribute count (vtable + inherited + the
-            // own attributes appended so far), matching declaration order.
-            let current_struct_index = stored_class.read().unwrap().attributes.len();
+                // struct index = current attribute count (vtable + inherited + the
+                // own attributes appended so far), matching declaration order.
+                let current_struct_index = stored_class.read().unwrap().attributes.len();
 
-            // Placeholder layout type from the RAW attribute type (no expand).
-            let attribute_llvm_type =
-                codegen_context.layout_placeholder_type(attribute.attribute_type.as_ref());
+                // Placeholder layout type from the RAW attribute type (no expand).
+                let attribute_llvm_type =
+                    codegen_context.layout_placeholder_type(attribute.attribute_type.as_ref());
 
-            // Store the RAW (unexpanded) attribute type for now; the real
-            // expanded type is filled in by the "Resolve attributes" pass after
-            // method-signature generation, when expansion is safe.
-            let raw_attribute_type = attribute.attribute_type.as_ref().clone();
+                // Store the RAW (unexpanded) attribute type for now; the real
+                // expanded type is filled in by the "Resolve attributes" pass after
+                // method-signature generation, when expansion is safe.
+                let raw_attribute_type = attribute.attribute_type.as_ref().clone();
 
-            stored_class.write().unwrap().attributes.insert(
-                attribute_name.value.clone(),
-                CodegenClassAttribute::new(
-                    attribute.visibility.clone(),
-                    raw_attribute_type,
-                    current_struct_index,
-                    attribute_llvm_type,
-                ),
-            );
-        }
-
-        // Build the struct body from the COMPLETE attributes map (vtable slot,
-        // inherited attributes, own attributes) in order -- the same source the
-        // original code used. Snapshot the cached placeholder llvm_types under
-        // the read lock; they are layout-correct, so no expansion is needed.
-        let placeholder_field_types = stored_class
-            .read()
-            .unwrap()
-            .attributes
-            .iter()
-            .map(|(_, attr)| attr.llvm_type)
-            .collect_vec();
-
-        codegen_context.set_struct_body(class_struct_type, placeholder_field_types);
-
-        // --- Generate method signatures ---
-
-        let mut function_values = Vec::new();
-
-        for class_method in &self.methods {
-            // Bind the method's own generic parameters as bare carriers, on top
-            // of the class parameters already in scope, so its argument and
-            // return types resolve while erased. Restored after this method's
-            // signature is declared.
-            let previous_generic_types = codegen_context.generic_types.clone();
-            for type_name in class_method.get_generic_types() {
-                codegen_context.generic_types.insert(
-                    type_name.value.clone(),
-                    PekoType::generic_type(
-                        type_name.value.clone(),
-                        class_method
-                            .get_generic_bounds()
-                            .get(&type_name.value)
-                            .cloned()
-                            .unwrap_or_default(),
+                stored_class.write().unwrap().attributes.insert(
+                    attribute_name.value.clone(),
+                    CodegenClassAttribute::new(
+                        attribute.visibility.clone(),
+                        raw_attribute_type,
+                        current_struct_index,
+                        attribute_llvm_type,
                     ),
                 );
             }
 
-            // Initialize the method's overload list when it is first seen.
-            if !stored_class
+            // Build the struct body from the COMPLETE attributes map (vtable slot,
+            // inherited attributes, own attributes) in order -- the same source the
+            // original code used. Snapshot the cached placeholder llvm_types under
+            // the read lock; they are layout-correct, so no expansion is needed.
+            let placeholder_field_types = stored_class
                 .read()
                 .unwrap()
-                .main_virtual_table
-                .methods
-                .contains_key(&class_method.get_info().name.value)
-            {
-                stored_class
-                    .write()
+                .attributes
+                .iter()
+                .map(|(_, attr)| attr.llvm_type)
+                .collect_vec();
+
+            codegen_context.set_struct_body(class_struct_type, placeholder_field_types);
+
+            // --- Generate method signatures ---
+
+            let mut function_values = Vec::new();
+
+            for class_method in &self.methods {
+                // Bind the method's own generic parameters as bare carriers, on top
+                // of the class parameters already in scope, so its argument and
+                // return types resolve while erased. Restored after this method's
+                // signature is declared.
+                let previous_generic_types = codegen_context.generic_types.clone();
+                for type_name in class_method.get_generic_types() {
+                    codegen_context.generic_types.insert(
+                        type_name.value.clone(),
+                        PekoType::generic_type(
+                            type_name.value.clone(),
+                            class_method
+                                .get_generic_bounds()
+                                .get(&type_name.value)
+                                .cloned()
+                                .unwrap_or_default(),
+                        ),
+                    );
+                }
+
+                // Initialize the method's overload list when it is first seen.
+                if !stored_class
+                    .read()
                     .unwrap()
                     .main_virtual_table
                     .methods
-                    .insert(class_method.get_info().name.value.clone(), Vec::new());
-            }
+                    .contains_key(&class_method.get_info().name.value)
+                {
+                    stored_class
+                        .write()
+                        .unwrap()
+                        .main_virtual_table
+                        .methods
+                        .insert(class_method.get_info().name.value.clone(), Vec::new());
+                }
 
-            // An instance method's first argument is always `this` of class
-            // type. A static method has no receiver.
-            let is_static = class_method.get_info().is_static;
-            let mut method_arguments = IndexMap::new();
-            if !is_static {
-                method_arguments.insert(
-                    "this".to_string(),
-                    CodegenArg::new(VisibilityData::open_visibility(), class_type.clone(), None),
-                );
-            }
+                // An instance method's first argument is always `this` of class
+                // type. A static method has no receiver.
+                let is_static = class_method.get_info().is_static;
+                let mut method_arguments = IndexMap::new();
+                if !is_static {
+                    method_arguments.insert(
+                        "this".to_string(),
+                        CodegenArg::new(
+                            VisibilityData::open_visibility(),
+                            class_type.clone(),
+                            None,
+                        ),
+                    );
+                }
 
-            for (argument_name, argument_declaration) in &class_method.get_info().arguments {
-                // A static method's signature may name `Self`; bind it to the
-                // owning class before expanding.
-                let declared_argument_type = if is_static {
-                    crate::codegen::context::substitute_self(&argument_declaration.argument_type, &class_type)
-                } else {
-                    argument_declaration.argument_type.clone()
-                };
-                let argument_expanded = codegen_context.expand_type(&declared_argument_type);
-                let argument_type = match argument_expanded {
-                    Some(t) => t,
-                    None => {
-                        codegen_context.diagnostics.report_diagnostic(
+                for (argument_name, argument_declaration) in &class_method.get_info().arguments {
+                    // A static method's signature may name `Self`; bind it to the
+                    // owning class before expanding.
+                    let declared_argument_type = if is_static {
+                        crate::codegen::context::substitute_self(
+                            &argument_declaration.argument_type,
+                            &class_type,
+                        )
+                    } else {
+                        argument_declaration.argument_type.clone()
+                    };
+                    let argument_expanded = codegen_context.expand_type(&declared_argument_type);
+                    let argument_type = match argument_expanded {
+                        Some(t) => t,
+                        None => {
+                            codegen_context.diagnostics.report_diagnostic(
                             diagnostics::PekoDiagnostic::new(
                                 declared_argument_type.start_position.clone(),
                                 declared_argument_type.end_position.clone(),
@@ -1834,58 +1847,61 @@ impl PekoValueBuilder for ClassAST {
                                 codegen_context.get_current_file().to_path_buf(),
                             ),
                         );
-                        PekoType::error_type()
-                    }
-                };
+                            PekoType::error_type()
+                        }
+                    };
 
-                method_arguments.insert(
-                    argument_name.value.clone(),
-                    CodegenArg::new(
-                        argument_declaration.visibility.clone(),
-                        argument_type,
-                        argument_declaration.default_value.clone(),
-                    ),
-                );
-            }
-
-            // Add the var-args parameter if present.
-            if class_method.get_info().varargs_type.is_some() {
-                let varargs_type_expanded = codegen_context
-                    .expand_type(class_method.get_info().varargs_type.as_ref().unwrap());
-
-                let varargs_inner = match varargs_type_expanded {
-                    Some(t) => t.to_string(),
-                    None => PekoType::error_type().to_string(),
-                };
-
-                method_arguments.insert(
-                    class_method.get_info().varargs_name.value.clone(),
-                    CodegenArg::new(
-                        VisibilityData::open_visibility(),
-                        PekoType::from_string(
-                            format!("Array<{}>", varargs_inner).as_str(),
-                            codegen_context.get_current_file(),
+                    method_arguments.insert(
+                        argument_name.value.clone(),
+                        CodegenArg::new(
+                            argument_declaration.visibility.clone(),
+                            argument_type,
+                            argument_declaration.default_value.clone(),
                         ),
-                        None,
-                    ),
-                );
-            }
+                    );
+                }
 
-            let argument_types = method_arguments
-                .iter()
-                .map(|(_, arg)| arg.argument_type.clone())
-                .collect_vec();
+                // Add the var-args parameter if present.
+                if class_method.get_info().varargs_type.is_some() {
+                    let varargs_type_expanded = codegen_context
+                        .expand_type(class_method.get_info().varargs_type.as_ref().unwrap());
 
-            let declared_return_type = if is_static {
-                crate::codegen::context::substitute_self(&class_method.get_return_type(), &class_type)
-            } else {
-                class_method.get_return_type()
-            };
-            let class_return_type = codegen_context.expand_type(&declared_return_type);
-            let class_return_type = match class_return_type {
-                Some(t) => t,
-                None => {
-                    codegen_context
+                    let varargs_inner = match varargs_type_expanded {
+                        Some(t) => t.to_string(),
+                        None => PekoType::error_type().to_string(),
+                    };
+
+                    method_arguments.insert(
+                        class_method.get_info().varargs_name.value.clone(),
+                        CodegenArg::new(
+                            VisibilityData::open_visibility(),
+                            PekoType::from_string(
+                                format!("Array<{}>", varargs_inner).as_str(),
+                                codegen_context.get_current_file(),
+                            ),
+                            None,
+                        ),
+                    );
+                }
+
+                let argument_types = method_arguments
+                    .iter()
+                    .map(|(_, arg)| arg.argument_type.clone())
+                    .collect_vec();
+
+                let declared_return_type = if is_static {
+                    crate::codegen::context::substitute_self(
+                        &class_method.get_return_type(),
+                        &class_type,
+                    )
+                } else {
+                    class_method.get_return_type()
+                };
+                let class_return_type = codegen_context.expand_type(&declared_return_type);
+                let class_return_type = match class_return_type {
+                    Some(t) => t,
+                    None => {
+                        codegen_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
                             declared_return_type.start_position.clone(),
@@ -1897,185 +1913,187 @@ impl PekoValueBuilder for ClassAST {
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ));
-                    PekoType::error_type()
-                }
-            };
+                        PekoType::error_type()
+                    }
+                };
 
-            let mut method_function_symbol_name = SymbolName::from(
-                None,
-                Some(self.class_name.value.clone()),
-                class_method.get_info().name.value.as_str(),
-                Some(argument_types.clone()),
-            );
-            method_function_symbol_name
-                .module_names
-                .extend(class_type.module_names().to_vec());
-
-            let method_function = codegen_context.create_function(
-                Some(method_function_symbol_name.clone()),
-                argument_types.clone(),
-                &class_return_type,
-                false,
-                false,
-                false,
-            );
-
-            // Look for an existing overload that this method should
-            // replace (override).
-            let current_method_overloads: Vec<CodegenFunction> =
-                stored_class.read().unwrap().main_virtual_table.methods
-                    [&class_method.get_info().name.value]
-                    .iter()
-                    .map(|option| option.read().unwrap().clone())
-                    .collect();
-
-            let mut method_base_info = if current_method_overloads.is_empty() {
-                None
-            } else {
-                codegen_context.choose_function_and_index(
-                    current_method_overloads,
-                    argument_types.clone(),
+                let mut method_function_symbol_name = SymbolName::from(
                     None,
-                    true,
-                )
-            };
+                    Some(self.class_name.value.clone()),
+                    class_method.get_info().name.value.as_str(),
+                    Some(argument_types.clone()),
+                );
+                method_function_symbol_name
+                    .module_names
+                    .extend(class_type.module_names().to_vec());
 
-            // The override match must use exactly the same argument types.
-            if method_base_info.is_some() {
-                for ((_, argument), expected_argument_type) in method_base_info
-                    .as_ref()
-                    .unwrap()
-                    .1
-                    .arguments
-                    .iter()
-                    .skip(1)
-                    .zip(argument_types.iter().skip(1))
-                {
-                    if !codegen_context.types_equal(&argument.argument_type, expected_argument_type)
-                    {
-                        method_base_info = None;
-                        break;
-                    }
-                }
-            }
+                let method_function = codegen_context.create_function(
+                    Some(method_function_symbol_name.clone()),
+                    argument_types.clone(),
+                    &class_return_type,
+                    false,
+                    false,
+                    false,
+                );
 
-            let mut codegen_function = CodegenFunction::new(
-                class_method.get_info().visibility.clone(),
-                class_return_type,
-                method_arguments,
-                if class_method.get_info().varargs_type.is_some() {
-                    Some(
-                        if codegen_context
-                            .type_exists(class_method.get_info().varargs_type.as_ref().unwrap())
-                        {
-                            class_method
-                                .get_info()
-                                .varargs_type
-                                .as_ref()
-                                .unwrap()
-                                .clone()
-                        } else {
-                            PekoType::error_type()
-                        },
-                    )
-                } else {
+                // Look for an existing overload that this method should
+                // replace (override).
+                let current_method_overloads: Vec<CodegenFunction> =
+                    stored_class.read().unwrap().main_virtual_table.methods
+                        [&class_method.get_info().name.value]
+                        .iter()
+                        .map(|option| option.read().unwrap().clone())
+                        .collect();
+
+                let mut method_base_info = if current_method_overloads.is_empty() {
                     None
-                },
-                codegen_context.qualify_value_to_current(method_function),
-                // Override: reuse the parent's vtable index. New method:
-                // assign the next available slot.
-                if let Some(method_base) = &method_base_info {
-                    method_base.1.virtual_table_index
                 } else {
-                    let mut current_methods_length = 0;
-                    for (_, method_list) in &stored_class.read().unwrap().main_virtual_table.methods
-                    {
-                        current_methods_length += method_list.len();
-                    }
-                    current_methods_length
-                },
-                method_function_symbol_name,
-                codegen_context.module_context.current_module().clone(),
-                None,
-                Some((
-                    stored_class.read().unwrap().class_type.clone(),
-                    codegen_context.module_context.current_module().clone(),
-                )),
-            );
-            codegen_function.method_generic_typenames =
-                class_method.get_generic_types().clone();
-            codegen_function.is_static = is_static;
+                    codegen_context.choose_function_and_index(
+                        current_method_overloads,
+                        argument_types.clone(),
+                        None,
+                        true,
+                    )
+                };
 
-            // Install the method either as an override or as a new
-            // entry on the overload list. An override replaces the
-            // inherited slot with a fresh handle so the shared parent
-            // method is left untouched.
-            if let Some((base_idx, _)) = method_base_info {
-                stored_class
-                    .write()
-                    .unwrap()
-                    .main_virtual_table
-                    .methods
-                    .get_mut(&class_method.get_info().name.value)
-                    .unwrap()[base_idx] = Arc::new(RwLock::new(codegen_function.clone()));
-            } else {
-                stored_class
-                    .write()
-                    .unwrap()
-                    .main_virtual_table
-                    .methods
-                    .get_mut(&class_method.get_info().name.value)
-                    .unwrap()
-                    .push(Arc::new(RwLock::new(codegen_function.clone())));
+                // The override match must use exactly the same argument types.
+                if method_base_info.is_some() {
+                    for ((_, argument), expected_argument_type) in method_base_info
+                        .as_ref()
+                        .unwrap()
+                        .1
+                        .arguments
+                        .iter()
+                        .skip(1)
+                        .zip(argument_types.iter().skip(1))
+                    {
+                        if !codegen_context
+                            .types_equal(&argument.argument_type, expected_argument_type)
+                        {
+                            method_base_info = None;
+                            break;
+                        }
+                    }
+                }
+
+                let mut codegen_function = CodegenFunction::new(
+                    class_method.get_info().visibility.clone(),
+                    class_return_type,
+                    method_arguments,
+                    if class_method.get_info().varargs_type.is_some() {
+                        Some(
+                            if codegen_context
+                                .type_exists(class_method.get_info().varargs_type.as_ref().unwrap())
+                            {
+                                class_method
+                                    .get_info()
+                                    .varargs_type
+                                    .as_ref()
+                                    .unwrap()
+                                    .clone()
+                            } else {
+                                PekoType::error_type()
+                            },
+                        )
+                    } else {
+                        None
+                    },
+                    codegen_context.qualify_value_to_current(method_function),
+                    // Override: reuse the parent's vtable index. New method:
+                    // assign the next available slot.
+                    if let Some(method_base) = &method_base_info {
+                        method_base.1.virtual_table_index
+                    } else {
+                        let mut current_methods_length = 0;
+                        for (_, method_list) in
+                            &stored_class.read().unwrap().main_virtual_table.methods
+                        {
+                            current_methods_length += method_list.len();
+                        }
+                        current_methods_length
+                    },
+                    method_function_symbol_name,
+                    codegen_context.module_context.current_module().clone(),
+                    None,
+                    Some((
+                        stored_class.read().unwrap().class_type.clone(),
+                        codegen_context.module_context.current_module().clone(),
+                    )),
+                );
+                codegen_function.method_generic_typenames =
+                    class_method.get_generic_types().clone();
+                codegen_function.is_static = is_static;
+
+                // Install the method either as an override or as a new
+                // entry on the overload list. An override replaces the
+                // inherited slot with a fresh handle so the shared parent
+                // method is left untouched.
+                if let Some((base_idx, _)) = method_base_info {
+                    stored_class
+                        .write()
+                        .unwrap()
+                        .main_virtual_table
+                        .methods
+                        .get_mut(&class_method.get_info().name.value)
+                        .unwrap()[base_idx] = Arc::new(RwLock::new(codegen_function.clone()));
+                } else {
+                    stored_class
+                        .write()
+                        .unwrap()
+                        .main_virtual_table
+                        .methods
+                        .get_mut(&class_method.get_info().name.value)
+                        .unwrap()
+                        .push(Arc::new(RwLock::new(codegen_function.clone())));
+                }
+
+                function_values.push(codegen_function);
+
+                // Remove the method's own generic bindings; keep the class's.
+                codegen_context.generic_types = previous_generic_types;
             }
 
-            function_values.push(codegen_function);
+            // Materialize the vtable struct body from the function types.
+            let all_main_functions = stored_class
+                .read()
+                .unwrap()
+                .main_virtual_table
+                .methods
+                .clone();
 
-            // Remove the method's own generic bindings; keep the class's.
-            codegen_context.generic_types = previous_generic_types;
-        }
-
-        // Materialize the vtable struct body from the function types.
-        let all_main_functions = stored_class
-            .read()
-            .unwrap()
-            .main_virtual_table
-            .methods
-            .clone();
-
-        let mut function_llvm_types = Vec::new();
-        for (_, func_overloads) in &all_main_functions {
-            for func in func_overloads {
-                let func_type = func.read().unwrap().get_type();
-                if let Some(llvm_type) = codegen_context.get_llvm_type(&func_type) {
-                    function_llvm_types.push(llvm_type);
+            let mut function_llvm_types = Vec::new();
+            for (_, func_overloads) in &all_main_functions {
+                for func in func_overloads {
+                    let func_type = func.read().unwrap().get_type();
+                    if let Some(llvm_type) = codegen_context.get_llvm_type(&func_type) {
+                        function_llvm_types.push(llvm_type);
+                    }
                 }
             }
-        }
 
-        codegen_context.set_struct_body(main_virtual_table_struct_type, function_llvm_types);
+            codegen_context.set_struct_body(main_virtual_table_struct_type, function_llvm_types);
 
-        // --- Resolve attributes (real types) ---
-        //
-        // The class struct body and the attribute map entries (with indices and
-        // placeholder llvm_types) were already created in the layout pass before
-        // method-signature generation, so the layout (size and field offsets) is
-        // fixed and correct. This pass resolves each own-declared attribute's
-        // REAL type via expand_type -- safe here because any generic class the
-        // fields reference can be fully instantiated at this point -- and UPDATES
-        // the existing map entry's attribute_type in place. It does NOT reinsert
-        // (which would change indices/order) and does NOT rebuild the struct body
-        // (the placeholder layout is already identical). Later passes (the GC
-        // descriptor emission below, and method-body codegen) read these real
-        // types for is_managed checks, descriptor offsets, and field access.
-        for (attribute_name, attribute) in &self.attributes {
-            let expanded_attribute_type =
-                codegen_context.expand_type(attribute.attribute_type.as_ref());
+            // --- Resolve attributes (real types) ---
+            //
+            // The class struct body and the attribute map entries (with indices and
+            // placeholder llvm_types) were already created in the layout pass before
+            // method-signature generation, so the layout (size and field offsets) is
+            // fixed and correct. This pass resolves each own-declared attribute's
+            // REAL type via expand_type -- safe here because any generic class the
+            // fields reference can be fully instantiated at this point -- and UPDATES
+            // the existing map entry's attribute_type in place. It does NOT reinsert
+            // (which would change indices/order) and does NOT rebuild the struct body
+            // (the placeholder layout is already identical). Later passes (the GC
+            // descriptor emission below, and method-body codegen) read these real
+            // types for is_managed checks, descriptor offsets, and field access.
+            for (attribute_name, attribute) in &self.attributes {
+                let expanded_attribute_type =
+                    codegen_context.expand_type(attribute.attribute_type.as_ref());
 
-            let attribute_type = match expanded_attribute_type {
-                Some(t) => t,
-                None => {
-                    codegen_context
+                let attribute_type = match expanded_attribute_type {
+                    Some(t) => t,
+                    None => {
+                        codegen_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
                             attribute.attribute_type.start_position.clone(),
@@ -2087,170 +2105,170 @@ impl PekoValueBuilder for ClassAST {
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ));
-                    PekoType::error_type()
+                        PekoType::error_type()
+                    }
+                };
+
+                // Update the real type on the already-present entry, preserving its
+                // struct index and placeholder llvm_type. A missing entry here means
+                // the layout pass rejected it as a duplicate; skip it consistently.
+                if let Some(existing) = stored_class
+                    .write()
+                    .unwrap()
+                    .attributes
+                    .get_mut(&attribute_name.value)
+                {
+                    existing.attribute_type = attribute_type;
                 }
+            }
+
+            // Emit the static GC type descriptor for this class. It lists the
+            // byte offsets of every managed (address space 1) element: the
+            // vtable slot (itself a managed allocation) and any attribute whose
+            // type is a class instance, closure, or `Pointer<T>`. The collector
+            // reads this to trace the object's children. Stored in the class so
+            // allocation can write it into each instance's header.
+
+            // Snapshot the attribute types and struct indices (and the module's
+            // data layout) under the lock, then release it before calling
+            // `is_managed` / `emit_type_descriptor`, which need `&mut self`.
+            let (attribute_info, datalayout) = {
+                let module = codegen_context.module_context.current_module();
+                let datalayout = unsafe {
+                    llvm_sys_180::target::LLVMGetModuleDataLayout(
+                        module.read().unwrap().get_top_level().unwrap().llvm_module,
+                    )
+                };
+                let info = stored_class
+                    .read()
+                    .unwrap()
+                    .attributes
+                    .iter()
+                    .map(|(name, attr)| {
+                        (name.clone(), attr.attribute_type.clone(), attr.struct_index)
+                    })
+                    .collect_vec();
+                (info, datalayout)
             };
 
-            // Update the real type on the already-present entry, preserving its
-            // struct index and placeholder llvm_type. A missing entry here means
-            // the layout pass rejected it as a duplicate; skip it consistently.
-            if let Some(existing) = stored_class
+            let mut managed_offsets = Vec::new();
+            for (attribute_name, attribute_type, struct_index) in &attribute_info {
+                // The vtable slot holds a raw pointer to static data, not a
+                // managed reference, so it is never traced.
+                if attribute_name == "<main_virtual_table>" {
+                    continue;
+                }
+                // A trait-typed field is a fat pointer whose first word (`self`) is
+                // a managed reference; that word sits at the field's base offset.
+                // The witness word that follows is static and not traced.
+                let traced = codegen_context.is_managed(attribute_type)
+                    || codegen_context.get_trait(attribute_type.name()).is_some();
+                if traced {
+                    managed_offsets.push(unsafe {
+                        llvm_sys_180::target::LLVMOffsetOfElement(
+                            datalayout,
+                            class_struct_type,
+                            *struct_index as u32,
+                        )
+                    } as usize);
+                }
+            }
+
+            let descriptor = codegen_context
+                .emit_class_descriptor(&class_type.to_mangled_string(), managed_offsets);
+
+            let owning_uuid = codegen_context.get_owning_module_uuid();
+            stored_class
                 .write()
                 .unwrap()
-                .attributes
-                .get_mut(&attribute_name.value)
-            {
-                existing.attribute_type = attribute_type;
-            }
-        }
+                .type_descriptor
+                .insert(owning_uuid.clone(), descriptor.clone());
 
-        // Emit the static GC type descriptor for this class. It lists the
-        // byte offsets of every managed (address space 1) element: the
-        // vtable slot (itself a managed allocation) and any attribute whose
-        // type is a class instance, closure, or `Pointer<T>`. The collector
-        // reads this to trace the object's children. Stored in the class so
-        // allocation can write it into each instance's header.
-
-        // Snapshot the attribute types and struct indices (and the module's
-        // data layout) under the lock, then release it before calling
-        // `is_managed` / `emit_type_descriptor`, which need `&mut self`.
-        let (attribute_info, datalayout) = {
-            let module = codegen_context.module_context.current_module();
-            let datalayout = unsafe {
-                llvm_sys_180::target::LLVMGetModuleDataLayout(
-                    module.read().unwrap().get_top_level().unwrap().llvm_module,
-                )
-            };
-            let info = stored_class
-                .read()
-                .unwrap()
-                .attributes
-                .iter()
-                .map(|(name, attr)| {
-                    (name.clone(), attr.attribute_type.clone(), attr.struct_index)
-                })
-                .collect_vec();
-            (info, datalayout)
-        };
-
-        let mut managed_offsets = Vec::new();
-        for (attribute_name, attribute_type, struct_index) in &attribute_info {
-            // The vtable slot holds a raw pointer to static data, not a
-            // managed reference, so it is never traced.
-            if attribute_name == "<main_virtual_table>" {
-                continue;
-            }
-            // A trait-typed field is a fat pointer whose first word (`self`) is
-            // a managed reference; that word sits at the field's base offset.
-            // The witness word that follows is static and not traced.
-            let traced = codegen_context.is_managed(attribute_type)
-                || codegen_context.get_trait(attribute_type.name()).is_some();
-            if traced {
-                managed_offsets.push(unsafe {
-                    llvm_sys_180::target::LLVMOffsetOfElement(
-                        datalayout,
-                        class_struct_type,
-                        *struct_index as u32,
-                    )
-                } as usize);
-            }
-        }
-
-        let descriptor =
-            codegen_context.emit_class_descriptor(&class_type.to_mangled_string(), managed_offsets);
-
-        let owning_uuid = codegen_context.get_owning_module_uuid();
-        stored_class
-            .write()
-            .unwrap()
-            .type_descriptor
-            .insert(owning_uuid.clone(), descriptor.clone());
-
-        // Emit the class's static vtable: one constant per class holding the
-        // method function pointers in virtual-table-slot order. The vtable is
-        // static data shared by every instance, never GC-allocated or traced.
-        // Allocation reuses this same global by name.
-        let vtable_methods = stored_class
-            .read()
-            .unwrap()
-            .main_virtual_table
-            .methods
-            .clone();
-        let mut class_vtable: Option<CodegenValue> = None;
-        if !vtable_methods.is_empty() {
-            let mut method_pointers = Vec::new();
-            for (_, functions) in &vtable_methods {
-                for function in functions {
-                    let function = function.read().unwrap();
-                    if let Some(value) = function.function_value.get(&owning_uuid) {
-                        method_pointers.push((function.virtual_table_index, value.llvm_value));
-                    }
-                }
-            }
-            class_vtable = Some(codegen_context.emit_class_vtable(
-                &class_type.to_mangled_string(),
-                main_virtual_table_struct_type,
-                method_pointers,
-            ));
-        }
-
-        // Emit a witness table per implemented trait: an [N x i32] array
-        // mapping each trait slot to this class's vtable index for that method.
-        // Trait dispatch loads witness[k] and indexes the object's runtime
-        // vtable, so a child override is always reached. A slot the class does
-        // not provide (a kept default) gets index -1. The witnesses also become
-        // this class's itable entries.
-        let mut itable_entries: Vec<(i32, CodegenValue)> = Vec::new();
-        for implemented in &self.implements {
-            let trait_name = implemented.name().to_string();
-            let Some(trait_definition) = codegen_context.get_trait(&trait_name) else {
-                continue;
-            };
-
+            // Emit the class's static vtable: one constant per class holding the
+            // method function pointers in virtual-table-slot order. The vtable is
+            // static data shared by every instance, never GC-allocated or traced.
+            // Allocation reuses this same global by name.
             let vtable_methods = stored_class
                 .read()
                 .unwrap()
                 .main_virtual_table
                 .methods
                 .clone();
-
-            let mut slot_indices = Vec::new();
-            for slot in &trait_definition.methods {
-                let index = vtable_methods
-                    .get(&slot.name)
-                    .and_then(|overloads| overloads.first())
-                    .map(|function| function.read().unwrap().virtual_table_index as i32)
-                    .unwrap_or(-1);
-                slot_indices.push(index);
+            let mut class_vtable: Option<CodegenValue> = None;
+            if !vtable_methods.is_empty() {
+                let mut method_pointers = Vec::new();
+                for (_, functions) in &vtable_methods {
+                    for function in functions {
+                        let function = function.read().unwrap();
+                        if let Some(value) = function.function_value.get(&owning_uuid) {
+                            method_pointers.push((function.virtual_table_index, value.llvm_value));
+                        }
+                    }
+                }
+                class_vtable = Some(codegen_context.emit_class_vtable(
+                    &class_type.to_mangled_string(),
+                    main_virtual_table_struct_type,
+                    method_pointers,
+                ));
             }
 
-            let witness = codegen_context.emit_witness_table(
-                &class_type.to_mangled_string(),
-                &implemented.to_mangled_string(),
-                slot_indices,
-            );
-            itable_entries.push((
-                crate::codegen::builders::llvm_constants::trait_dispatch_id(implemented),
-                witness,
-            ));
-        }
+            // Emit a witness table per implemented trait: an [N x i32] array
+            // mapping each trait slot to this class's vtable index for that method.
+            // Trait dispatch loads witness[k] and indexes the object's runtime
+            // vtable, so a child override is always reached. A slot the class does
+            // not provide (a kept default) gets index -1. The witnesses also become
+            // this class's itable entries.
+            let mut itable_entries: Vec<(i32, CodegenValue)> = Vec::new();
+            for implemented in &self.implements {
+                let trait_name = implemented.name().to_string();
+                let Some(trait_definition) = codegen_context.get_trait(&trait_name) else {
+                    continue;
+                };
 
-        // Emit the class's static TypeInfo record: the runtime-reachable handle
-        // (type_id, parent, descriptor, vtable, itable) erased generics dispatch
-        // through. This emits the data; dispatch through it is wired separately.
-        let parent_mangled = stored_class
-            .read()
-            .unwrap()
-            .parent_class
-            .as_ref()
-            .map(|parent| parent.class_type.to_mangled_string());
-        codegen_context.emit_type_info(
-            &class_type.to_mangled_string(),
-            parent_mangled.as_deref(),
-            &descriptor,
-            class_vtable.as_ref(),
-            itable_entries,
-        );
+                let vtable_methods = stored_class
+                    .read()
+                    .unwrap()
+                    .main_virtual_table
+                    .methods
+                    .clone();
+
+                let mut slot_indices = Vec::new();
+                for slot in &trait_definition.methods {
+                    let index = vtable_methods
+                        .get(&slot.name)
+                        .and_then(|overloads| overloads.first())
+                        .map(|function| function.read().unwrap().virtual_table_index as i32)
+                        .unwrap_or(-1);
+                    slot_indices.push(index);
+                }
+
+                let witness = codegen_context.emit_witness_table(
+                    &class_type.to_mangled_string(),
+                    &implemented.to_mangled_string(),
+                    slot_indices,
+                );
+                itable_entries.push((
+                    crate::codegen::builders::llvm_constants::trait_dispatch_id(implemented),
+                    witness,
+                ));
+            }
+
+            // Emit the class's static TypeInfo record: the runtime-reachable handle
+            // (type_id, parent, descriptor, vtable, itable) erased generics dispatch
+            // through. This emits the data; dispatch through it is wired separately.
+            let parent_mangled = stored_class
+                .read()
+                .unwrap()
+                .parent_class
+                .as_ref()
+                .map(|parent| parent.class_type.to_mangled_string());
+            codegen_context.emit_type_info(
+                &class_type.to_mangled_string(),
+                parent_mangled.as_deref(),
+                &descriptor,
+                class_vtable.as_ref(),
+                itable_entries,
+            );
 
             codegen_context
                 .class_function_values
@@ -2264,240 +2282,250 @@ impl PekoValueBuilder for ClassAST {
         // by which time every class's method functions are declared, so a
         // method that dispatches on another class resolves.
         if !codegen_context.building_class_signatures {
-
-        for (class_method, method_value) in self.methods.iter().zip(function_values) {
-            if codegen_context.outside_declarations_only && codegen_context.outside_primary_module {
-                break;
-            }
-
-            // Bind the method's own generic parameters as bare carriers, on top
-            // of the class parameters, so its body resolves references to them
-            // while erased. Restored at the end of this method's body.
-            let previous_generic_types = codegen_context.generic_types.clone();
-            for type_name in class_method.get_generic_types() {
-                codegen_context.generic_types.insert(
-                    type_name.value.clone(),
-                    PekoType::generic_type(
-                        type_name.value.clone(),
-                        class_method
-                            .get_generic_bounds()
-                            .get(&type_name.value)
-                            .cloned()
-                            .unwrap_or_default(),
-                    ),
-                );
-            }
-
-            let previous_scoped_variables = codegen_context.scoped_variables.clone();
-            codegen_context.scoped_variables.clear();
-
-            let previous_local_scope = codegen_context.local_scope;
-            codegen_context.local_scope = true;
-
-            let previous_basic_block = codegen_context.current_basic_block;
-            let previous_entry_block = codegen_context.current_entry_block;
-            let previous_function = codegen_context.current_llvm_function;
-
-            // The current module may not hold a declaration of this method (an
-            // erased generic class first instantiated while compiling a
-            // late-importing module builds its bodies here, but its methods were
-            // declared under the defining module). Declare it on demand,
-            // mirroring the import path.
-            let owning_uuid = codegen_context.get_owning_module_uuid();
-            let method_codegen_value = match method_value.function_value.get(&owning_uuid) {
-                Some(value) => value.clone(),
-                None => {
-                    let owner = method_value.parent.clone();
-                    codegen_context.declare_function_in_current(&method_value, &owner)
-                }
-            };
-            codegen_context.current_llvm_function = Some(method_codegen_value.llvm_value);
-
-            let entry_block = codegen_context.create_new_block(Some("entry".to_string()));
-            codegen_context.current_entry_block = Option::Some(entry_block);
-            codegen_context.goto_block_end(entry_block);
-
-            let previous_return_type = codegen_context.current_return_type.clone();
-            codegen_context.current_return_type =
-                if class_method.get_return_type().to_string() != "void" {
-                    Some(method_value.return_type.clone())
-                } else {
-                    None
-                };
-
-            // An instance method binds `this` as the first allocated argument;
-            // its explicit parameters follow at index 1. A static method has no
-            // receiver, so its explicit parameters start at index 0.
-            let is_static = class_method.get_info().is_static;
-            let previous_current_this = codegen_context.current_this.clone();
-            let argument_base = if is_static {
-                codegen_context.current_this = None;
-                0
-            } else {
-                let this_argument =
-                    codegen_context.get_allocated_function_argument(&method_codegen_value, 0);
-
-                let this_variable = CodegenVariable::new(
-                    VisibilityData::open_visibility(),
-                    class_type.clone(),
-                    codegen_context.qualify_value_to_current(this_argument.clone()),
-                    None,
-                    codegen_context.module_context.current_module().clone(),
-                    None,
-                );
-
-                codegen_context
-                    .scoped_variables
-                    .insert(String::from("this"), this_variable.clone());
-
-                codegen_context.current_this = Some(this_variable);
-                1
-            };
-
-            // Bind the remaining positional arguments.
-            for (idx, (argument_name, argument_info)) in
-                class_method.get_info().arguments.iter().enumerate()
-            {
-                // Resolve a static method's `Self` argument to the owning class.
-                let declared_argument_type = if is_static {
-                    crate::codegen::context::substitute_self(&argument_info.argument_type, &class_type)
-                } else {
-                    argument_info.argument_type.clone()
-                };
-                let argument_type = if !codegen_context.type_exists(&declared_argument_type) {
-                    codegen_context.diagnostics.report_diagnostic(
-                        diagnostics::PekoDiagnostic::new(
-                            declared_argument_type.start_position.clone(),
-                            declared_argument_type.end_position.clone(),
-                            "argument type doesn't exist".to_string(),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ),
-                    );
-                    PekoType::error_type()
-                } else {
-                    codegen_context
-                        .expand_type(&declared_argument_type)
-                        .unwrap()
-                };
-
-                let current_argument = codegen_context
-                    .get_allocated_function_argument(&method_codegen_value, idx + argument_base);
-
-                let qualified_argument = codegen_context.qualify_value_to_current(current_argument);
-                codegen_context.scoped_variables.insert(
-                    argument_name.value.clone(),
-                    CodegenVariable::new(
-                        argument_info.visibility.clone(),
-                        argument_type,
-                        qualified_argument,
-                        None,
-                        codegen_context.module_context.current_module().clone(),
-                        None,
-                    ),
-                );
-            }
-
-            // Bind the var-args parameter if present.
-            if class_method.get_info().varargs_type.is_some() {
-                let varargs_argument = codegen_context.get_allocated_function_argument(
-                    &method_codegen_value,
-                    class_method.get_info().arguments.len() + 2,
-                );
-
-                let varargs_type = if codegen_context
-                    .type_exists(class_method.get_info().varargs_type.as_ref().unwrap())
+            for (class_method, method_value) in self.methods.iter().zip(function_values) {
+                if codegen_context.outside_declarations_only
+                    && codegen_context.outside_primary_module
                 {
-                    class_method
-                        .get_info()
-                        .varargs_type
-                        .as_ref()
-                        .unwrap()
-                        .clone()
-                } else {
-                    PekoType::error_type()
-                };
+                    break;
+                }
 
-                let qualified_varargs = codegen_context.qualify_value_to_current(varargs_argument);
-                codegen_context.scoped_variables.insert(
-                    class_method.get_info().varargs_name.value.clone(),
-                    CodegenVariable::new(
-                        VisibilityData::open_visibility(),
-                        PekoType::from_string(
-                            format!("Array<{}>", varargs_type).as_str(),
-                            codegen_context.get_current_file(),
+                // Bind the method's own generic parameters as bare carriers, on top
+                // of the class parameters, so its body resolves references to them
+                // while erased. Restored at the end of this method's body.
+                let previous_generic_types = codegen_context.generic_types.clone();
+                for type_name in class_method.get_generic_types() {
+                    codegen_context.generic_types.insert(
+                        type_name.value.clone(),
+                        PekoType::generic_type(
+                            type_name.value.clone(),
+                            class_method
+                                .get_generic_bounds()
+                                .get(&type_name.value)
+                                .cloned()
+                                .unwrap_or_default(),
                         ),
-                        qualified_varargs,
+                    );
+                }
+
+                let previous_scoped_variables = codegen_context.scoped_variables.clone();
+                codegen_context.scoped_variables.clear();
+
+                let previous_local_scope = codegen_context.local_scope;
+                codegen_context.local_scope = true;
+
+                let previous_basic_block = codegen_context.current_basic_block;
+                let previous_entry_block = codegen_context.current_entry_block;
+                let previous_function = codegen_context.current_llvm_function;
+
+                // The current module may not hold a declaration of this method (an
+                // erased generic class first instantiated while compiling a
+                // late-importing module builds its bodies here, but its methods were
+                // declared under the defining module). Declare it on demand,
+                // mirroring the import path.
+                let owning_uuid = codegen_context.get_owning_module_uuid();
+                let method_codegen_value = match method_value.function_value.get(&owning_uuid) {
+                    Some(value) => value.clone(),
+                    None => {
+                        let owner = method_value.parent.clone();
+                        codegen_context.declare_function_in_current(&method_value, &owner)
+                    }
+                };
+                codegen_context.current_llvm_function = Some(method_codegen_value.llvm_value);
+
+                let entry_block = codegen_context.create_new_block(Some("entry".to_string()));
+                codegen_context.current_entry_block = Option::Some(entry_block);
+                codegen_context.goto_block_end(entry_block);
+
+                let previous_return_type = codegen_context.current_return_type.clone();
+                codegen_context.current_return_type =
+                    if class_method.get_return_type().to_string() != "void" {
+                        Some(method_value.return_type.clone())
+                    } else {
+                        None
+                    };
+
+                // An instance method binds `this` as the first allocated argument;
+                // its explicit parameters follow at index 1. A static method has no
+                // receiver, so its explicit parameters start at index 0.
+                let is_static = class_method.get_info().is_static;
+                let previous_current_this = codegen_context.current_this.clone();
+                let argument_base = if is_static {
+                    codegen_context.current_this = None;
+                    0
+                } else {
+                    let this_argument =
+                        codegen_context.get_allocated_function_argument(&method_codegen_value, 0);
+
+                    let this_variable = CodegenVariable::new(
+                        VisibilityData::open_visibility(),
+                        class_type.clone(),
+                        codegen_context.qualify_value_to_current(this_argument.clone()),
                         None,
                         codegen_context.module_context.current_module().clone(),
                         None,
-                    ),
-                );
-            }
+                    );
 
-            let previous_in_constructor = codegen_context.in_constructor;
+                    codegen_context
+                        .scoped_variables
+                        .insert(String::from("this"), this_variable.clone());
 
-            // Constructor: handle `super(...)` call before the body runs.
-            if let ClassMethod::Constructor(_, super_call) = class_method {
-                codegen_context.in_constructor = true;
+                    codegen_context.current_this = Some(this_variable);
+                    1
+                };
 
-                if super_call.is_some() && parent_class.is_none() {
-                    codegen_context.diagnostics.report_diagnostic(
-                        diagnostics::PekoDiagnostic::new(
-                            super_call.clone().unwrap().start.clone(),
-                            super_call.clone().unwrap().end.clone(),
-                            "cannot have super call on non-derived class".to_string(),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
+                // Bind the remaining positional arguments.
+                for (idx, (argument_name, argument_info)) in
+                    class_method.get_info().arguments.iter().enumerate()
+                {
+                    // Resolve a static method's `Self` argument to the owning class.
+                    let declared_argument_type = if is_static {
+                        crate::codegen::context::substitute_self(
+                            &argument_info.argument_type,
+                            &class_type,
+                        )
+                    } else {
+                        argument_info.argument_type.clone()
+                    };
+                    let argument_type = if !codegen_context.type_exists(&declared_argument_type) {
+                        codegen_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                declared_argument_type.start_position.clone(),
+                                declared_argument_type.end_position.clone(),
+                                "argument type doesn't exist".to_string(),
+                                diagnostics::DiagnosticType::Error,
+                                codegen_context.get_current_file().to_path_buf(),
+                            ),
+                        );
+                        PekoType::error_type()
+                    } else {
+                        codegen_context
+                            .expand_type(&declared_argument_type)
+                            .unwrap()
+                    };
+
+                    let current_argument = codegen_context.get_allocated_function_argument(
+                        &method_codegen_value,
+                        idx + argument_base,
+                    );
+
+                    let qualified_argument =
+                        codegen_context.qualify_value_to_current(current_argument);
+                    codegen_context.scoped_variables.insert(
+                        argument_name.value.clone(),
+                        CodegenVariable::new(
+                            argument_info.visibility.clone(),
+                            argument_type,
+                            qualified_argument,
+                            None,
+                            codegen_context.module_context.current_module().clone(),
+                            None,
                         ),
                     );
-                } else if let Some(super_call_ast) = super_call {
-                    let mut arguments = Vec::new();
-                    let mut super_call_keywords = HashMap::new();
+                }
 
-                    for (argument_name, argument) in &super_call_ast.arguments {
-                        let argument_value = argument.build_value(codegen_context);
-                        arguments.push(argument_value.clone());
+                // Bind the var-args parameter if present.
+                if class_method.get_info().varargs_type.is_some() {
+                    let varargs_argument = codegen_context.get_allocated_function_argument(
+                        &method_codegen_value,
+                        class_method.get_info().arguments.len() + 2,
+                    );
 
-                        if let Some(name) = argument_name {
-                            super_call_keywords.insert(name.value.clone(), argument_value);
+                    let varargs_type = if codegen_context
+                        .type_exists(class_method.get_info().varargs_type.as_ref().unwrap())
+                    {
+                        class_method
+                            .get_info()
+                            .varargs_type
+                            .as_ref()
+                            .unwrap()
+                            .clone()
+                    } else {
+                        PekoType::error_type()
+                    };
+
+                    let qualified_varargs =
+                        codegen_context.qualify_value_to_current(varargs_argument);
+                    codegen_context.scoped_variables.insert(
+                        class_method.get_info().varargs_name.value.clone(),
+                        CodegenVariable::new(
+                            VisibilityData::open_visibility(),
+                            PekoType::from_string(
+                                format!("Array<{}>", varargs_type).as_str(),
+                                codegen_context.get_current_file(),
+                            ),
+                            qualified_varargs,
+                            None,
+                            codegen_context.module_context.current_module().clone(),
+                            None,
+                        ),
+                    );
+                }
+
+                let previous_in_constructor = codegen_context.in_constructor;
+
+                // Constructor: handle `super(...)` call before the body runs.
+                if let ClassMethod::Constructor(_, super_call) = class_method {
+                    codegen_context.in_constructor = true;
+
+                    if super_call.is_some() && parent_class.is_none() {
+                        codegen_context.diagnostics.report_diagnostic(
+                            diagnostics::PekoDiagnostic::new(
+                                super_call.clone().unwrap().start.clone(),
+                                super_call.clone().unwrap().end.clone(),
+                                "cannot have super call on non-derived class".to_string(),
+                                diagnostics::DiagnosticType::Error,
+                                codegen_context.get_current_file().to_path_buf(),
+                            ),
+                        );
+                    } else if let Some(super_call_ast) = super_call {
+                        let mut arguments = Vec::new();
+                        let mut super_call_keywords = HashMap::new();
+
+                        for (argument_name, argument) in &super_call_ast.arguments {
+                            let argument_value = argument.build_value(codegen_context);
+                            arguments.push(argument_value.clone());
+
+                            if let Some(name) = argument_name {
+                                super_call_keywords.insert(name.value.clone(), argument_value);
+                            }
                         }
-                    }
 
-                    arguments.insert(
-                        0,
-                        codegen_context.get_function_argument(&method_codegen_value, 0),
-                    );
+                        arguments.insert(
+                            0,
+                            codegen_context.get_function_argument(&method_codegen_value, 0),
+                        );
 
-                    let super_constructor_overloads: Vec<CodegenFunction> =
-                        parent_class.clone().unwrap().main_virtual_table.methods
-                            [&String::from("constructor")]
-                            .iter()
-                            .map(|option| option.read().unwrap().clone())
-                            .collect();
+                        let super_constructor_overloads: Vec<CodegenFunction> =
+                            parent_class.clone().unwrap().main_virtual_table.methods
+                                [&String::from("constructor")]
+                                .iter()
+                                .map(|option| option.read().unwrap().clone())
+                                .collect();
 
-                    let best_super_overload = codegen_context.choose_function(
-                        super_constructor_overloads,
-                        arguments
-                            .iter()
-                            .map(|arg| arg.value_type.clone())
-                            .collect_vec(),
-                        if super_call_keywords.is_empty() {
-                            None
-                        } else {
-                            Some(
-                                super_call_keywords
-                                    .iter()
-                                    .map(|(name, value)| (name.clone(), value.value_type.clone()))
-                                    .collect(),
-                            )
-                        },
-                        true,
-                    );
+                        let best_super_overload = codegen_context.choose_function(
+                            super_constructor_overloads,
+                            arguments
+                                .iter()
+                                .map(|arg| arg.value_type.clone())
+                                .collect_vec(),
+                            if super_call_keywords.is_empty() {
+                                None
+                            } else {
+                                Some(
+                                    super_call_keywords
+                                        .iter()
+                                        .map(|(name, value)| {
+                                            (name.clone(), value.value_type.clone())
+                                        })
+                                        .collect(),
+                                )
+                            },
+                            true,
+                        );
 
-                    match best_super_overload {
-                        None => {
-                            codegen_context.diagnostics.report_diagnostic(
+                        match best_super_overload {
+                            None => {
+                                codegen_context.diagnostics.report_diagnostic(
                                 diagnostics::PekoDiagnostic::new(
                                     super_call_ast.start.clone(),
                                     super_call_ast.end.clone(),
@@ -2506,18 +2534,19 @@ impl PekoValueBuilder for ClassAST {
                                     codegen_context.get_current_file().to_path_buf(),
                                 ),
                             );
-                        }
-                        Some(super_overload) => {
-                            let mut all_keywords = super_overload.arguments.len() > 1;
-                            for (_, arg) in super_overload.arguments.iter().skip(1) {
-                                if arg.default_value.is_none() {
-                                    all_keywords = false;
-                                    break;
-                                }
                             }
+                            Some(super_overload) => {
+                                let mut all_keywords = super_overload.arguments.len() > 1;
+                                for (_, arg) in super_overload.arguments.iter().skip(1) {
+                                    if arg.default_value.is_none() {
+                                        all_keywords = false;
+                                        break;
+                                    }
+                                }
 
-                            let argument_values_boxed =
-                                if super_call_keywords.is_empty() && all_keywords {
+                                let argument_values_boxed = if super_call_keywords.is_empty()
+                                    && all_keywords
+                                {
                                     super_overload
                                         .arguments
                                         .iter()
@@ -2546,8 +2575,10 @@ impl PekoValueBuilder for ClassAST {
                                         .collect_vec()
                                 };
 
-                            let (previous_line, previous_file) =
-                                if !super_overload.visibility.notrack {
+                                let (previous_line, previous_file) = if !super_overload
+                                    .visibility
+                                    .notrack
+                                {
                                     codegen_context.track_call_position(
                                         super_call_ast.start.file.to_string_lossy().into_owned(),
                                         super_call_ast.start.line,
@@ -2559,31 +2590,33 @@ impl PekoValueBuilder for ClassAST {
                                     )
                                 };
 
-                            let uuid = codegen_context.get_owning_module_uuid();
-                            codegen_context.call_function(
-                                &super_overload.get_type(),
-                                false,
-                                super_overload.function_value[&uuid].llvm_value,
-                                argument_values_boxed,
-                            );
+                                let uuid = codegen_context.get_owning_module_uuid();
+                                codegen_context.call_function(
+                                    &super_overload.get_type(),
+                                    false,
+                                    super_overload.function_value[&uuid].llvm_value,
+                                    argument_values_boxed,
+                                );
 
-                            if !super_overload.visibility.notrack {
-                                codegen_context.reset_call_position(&previous_line, &previous_file);
+                                if !super_overload.visibility.notrack {
+                                    codegen_context
+                                        .reset_call_position(&previous_line, &previous_file);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Walk the method body.
-            let mut branch_returns = false;
-            for ast in &class_method.get_info().body.value {
-                if !branch_returns
-                    && ast.build_value(codegen_context).value_type.to_string() == "<<returnexit>>"
-                {
-                    branch_returns = true;
-                } else if branch_returns {
-                    codegen_context
+                // Walk the method body.
+                let mut branch_returns = false;
+                for ast in &class_method.get_info().body.value {
+                    if !branch_returns
+                        && ast.build_value(codegen_context).value_type.to_string()
+                            == "<<returnexit>>"
+                    {
+                        branch_returns = true;
+                    } else if branch_returns {
+                        codegen_context
                         .diagnostics
                         .report_diagnostic(diagnostics::PekoDiagnostic::new(
                             ast.get_start().clone(),
@@ -2592,13 +2625,13 @@ impl PekoValueBuilder for ClassAST {
                             diagnostics::DiagnosticType::Error,
                             codegen_context.get_current_file().to_path_buf(),
                         ));
-                    break;
+                        break;
+                    }
                 }
-            }
 
-            // Return-coverage check.
-            if !branch_returns && class_method.get_return_type().to_string() != "void" {
-                codegen_context
+                // Return-coverage check.
+                if !branch_returns && class_method.get_return_type().to_string() != "void" {
+                    codegen_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
                         class_method.get_info().start.clone(),
@@ -2611,26 +2644,26 @@ impl PekoValueBuilder for ClassAST {
                         diagnostics::DiagnosticType::Error,
                         codegen_context.get_current_file().to_path_buf(),
                     ));
-            } else if !branch_returns && class_method.get_return_type().to_string() == "void" {
-                codegen_context.build_return(None);
-            }
+                } else if !branch_returns && class_method.get_return_type().to_string() == "void" {
+                    codegen_context.build_return(None);
+                }
 
-            // Restore outer state.
-            codegen_context.scoped_variables = previous_scoped_variables;
-            codegen_context.current_llvm_function = previous_function;
-            match previous_basic_block {
-                Some(block) => codegen_context.goto_block_end(block),
-                None => codegen_context.current_basic_block = None,
-            }
-            codegen_context.current_entry_block = previous_entry_block;
-            codegen_context.current_this = previous_current_this;
-            codegen_context.local_scope = previous_local_scope;
-            codegen_context.current_return_type = previous_return_type;
-            codegen_context.in_constructor = previous_in_constructor;
+                // Restore outer state.
+                codegen_context.scoped_variables = previous_scoped_variables;
+                codegen_context.current_llvm_function = previous_function;
+                match previous_basic_block {
+                    Some(block) => codegen_context.goto_block_end(block),
+                    None => codegen_context.current_basic_block = None,
+                }
+                codegen_context.current_entry_block = previous_entry_block;
+                codegen_context.current_this = previous_current_this;
+                codegen_context.local_scope = previous_local_scope;
+                codegen_context.current_return_type = previous_return_type;
+                codegen_context.in_constructor = previous_in_constructor;
 
-            // Remove the method's own generic bindings; keep the class's.
-            codegen_context.generic_types = previous_generic_types;
-        }
+                // Remove the method's own generic bindings; keep the class's.
+                codegen_context.generic_types = previous_generic_types;
+            }
         }
 
         codegen_context.create_null_pointer()

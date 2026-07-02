@@ -70,6 +70,7 @@ commands! {
     check      => "verify the Peko toolchain installation is healthy",
     clangflags => "print clang flags peko_core would pass to the C compiler",
     compile    => "compile a single Pekoscript file to an object or binary",
+    format     => "normalize the indentation and spacing of Pekoscript files",
     install    => "resolve, download, and lock the project's dependencies",
     keys       => "manage per-project signing keys",
     pkg        => "scaffold and pack a library package",
@@ -105,4 +106,3 @@ pub fn platform_label(os: &OperatingSystem) -> Option<&'static str> {
         OperatingSystem::Unknown => None,
     }
 }
-

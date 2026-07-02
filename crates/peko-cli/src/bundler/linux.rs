@@ -24,12 +24,11 @@ use crate::project::PekoProject;
 /// Load a toolchain's bundled-dylib sonames from its `toolchain.toml`.
 fn load_bundle_dylibs(toolchain_dir: &Path) -> BundleResult<Vec<String>> {
     let path = toolchain_dir.join("toolchain.toml");
-    let toolchain = peko_core::config::Toolchain::load(&path).map_err(|source| {
-        BundleError::Toolchain {
+    let toolchain =
+        peko_core::config::Toolchain::load(&path).map_err(|source| BundleError::Toolchain {
             path,
             source: Box::new(source),
-        }
-    })?;
+        })?;
     Ok(toolchain.link.bundle_dylibs)
 }
 

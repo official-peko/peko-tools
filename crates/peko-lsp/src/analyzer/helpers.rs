@@ -147,9 +147,11 @@ pub fn parse_peko_source(file: &Path, source: String) -> (Vec<PekoAST>, Diagnost
 // Position translation
 // ---------------------------------------------------------------------------
 
-/// Convert a peko_core `PositionData` (1-based line, 0-based byte column) to
-/// the 0-based LSP `Position` the editor expects. A line value of zero
-/// saturates to line zero rather than underflowing.
+/// Convert a peko_core `PositionData` (1-based line, 0-based char column) to a
+/// char-based internal `Position`. Both the column and the result count
+/// Unicode scalar values; conversion to the negotiated wire encoding happens at
+/// the protocol boundary. A line value of zero saturates to line zero rather
+/// than underflowing.
 pub fn create_position(peko_position: &PositionData) -> Position {
     Position {
         line: (peko_position.line.saturating_sub(1)) as u32,
@@ -173,8 +175,7 @@ fn read_scope(scope: &RwLock<Scope>) -> RwLockReadGuard<'_, Scope> {
 /// document-symbol tree. Returns `None` for symbols that should not appear in
 /// the outline.
 pub fn document_symbol_from_scope_symbol(scope_symbol: &ScopeSymbol) -> Option<Symbol> {
-    if scope_symbol.get_kind() != "variable"
-        || scope_symbol.get_kind() != "attribute"
+    if (scope_symbol.get_kind() != "variable" && scope_symbol.get_kind() != "attribute")
         || scope_symbol.get_name() == "this"
     {
         return None;
@@ -313,16 +314,27 @@ pub fn document_symbols_from_scope(scope: Arc<RwLock<Scope>>, from_class: bool) 
             _ => (scope_name, SymbolKind::Module),
         };
 
+        // An imported module's scope starts at the import statement (in this
+        // file) but ends in the module's own source file. Keep such a symbol on
+        // the import statement's line instead of spanning the whole imported
+        // file.
+        let sub_start = read_scope(subscope).start.clone();
+        let sub_end = read_scope(subscope).end.clone();
+        let range_end = if sub_end.file != sub_start.file {
+            &sub_start
+        } else {
+            &sub_end
+        };
         scope_children.push(Symbol {
             name,
             kind,
             range: Range {
-                start: create_position(&read_scope(subscope).start),
-                end: create_position(&read_scope(subscope).end),
+                start: create_position(&sub_start),
+                end: create_position(range_end),
             },
             selection_range: Range {
-                start: create_position(&read_scope(subscope).start),
-                end: create_position(&read_scope(subscope).end),
+                start: create_position(&sub_start),
+                end: create_position(range_end),
             },
             detail: None,
             children: document_symbols_from_scope(subscope.clone(), is_class_scope),

@@ -180,6 +180,21 @@ pub struct CompletionItem {
     pub sort_text: Option<String>,
     pub insert_text_format: Option<InsertTextFormat>,
     pub command: Option<Command>,
+    /// Edits applied elsewhere in the document when the item is accepted, in
+    /// addition to the main `insert_text`. Used to insert a `new ` keyword
+    /// before a `module::` path so a class accepts as `new module::Class(...)`
+    /// while the main insertion still replaces the typed identifier. These
+    /// edits must not overlap the range the main insertion touches.
+    pub additional_text_edits: Vec<CompletionTextEdit>,
+}
+
+/// A range replacement carried by a [`CompletionItem`]. The range is in the
+/// internal char-based coordinate space and is mapped to the wire encoding at
+/// the protocol boundary. An empty range denotes a pure insertion at its start.
+#[derive(Debug, Clone)]
+pub struct CompletionTextEdit {
+    pub range: Range,
+    pub new_text: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,8 +329,10 @@ pub trait AnalysisEngine: Send + Sync + 'static {
     // ------------------------------------------------------------------
 
     /// Return the fully-formatted source text for the file, or `None` if the
-    /// engine does not support formatting.
-    fn format(&self, path: &Path, text: &str) -> Option<String>;
+    /// engine does not support formatting. `indent_size` and `use_spaces` carry
+    /// the editor's indentation preference so the output matches it.
+    fn format(&self, path: &Path, text: &str, indent_size: usize, use_spaces: bool)
+    -> Option<String>;
 }
 
 // ---------------------------------------------------------------------------

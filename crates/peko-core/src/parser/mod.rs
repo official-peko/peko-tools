@@ -48,7 +48,7 @@ use indexmap::IndexMap;
 
 use crate::asts::data_structures::*;
 use crate::asts::{
-    PekoAST, PlaceholderAST, declarations::*, expressions::*, statements::*, values::*,
+    CommentAST, PekoAST, PlaceholderAST, declarations::*, expressions::*, statements::*, values::*,
 };
 use crate::diagnostics;
 use crate::lexer;
@@ -347,7 +347,7 @@ impl PekoParser {
     }
 
     /// Pushes a context tag onto the state stack.
-    fn set_state(&mut self, state: &str) {
+    pub(crate) fn set_state(&mut self, state: &str) {
         self.state.push(state.to_owned());
     }
 
@@ -379,6 +379,40 @@ impl PekoParser {
         }
         // Skip the last token of the comment.
         self.tokens.increase_index();
+    }
+
+    /// Captures the current comment line as a [`CommentAST`], advancing past it.
+    ///
+    /// Mirrors [`Self::skip_comment`] but preserves the text. The result is the
+    /// whole line including the `//` marker, trimmed of the leading indentation
+    /// and the trailing newline.
+    pub fn take_comment(&mut self) -> CommentAST {
+        let start = self.tokens.current_token().get_start().clone();
+        let mut text = String::new();
+
+        while !self.tokens.finished() && !self.tokens.current_token().has_newline() {
+            text.push_str(&self.tokens.current_token().get_value_with_whitespace(false));
+            self.tokens.increase_index();
+        }
+
+        let end = self.tokens.current_token().get_end().clone();
+        text.push_str(&self.tokens.current_token().get_value_with_whitespace(false));
+        self.tokens.increase_index();
+
+        CommentAST::new(text.trim().to_string(), start, end)
+    }
+
+    /// When comment capture is active (the `keep_comments` state), returns the
+    /// current comment as an AST node; otherwise skips it and returns `None`.
+    /// A statement-sequence parser pushes any returned node so a formatter can
+    /// reproduce the comment in place.
+    fn capture_or_skip_comment(&mut self) -> Option<PekoAST> {
+        if self.has_state("keep_comments") {
+            Some(PekoAST::Comment(self.take_comment()))
+        } else {
+            self.skip_comment();
+            None
+        }
     }
 
     /// Parses module-level doc info (`//!` lines).
@@ -697,10 +731,11 @@ impl PekoParser {
     /// Resolves the current token as a single character, handling escape
     /// sequences.
     ///
-    /// Standard escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `` \` ``) and
-    /// two-digit hex escapes (`\xNN` for any `NN` in `00..=ff`) are decoded.
-    /// On a malformed escape, records a diagnostic and returns a single
-    /// space as a placeholder so parsing can continue.
+    /// Standard escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `` \` ``),
+    /// two-digit hex escapes (`\xNN` for any `NN` in `00..=ff`), and Unicode
+    /// escapes (`\u{HEX}` for a scalar value written as 1 to 6 hex digits) are
+    /// decoded. On a malformed escape, records a diagnostic and returns a
+    /// single space as a placeholder so parsing can continue.
     fn parse_token_as_char(&mut self) -> String {
         // Non-escape: return the token verbatim.
         if self.tokens.current_token().get_value() != "\\" {
@@ -748,8 +783,52 @@ impl PekoParser {
                 }
             }
 
+            // `\u{HEX}`, a Unicode escape naming a single scalar value. The
+            // opening brace, the hex digits, and the closing brace lex as their
+            // own tokens, so they are consumed from the stream here. The cursor
+            // is left on the closing brace; the caller advances past it.
+            'u' => {
+                if token_value != "u" || !self.tokens.get_token_forward(1).equals("{") {
+                    self.report_diagnostic("invalid `\\u` escape in string literal. A Unicode escape has the form `\\u{HEX}`, e.g. `\\u{1F600}`");
+                    return String::from(" ");
+                }
+
+                // Step onto the opening brace, then onto the first hex token.
+                self.tokens.increase_index();
+                self.tokens.increase_index();
+
+                let mut hex = String::new();
+                while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
+                    hex.push_str(self.tokens.current_token().get_value());
+                    // A scalar value is at most six hex digits. Stop scanning
+                    // past that so a missing brace cannot consume the rest of
+                    // the source.
+                    if hex.len() > 6 {
+                        self.report_diagnostic("invalid `\\u{...}` escape in string literal. Use 1 to 6 hex digits, e.g. `\\u{41}` or `\\u{1F600}`");
+                        return String::from(" ");
+                    }
+                    self.tokens.increase_index();
+                }
+
+                if self.tokens.finished() {
+                    self.report_diagnostic("unterminated `\\u{...}` escape in string literal. Add a closing `}`");
+                    return String::from(" ");
+                }
+
+                match u32::from_str_radix(hex.trim(), 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
+                    Some(decoded) => decoded.to_string(),
+                    None => {
+                        self.report_diagnostic("invalid code point in `\\u{...}` escape. Use 1 to 6 hex digits naming a Unicode scalar value, e.g. `\\u{41}` or `\\u{1F600}`");
+                        String::from(" ")
+                    }
+                }
+            }
+
             _ => {
-                self.report_diagnostic("invalid escape sequence in string literal. Valid escapes are `\\n`, `\\t`, `\\r`, `\\\\`, `\\\"`, `\\'`, `` \\` ``, and `\\xHH` for hex codes");
+                self.report_diagnostic("invalid escape sequence in string literal. Valid escapes are `\\n`, `\\t`, `\\r`, `\\\\`, `\\\"`, `\\'`, `` \\` ``, `\\xHH` for hex bytes, and `\\u{HEX}` for Unicode scalar values");
                 String::from(" ")
             }
         }
@@ -816,7 +895,19 @@ impl PekoParser {
                     break;
                 }
                 match self.tokens.current_token().get_type() {
-                    lexer::TokenType::Comment => self.skip_comment(),
+                    lexer::TokenType::Comment => {
+                        if let Some(comment) = self.capture_or_skip_comment() {
+                            block_body.push(comment);
+                        }
+                    }
+                    // A `///` doc line inside a body is captured verbatim only
+                    // when comment capture is active; otherwise it belongs to the
+                    // following declaration's doc-info.
+                    lexer::TokenType::DocComment if self.has_state("keep_comments") => {
+                        if let Some(comment) = self.capture_or_skip_comment() {
+                            block_body.push(comment);
+                        }
+                    }
                     _ => {
                         if self.tokens.current_token().get_value() == ";" {
                             self.tokens.increase_index();
@@ -849,7 +940,9 @@ impl PekoParser {
                     || self.tokens.current_token().is_comment())
             {
                 if self.tokens.current_token().is_comment() {
-                    self.skip_comment();
+                    if let Some(comment) = self.capture_or_skip_comment() {
+                        block_body.push(comment);
+                    }
                 } else {
                     self.tokens.increase_index();
                 }
@@ -1028,7 +1121,11 @@ impl PekoParser {
             self.tokens.increase_index();
         }
 
-        PekoAST::Cast(CastAST::new(Box::new(value), constant_type, CastKind::Constant))
+        PekoAST::Cast(CastAST::new(
+            Box::new(value),
+            constant_type,
+            CastKind::Constant,
+        ))
     }
 
     /// Parses a function-header argument list: `(arg: type, ..., Args<T> => name) => ret`.
@@ -1432,7 +1529,10 @@ impl PekoParser {
         let starting_position = self.get_current_position();
 
         // The `let` and the opening `(`.
-        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Let) {
+        if matches!(
+            self.tokens.current_token().get_type(),
+            lexer::TokenType::Let
+        ) {
             self.tokens.increase_index();
         }
         if self.expect_token_value("(", "destructuring pattern") {
@@ -1466,7 +1566,10 @@ impl PekoParser {
         let starting_position = self.get_current_position();
 
         // The `let` keyword introduces the declaration.
-        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Let) {
+        if matches!(
+            self.tokens.current_token().get_type(),
+            lexer::TokenType::Let
+        ) {
             self.tokens.increase_index();
         }
 
@@ -1538,11 +1641,15 @@ impl PekoParser {
             match self.tokens.current_token().get_type() {
                 lexer::TokenType::Impl => {
                     self.tokens.increase_index();
-                    restraints.push(types::TypeRestraint::Impl(types::PekoType::from_tokens(self)));
+                    restraints.push(types::TypeRestraint::Impl(types::PekoType::from_tokens(
+                        self,
+                    )));
                 }
                 lexer::TokenType::From => {
                     self.tokens.increase_index();
-                    restraints.push(types::TypeRestraint::From(types::PekoType::from_tokens(self)));
+                    restraints.push(types::TypeRestraint::From(types::PekoType::from_tokens(
+                        self,
+                    )));
                 }
                 _ => {
                     self.report_diagnostic(
@@ -1749,8 +1856,10 @@ impl PekoParser {
             "class SerialDerived {{\n    [public] fn serialize(serializer: Serializer) {{\n{serialize_body}    }}\n\n    [public static] fn deserialize(deserializer: Deserializer) => Self? {{\n{deserialize_body}    }}\n}}\n",
         );
 
-        let mut sub_parser =
-            PekoParser::new(lexer::TokenList::from_source(&generated, &self.file), &self.file);
+        let mut sub_parser = PekoParser::new(
+            lexer::TokenList::from_source(&generated, &self.file),
+            &self.file,
+        );
         let generated_class = sub_parser.parse_class_declaration();
 
         for method in generated_class.methods {
@@ -1793,11 +1902,13 @@ impl PekoParser {
         // block imports it. The import is idempotent, so a module that already
         // has core is unaffected.
         let generated = format!(
-            "import {{ * }} from std::core;\n\n[public] fn serialize_enum_{enum_type}(value: {enum_type}, serializer: Serializer) {{\n    switch value {{\n{switch_arms}    }}\n}}\n\n[public] fn deserialize_enum_{enum_type}(deserializer: Deserializer) => {enum_type}? {{\n    let text: string = deserializer.get_identifier()? else {{ return Error(\"{enum_type}\") }}\n{match_arms}    return Error(\"{enum_type}\")\n}}\n",
+            "import {{ * }} from std::core;\n\n[public hide] fn serialize_enum_{enum_type}(value: {enum_type}, serializer: Serializer) {{\n    switch value {{\n{switch_arms}    }}\n}}\n\n[public hide] fn deserialize_enum_{enum_type}(deserializer: Deserializer) => {enum_type}? {{\n    let text: string = deserializer.get_identifier()? else {{ return Error(\"{enum_type}\") }}\n{match_arms}    return Error(\"{enum_type}\")\n}}\n",
         );
 
-        let mut sub_parser =
-            PekoParser::new(lexer::TokenList::from_source(&generated, &self.file), &self.file);
+        let mut sub_parser = PekoParser::new(
+            lexer::TokenList::from_source(&generated, &self.file),
+            &self.file,
+        );
         while !sub_parser.tokens.finished() {
             if sub_parser.tokens.current_token().equals(";") {
                 sub_parser.tokens.increase_index();
@@ -1926,6 +2037,7 @@ impl PekoParser {
 
         let mut attributes: IndexMap<PositionedValue<String>, ClassAttributeData> = IndexMap::new();
         let mut methods: Vec<ClassMethod> = Vec::new();
+        let mut comments: Vec<CommentAST> = Vec::new();
 
         let mut method_index = 0;
 
@@ -1937,7 +2049,9 @@ impl PekoParser {
             while (self.tokens.current_token().equals("[")
                 && !self.tokens.get_token_forward(1).equals("operator")
                 && visibility.is_none())
-                || (self.tokens.current_token().equals("///") && docinfo.is_none())
+                || (self.tokens.current_token().equals("///")
+                    && docinfo.is_none()
+                    && !self.has_state("keep_comments"))
             {
                 if self.tokens.current_token().equals("[") {
                     visibility = Some(self.parse_visibility());
@@ -2131,7 +2245,20 @@ impl PekoParser {
                     method_index += 1;
                 }
 
-                lexer::TokenType::Comment => self.skip_comment(),
+                lexer::TokenType::Comment => {
+                    if let Some(PekoAST::Comment(comment)) = self.capture_or_skip_comment() {
+                        comments.push(comment);
+                    }
+                }
+
+                // A `///` doc line is captured verbatim when comment capture is
+                // active; otherwise the pre-member loop above folds it into the
+                // member's doc-info.
+                lexer::TokenType::DocComment if self.has_state("keep_comments") => {
+                    if let Some(PekoAST::Comment(comment)) = self.capture_or_skip_comment() {
+                        comments.push(comment);
+                    }
+                }
 
                 // Operator overload: `[operator <op>](args) { body }`.
                 _ => {
@@ -2197,13 +2324,17 @@ impl PekoParser {
             }
         }
 
+        // The closing brace ends the declaration span. It is captured before
+        // the brace is consumed, so the end is the `}` itself rather than the
+        // following token.
+        let closing_position = self.tokens.current_token().get_end().clone();
         if self.expect_token_value("}", "class body") {
             self.tokens.increase_index();
         }
 
-        ClassAST::new(
+        let mut class = ClassAST::new(
             starting_position,
-            self.get_current_position(),
+            closing_position,
             VisibilityData::open_visibility(),
             None,
             class_name,
@@ -2213,7 +2344,9 @@ impl PekoParser {
             methods,
             generics,
             generic_bounds,
-        )
+        );
+        class.comments = comments;
+        class
     }
 
     /// Parses a trait declaration: `trait Name<G> { fn sig; fn sig { default } }`.
@@ -2263,6 +2396,7 @@ impl PekoParser {
         }
 
         let mut methods: Vec<FunctionDeclarationAST> = Vec::new();
+        let mut comments: Vec<CommentAST> = Vec::new();
 
         while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
             // A bodyless method ends with `;`; consume the marker between slots.
@@ -2278,7 +2412,9 @@ impl PekoParser {
             let mut visibility: Option<VisibilityData> = None;
             let mut docinfo: Option<DocInfo> = None;
             while (self.tokens.current_token().equals("[") && visibility.is_none())
-                || (self.tokens.current_token().equals("///") && docinfo.is_none())
+                || (self.tokens.current_token().equals("///")
+                    && docinfo.is_none()
+                    && !self.has_state("keep_comments"))
             {
                 if self.tokens.current_token().equals("[") {
                     visibility = Some(self.parse_visibility());
@@ -2297,7 +2433,19 @@ impl PekoParser {
                     methods.push(method);
                 }
 
-                lexer::TokenType::Comment => self.skip_comment(),
+                lexer::TokenType::Comment => {
+                    if let Some(PekoAST::Comment(comment)) = self.capture_or_skip_comment() {
+                        comments.push(comment);
+                    }
+                }
+
+                // A `///` doc line is captured verbatim when comment capture is
+                // active; otherwise the pre-loop above folds it into doc-info.
+                lexer::TokenType::DocComment if self.has_state("keep_comments") => {
+                    if let Some(PekoAST::Comment(comment)) = self.capture_or_skip_comment() {
+                        comments.push(comment);
+                    }
+                }
 
                 // Skip stray tokens so a malformed member cannot wedge the loop.
                 _ => {
@@ -2309,19 +2457,22 @@ impl PekoParser {
             }
         }
 
+        let closing_position = self.tokens.current_token().get_end().clone();
         if self.expect_token_value("}", "trait body") {
             self.tokens.increase_index();
         }
 
-        TraitDeclarationAST::new(
+        let mut trait_declaration = TraitDeclarationAST::new(
             starting_position,
-            self.get_current_position(),
+            closing_position,
             VisibilityData::open_visibility(),
             None,
             trait_name,
             generics,
             methods,
-        )
+        );
+        trait_declaration.comments = comments;
+        trait_declaration
     }
 
     /// Parses an enum declaration: `enum Name { Variant1, Variant2, ... }`.
@@ -2338,15 +2489,23 @@ impl PekoParser {
         }
 
         let mut variants: Vec<PositionedValue<String>> = Vec::new();
+        let mut comments: Vec<CommentAST> = Vec::new();
 
         while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
-            // Eat comments and stray separators before each variant.
+            // Eat comments and stray separators before each variant. A `///` doc
+            // line is captured verbatim only when comment capture is active.
+            let keep_comments = self.has_state("keep_comments");
             while !self.tokens.finished()
                 && (self.tokens.current_token().is_comment()
+                    || (self.tokens.current_token().is_doc_comment() && keep_comments)
                     || self.tokens.current_token().equals(","))
             {
-                if self.tokens.current_token().is_comment() {
-                    self.skip_comment();
+                if self.tokens.current_token().is_comment()
+                    || (self.tokens.current_token().is_doc_comment() && keep_comments)
+                {
+                    if let Some(PekoAST::Comment(comment)) = self.capture_or_skip_comment() {
+                        comments.push(comment);
+                    }
                 } else {
                     self.tokens.increase_index();
                 }
@@ -2367,18 +2526,21 @@ impl PekoParser {
             }
         }
 
+        let closing_position = self.tokens.current_token().get_end().clone();
         if self.expect_token_value("}", "enum body") {
             self.tokens.increase_index();
         }
 
-        EnumDeclarationAST::new(
+        let mut enum_declaration = EnumDeclarationAST::new(
             starting_position,
-            self.get_current_position(),
+            closing_position,
             VisibilityData::open_visibility(),
             None,
             enum_name,
             variants,
-        )
+        );
+        enum_declaration.comments = comments;
+        enum_declaration
     }
 
     /// Parses a `switch` over an enum: `switch subject { Enum::Variant => { ...
@@ -2469,6 +2631,14 @@ impl PekoParser {
 
         // Walk any chain of access / call / assignment suffixes.
         loop {
+            // At end of input `current_token` returns the last token. Without
+            // this guard a suffix arm that does not advance (a trailing `?` or
+            // `.` as the final token) would re-read that same token and loop
+            // forever. Stopping at end of input closes the chain.
+            if self.tokens.finished() {
+                break;
+            }
+
             match self.tokens.current_token().get_type() {
                 // Generic function call: `<T, U>(args)`.
                 lexer::TokenType::BooleanOperator => {
@@ -2702,7 +2872,10 @@ impl PekoParser {
     /// must immediately follow the `?`; a None or Error then runs this block
     /// for a fallback value instead of propagating or halting.
     fn parse_optional_unwrap_else(&mut self) -> Option<PositionedValue<Vec<PekoAST>>> {
-        if matches!(self.tokens.current_token().get_type(), lexer::TokenType::Else) {
+        if matches!(
+            self.tokens.current_token().get_type(),
+            lexer::TokenType::Else
+        ) {
             self.tokens.increase_index();
             return Some(self.parse_block("optional fallback body"));
         }
@@ -2862,15 +3035,14 @@ impl PekoParser {
 
         // A bare `return` ends at a `;` or at the end of its block (`}`); only
         // a return with a value has an expression to parse.
-        let return_value = if self.tokens.current_token().equals(";")
-            || self.tokens.current_token().equals("}")
-        {
-            None
-        } else {
-            let return_value = self.parse();
-            ending_position = return_value.get_end().clone();
-            Some(Box::new(return_value))
-        };
+        let return_value =
+            if self.tokens.current_token().equals(";") || self.tokens.current_token().equals("}") {
+                None
+            } else {
+                let return_value = self.parse();
+                ending_position = return_value.get_end().clone();
+                Some(Box::new(return_value))
+            };
 
         ReturnAST::new(starting_position, ending_position, return_value)
     }
@@ -3520,8 +3692,11 @@ impl PekoParser {
                 if matches!(self.tokens.current_token().get_type(), lexer::TokenType::As) {
                     self.tokens.increase_index();
                     let cast_to = types::PekoType::from_tokens(self);
-                    first_val =
-                        PekoAST::Cast(CastAST::new(Box::new(first_val), cast_to, CastKind::Checked));
+                    first_val = PekoAST::Cast(CastAST::new(
+                        Box::new(first_val),
+                        cast_to,
+                        CastKind::Checked,
+                    ));
                 }
 
                 match self.tokens.current_token().get_type() {
@@ -3887,9 +4062,15 @@ impl PekoParser {
     }
 
     fn parse_inner(&mut self) -> PekoAST {
+        // Comment capture (formatting) records comments and doc lines in the
+        // enclosing statement sequence before this runs, so leave them in place
+        // then rather than skipping or folding them into doc-info here.
+        let keep_comments = self.has_state("keep_comments");
+
         // Eat any leading semicolons and comments.
         while !self.tokens.finished()
-            && (self.tokens.current_token().equals(";") || self.tokens.current_token().is_comment())
+            && (self.tokens.current_token().equals(";")
+                || (self.tokens.current_token().is_comment() && !keep_comments))
         {
             if self.tokens.current_token().equals(";") {
                 self.tokens.increase_index();
@@ -3903,7 +4084,9 @@ impl PekoParser {
         let mut docinfo: Option<DocInfo> = None;
 
         while (self.tokens.current_token().equals("[") && visibility.is_none())
-            || (self.tokens.current_token().equals("///") && docinfo.is_none())
+            || (self.tokens.current_token().equals("///")
+                && docinfo.is_none()
+                && !keep_comments)
         {
             if self.tokens.current_token().equals("[") {
                 visibility = Some(self.parse_visibility());
@@ -3920,8 +4103,10 @@ impl PekoParser {
                     class_declaration.visibility = v;
                 }
                 // A `[serial]` class gets compiler-derived Serialize and
-                // Deserialize implementations over its attributes.
-                if class_declaration.visibility.is_serial {
+                // Deserialize implementations over its attributes. Tooling that
+                // only wants the author's declarations (the formatter) sets
+                // `skip_derives` to suppress the generated siblings.
+                if class_declaration.visibility.is_serial && !self.has_state("skip_derives") {
                     self.derive_serialization(&mut class_declaration);
                 }
                 PekoAST::Class(class_declaration)
@@ -3945,7 +4130,11 @@ impl PekoParser {
                 // Emit the enum's serialization helper functions as siblings, so
                 // an enum-typed field of a `[serial]` class (even an imported
                 // enum) can be (de)serialized as its variant identifier string.
-                self.derive_enum_serialization(&enum_declaration);
+                // Suppressed under `skip_derives` for tooling that wants only
+                // the author's declarations.
+                if !self.has_state("skip_derives") {
+                    self.derive_enum_serialization(&enum_declaration);
+                }
                 PekoAST::Enum(enum_declaration)
             }
 
@@ -4095,14 +4284,26 @@ impl PekoParser {
                     return PekoAST::PekoXTag(self.parse_pekox());
                 }
 
-                // Nothing recognized, so emit a diagnostic and advance.
-                self.report_diagnostic(
-                    format!(
-                        "unexpected token `{}`. This token is not valid in this context",
-                        self.tokens.current_token().get_value(),
-                    )
-                    .as_str(),
-                );
+                // Nothing recognized, so emit a diagnostic and advance. A
+                // non-ASCII token gets a targeted message: identifiers and
+                // keywords are ASCII only, while string, character, and comment
+                // content may hold any Unicode text.
+                let token_value = self.tokens.current_token().get_value().clone();
+                if !token_value.is_ascii() {
+                    self.report_diagnostic(
+                        format!(
+                            "unexpected non-ASCII character `{token_value}`. Identifiers and keywords must use ASCII letters, digits, and underscores. Non-ASCII text is allowed inside string literals, character literals, and comments",
+                        )
+                        .as_str(),
+                    );
+                } else {
+                    self.report_diagnostic(
+                        format!(
+                            "unexpected token `{token_value}`. This token is not valid in this context",
+                        )
+                        .as_str(),
+                    );
+                }
                 let final_ast = PekoAST::Null(NullAST::new(
                     self.get_current_position(),
                     self.get_current_position(),
