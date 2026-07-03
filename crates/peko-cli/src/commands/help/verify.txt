@@ -1,0 +1,27 @@
+peko verify [FILE]
+
+Scan a .pkpkg package container and verify its structure, then report what it
+holds: the container header, the embedded peko.toml and its keys, and the packed
+source tree. Every problem is listed - hard errors that make the package invalid
+or unpublishable, and warnings for missing registry-quality fields. The command
+exits non-zero when any error is present.
+
+With no FILE, the enclosing project is packed in memory and that container is
+verified, so a package can be checked before it is written or published. This is
+the same check publish runs before an upload.
+
+ARGUMENTS
+    FILE    (optional) path to a .pkpkg container to verify. When omitted, the
+            current project is packed and verified.
+
+CHECKS
+    - the container header (magic, version, compression, signature flag) and
+      that the framed sections fit the file
+    - the embedded peko.toml parses and is a publishable [package] with [lib]
+    - required keys are present and registry-quality keys are recommended
+    - the payload decompresses, the packed peko.toml matches the embedded one,
+      the [lib].root entry file is present, and no build artifacts leaked in
+
+EXAMPLES
+    peko verify                          verify the current project
+    peko verify std-0.1.0.pkpkg          verify a packaged container

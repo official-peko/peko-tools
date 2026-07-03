@@ -39,6 +39,22 @@ p_fn void webview_eval(p_opaque w, p_gc(p_i8) js);
    call arguments) and returns the JSON result. Defined in webview_bridge.c. */
 p_fn void peko_webview_bind(p_opaque w, p_gc(p_i8) name, p_opaque callback, p_gc_opaque ctx);
 
+/* Desktop window chrome, opt-in. transparent makes the window and web view
+   non-opaque so CSS colors composite over the layer behind the window.
+   decorated toggles the native titlebar: 0 extends the content under a hidden
+   titlebar for a custom one. begin_drag starts a native window move, driven by
+   the injected drag shim. These are no-ops on iOS and Android. */
+p_fn void peko_webview_set_transparent(p_opaque w, p_i32 transparent);
+p_fn void peko_webview_set_decorations(p_opaque w, p_i32 decorated);
+p_fn void peko_webview_begin_drag(p_opaque w);
+
+/* Native window controls for a custom titlebar. minimize hides the window to
+   the taskbar or dock, maximize toggles between maximized and restored, and
+   close ends the window. These are no-ops on iOS and Android. */
+p_fn void peko_webview_minimize(p_opaque w);
+p_fn void peko_webview_maximize(p_opaque w);
+p_fn void peko_webview_close(p_opaque w);
+
 /* The GC parks the calling thread across the blocking event loop. */
 p_fn p_gcsafe void pgc_begin_blocking();
 p_fn void pgc_end_blocking();

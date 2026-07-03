@@ -15,6 +15,7 @@
 
 #include <jni.h>
 #include <android/log.h>
+#include <android/looper.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -53,6 +54,42 @@ static JavaVM         *g_vm       = NULL;
 static jclass          g_bridge   = NULL;   /* global ref to PekoWebViewBridge */
 static peko_wv_binding *g_bindings = NULL;
 static peko_wv_script  *g_scripts  = NULL;
+
+/* The JNI callbacks from the bridge, defined at the end of this file. They are
+ * bound to the Java native methods by RegisterNatives, because NativeActivity
+ * loads this library outside System.loadLibrary and the Java VM would otherwise
+ * not find them by name. */
+JNIEXPORT void JNICALL
+Java_dev_peko_webview_PekoWebViewBridge_nativeOnReady(JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL
+Java_dev_peko_webview_PekoWebViewBridge_nativeOnMessage(JNIEnv *env, jclass cls,
+                                                        jstring message);
+JNIEXPORT void JNICALL
+Java_dev_peko_webview_PekoWebViewBridge_nativeOnPageStarted(JNIEnv *env, jclass cls,
+                                                            jstring url);
+JNIEXPORT void JNICALL
+Java_dev_peko_webview_PekoWebViewBridge_nativeOnPageFinished(JNIEnv *env, jclass cls,
+                                                             jstring url);
+
+/* Binds the bridge's native methods to the callbacks above. */
+static void register_bridge_natives(JNIEnv *env, jclass bridge) {
+    static const JNINativeMethod methods[] = {
+        {"nativeOnReady", "()V",
+         (void *)Java_dev_peko_webview_PekoWebViewBridge_nativeOnReady},
+        {"nativeOnMessage", "(Ljava/lang/String;)V",
+         (void *)Java_dev_peko_webview_PekoWebViewBridge_nativeOnMessage},
+        {"nativeOnPageStarted", "(Ljava/lang/String;)V",
+         (void *)Java_dev_peko_webview_PekoWebViewBridge_nativeOnPageStarted},
+        {"nativeOnPageFinished", "(Ljava/lang/String;)V",
+         (void *)Java_dev_peko_webview_PekoWebViewBridge_nativeOnPageFinished},
+    };
+    if ((*env)->RegisterNatives(env, bridge, methods, 4) != 0) {
+        PEKO_WV_LOG("create: RegisterNatives failed");
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+        }
+    }
+}
 
 /* Resolves a JNIEnv for the calling thread, attaching it to the Java VM when
  * needed. attached is set when this call performed the attach. */
@@ -163,6 +200,7 @@ webview_t webview_create(int debug, void *window) {
             put_env(attached);
             return NULL;
         }
+        register_bridge_natives(env, g_bridge);
     }
 
     jmethodID create = (*env)->GetStaticMethodID(
@@ -184,12 +222,26 @@ void webview_destroy(webview_t w) {
     (void)w;
 }
 
-/* Keeps the native thread alive while the Java UI thread drives the WebView.
- * The caller has already parked this thread for the collector. */
+/* Runs the app glue event loop while the Java UI thread drives the WebView.
+ * The glue delivers the activity lifecycle commands on this thread's looper.
+ * Draining them is required: the main thread blocks in its onStart and
+ * onResume callbacks until this loop acknowledges each command, and the WebView
+ * runnables the bridge posts to the main thread do not run until it does. The
+ * caller has already parked this thread for the collector, and the poll and the
+ * command processing touch no managed memory. */
 void webview_run(webview_t w) {
     (void)w;
     for (;;) {
-        sleep(3600);
+        int events;
+        struct android_poll_source *source = NULL;
+        int timeout = (gapp && gapp->destroyRequested) ? 0 : -1;
+        int ident = ALooper_pollAll(timeout, NULL, &events, (void **)&source);
+        if (source != NULL) {
+            source->process(gapp, source);
+        }
+        if (ident == ALOOPER_POLL_ERROR || (gapp && gapp->destroyRequested)) {
+            return;
+        }
     }
 }
 
@@ -302,6 +354,36 @@ void webview_return(webview_t w, const char *seq, int status, const char *result
     snprintf(js, len, fmt, seq, method, result, seq);
     call_bridge_string("eval", js);
     free(js);
+}
+
+/* Desktop window chrome has no meaning on Android, where a WebView fills the
+   activity and there is no movable window. These keep the C API uniform. */
+void peko_webview_set_transparent(webview_t w, int transparent) {
+    (void)w;
+    (void)transparent;
+}
+
+void peko_webview_set_decorations(webview_t w, int decorated) {
+    (void)w;
+    (void)decorated;
+}
+
+void peko_webview_begin_drag(webview_t w) {
+    (void)w;
+}
+
+/* A WebView fills the activity and there is no movable or resizable window, so
+   the window controls are no-ops. */
+void peko_webview_minimize(webview_t w) {
+    (void)w;
+}
+
+void peko_webview_maximize(webview_t w) {
+    (void)w;
+}
+
+void peko_webview_close(webview_t w) {
+    (void)w;
 }
 
 /* ------------------------------------------------------------------------- */

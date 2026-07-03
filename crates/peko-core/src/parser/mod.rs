@@ -3412,6 +3412,21 @@ impl PekoParser {
                     String::new()
                 };
 
+            // Attribute names may contain hyphens, as in data-* and aria-*
+            // attributes. The lexer splits `data-peko-drag` into identifier and
+            // `-` tokens, so a hyphenated run is re-joined into one key here.
+            if !errd {
+                while self.tokens.get_token_forward(1).equals("-")
+                    && self.tokens.get_token_forward(2).get_type()
+                        == &lexer::TokenType::Identifier
+                {
+                    self.tokens.increase_index();
+                    self.tokens.increase_index();
+                    attribute_key.push('-');
+                    attribute_key.push_str(self.tokens.current_token().get_value());
+                }
+            }
+
             // `class` is reserved; the framework convention is `className`.
             if attribute_key == "className" {
                 attribute_key = String::from("class");

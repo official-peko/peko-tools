@@ -1,14 +1,22 @@
-peko publish
+peko publish [OPTIONS]
 
 Packs the current package into a .pkpkg and uploads it to the registry.
 
 The package is packed into a .pkpkg container (zstd(tar(source)) with the
-verbatim peko.toml embedded) and its checksum is computed.
+verbatim peko.toml embedded) and verified locally. It is then uploaded
+through the platform publish handshake: request an upload slot, PUT the
+container bytes, and signal completion. The server reads the name,
+version, dependencies, and platforms from the embedded peko.toml,
+computes the checksum, rejects a duplicate version, and queues the
+version for admin review. It appears on the public index once approved.
 
-Uploading the blob, appending the registry index line, and mirroring the
-search row are not available yet; the web platform is not live. Until then,
-publish packs and reports the checksum. Use `peko pkg build` to write the
-.pkpkg to disk for inspection.
+Publishing requires a session. Run `peko login` first.
+
+OPTIONS
+    --base=<url>          override the platform base URL for this run
+                          (default: the PEKO_PLATFORM_URL environment
+                          variable, else https://app.pekoui.com)
 
 EXAMPLES
+    peko login
     peko publish

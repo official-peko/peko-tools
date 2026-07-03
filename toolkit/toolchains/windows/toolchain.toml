@@ -40,7 +40,7 @@ lib_paths = [
   "atlmfc-lib",
   "win-lib",
 ]
-libs = ["ucrt", "msvcrt", "shell32", "shlwapi", "user32", "ws2_32"]
+libs = ["ucrt", "msvcrt", "shell32", "shlwapi", "user32", "ws2_32", "dcomp", "d3d11", "dxgi"]
 frameworks = []
 objects = []
 flags = ["-machine:x64", "-subsystem:console", "-nologo"]

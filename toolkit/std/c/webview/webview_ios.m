@@ -62,7 +62,11 @@ static PekoWebView *g_webview = nil;
         _config = [[WKWebViewConfiguration alloc] init];
         /* One message handler receives every bound call. */
         [_config.userContentController addScriptMessageHandler:self name:@"__peko__"];
-        _web_view = [[WKWebView alloc] initWithFrame:CGRectZero configuration:_config];
+        /* The WKWebView is a UIView and installs gesture recognizers, so it is
+           created in the app delegate after UIApplicationMain, where UIKit is
+           initialized. This init runs before UIApplicationMain. Building the web
+           view there from the populated configuration lets init and bind scripts
+           registered before run apply to it. */
     }
     return self;
 }
@@ -132,9 +136,20 @@ static PekoWebView *g_webview = nil;
 
     UIViewController *root = [[UIViewController alloc] init];
     if (g_webview) {
-        g_webview.web_view.frame = root.view.bounds;
+        g_webview.web_view = [[WKWebView alloc] initWithFrame:root.view.bounds
+                                                configuration:g_webview.config];
         g_webview.web_view.autoresizingMask =
             UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        // Extend the content edge to edge. The scroll view otherwise insets the
+        // page by the safe areas, which leaves the web view background showing
+        // in the status bar and home indicator strips. A clear web view over a
+        // black window keeps those strips filled rather than white.
+        g_webview.web_view.scrollView.contentInsetAdjustmentBehavior =
+            UIScrollViewContentInsetAdjustmentNever;
+        g_webview.web_view.opaque = NO;
+        g_webview.web_view.backgroundColor = [UIColor clearColor];
+        g_webview.web_view.scrollView.backgroundColor = [UIColor clearColor];
+        root.view.backgroundColor = [UIColor blackColor];
         [root.view addSubview:g_webview.web_view];
         root.title = g_webview.title;
         [g_webview apply_pending];
@@ -278,6 +293,36 @@ void webview_return(webview_t w, const char *seq, int status, const char *result
         @"window._rpc[%@].%@(%@); delete window._rpc[%@]",
         seq_str, method, result_str, seq_str];
     [view eval:js];
+}
+
+/* Desktop window chrome has no meaning on iOS, where a view fills the screen
+   and there is no movable window. These keep the C API uniform. */
+void peko_webview_set_transparent(webview_t w, int transparent) {
+    (void)w;
+    (void)transparent;
+}
+
+void peko_webview_set_decorations(webview_t w, int decorated) {
+    (void)w;
+    (void)decorated;
+}
+
+void peko_webview_begin_drag(webview_t w) {
+    (void)w;
+}
+
+/* A view fills the screen on iOS and there is no movable or resizable window,
+ * so the window controls are no-ops. */
+void peko_webview_minimize(webview_t w) {
+    (void)w;
+}
+
+void peko_webview_maximize(webview_t w) {
+    (void)w;
+}
+
+void peko_webview_close(webview_t w) {
+    (void)w;
 }
 
 #endif /* __APPLE__ && TARGET_OS_IPHONE */

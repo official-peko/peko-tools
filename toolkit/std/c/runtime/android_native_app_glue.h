@@ -12,11 +12,9 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
-#ifndef _ANDROID_NATIVE_APP_GLUE_H
-#define _ANDROID_NATIVE_APP_GLUE_H
+#pragma once
 
 #include <poll.h>
 #include <pthread.h>
@@ -49,7 +47,7 @@ extern "C" {
  *
  * 2/ android_main() receives a pointer to a valid "android_app" structure
  *    that contains references to other important objects, e.g. the
- *    ANativeActivity object instance the application is running in.
+ *    ANativeActivity obejct instance the application is running in.
  *
  * 3/ the "android_app" object holds an ALooper instance that already
  *    listens to two important things:
@@ -142,10 +140,6 @@ struct android_app {
     // The ALooper associated with the app's thread.
     ALooper* looper;
 
-
-    // The ALooper associated with the main thread.
-    ALooper* looperui;
-
     // When non-NULL, this is the input queue from which the app will
     // receive user input events.
     AInputQueue* inputQueue;
@@ -173,9 +167,6 @@ struct android_app {
 
     int msgread;
     int msgwrite;
-
-	int uimsgread;
-	int uimsgwrite;
 
     pthread_t thread;
 
@@ -211,14 +202,9 @@ enum {
     LOOPER_ID_INPUT = 2,
 
     /**
-     * Start of main ALooper identifiers.
-     */
-    LOOPER_ID_MAIN_THREAD = 3,
-
-    /**
      * Start of user-defined ALooper identifiers.
      */
-    LOOPER_ID_USER = 4,
+    LOOPER_ID_USER = 3,
 };
 
 enum {
@@ -321,11 +307,6 @@ enum {
      * and waiting for the app thread to clean up and exit before proceeding.
      */
     APP_CMD_DESTROY,
-
-    /**
-     * Custom command to execute something from an event queue
-     */
-    APP_CMD_CUSTOM_EVENT,
 };
 
 /**
@@ -349,7 +330,7 @@ void android_app_pre_exec_cmd(struct android_app* android_app, int8_t cmd);
 void android_app_post_exec_cmd(struct android_app* android_app, int8_t cmd);
 
 /**
- * Dummy function that used to be used to prevent the linker from stripping app
+ * No-op function that used to be used to prevent the linker from stripping app
  * glue code. No longer necessary, since __attribute__((visibility("default")))
  * does this for us.
  */
@@ -364,13 +345,6 @@ app_dummy();
  */
 extern void android_main(struct android_app* app);
 
-/**
- * Mechanism to run code on main UI thread.
- */
-void RunCallbackOnUIThread( void (*callback)(void *), void * opaque );
-
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* _ANDROID_NATIVE_APP_GLUE_H */

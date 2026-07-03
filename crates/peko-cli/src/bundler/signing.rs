@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use peko_core::target::OperatingSystem;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bundler::{BundleError, BundleResult, run_tool};
@@ -109,70 +110,110 @@ fn registered_file(
 // Secrets (OS keychain via keyring-core)
 // ---------------------------------------------------------------------------
 
-/// Set this process's default credential store on the first keychain call.
-/// The store is chosen by host operating system. macOS and iOS use the
-/// Apple keychain, Windows uses the Credential Manager, and Linux uses the
-/// Secret Service over D-Bus. On any other host no store is set and
-/// keychain operations report an error.
-fn ensure_store() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        #[cfg(target_os = "macos")]
-        if let Ok(store) = apple_native_keyring_store::keychain::Store::new() {
-            keyring_core::set_default_store(store);
+/// The legacy per-role keychain accounts. Older versions stored one item per
+/// `<bundle_id>:<platform>:<role>`. These are folded into the consolidated item
+/// on first load and then removed.
+const LEGACY_ROLES: &[(&str, &str)] = &[
+    ("android", "store"),
+    ("android", "key"),
+    ("ios", "p12"),
+    ("macos", "p12"),
+    ("windows", "pfx"),
+];
+
+/// Every signing password for one project, held in a single keychain item and
+/// keyed by `<platform>:<role>`. Storing one item per project means a build or
+/// a `keys` command reads the keychain once, so the operating system authorizes
+/// access at most once rather than once per platform and role.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SigningSecrets {
+    #[serde(flatten)]
+    entries: std::collections::BTreeMap<String, String>,
+}
+
+impl SigningSecrets {
+    /// Load the project's secrets from the keychain. A missing item yields an
+    /// empty set. Legacy per-role items are folded into one consolidated item
+    /// on first load. Reads the consolidated item once.
+    pub fn load(bundle_id: &str) -> SigningSecrets {
+        crate::keychain::ensure_store();
+        if let Some(raw) = crate::keychain::get(KEYCHAIN_SERVICE, bundle_id)
+            && let Ok(secrets) = serde_json::from_str::<SigningSecrets>(&raw)
+        {
+            return secrets;
         }
-        #[cfg(target_os = "windows")]
-        if let Ok(store) = windows_native_keyring_store::Store::new() {
-            keyring_core::set_default_store(store);
-        }
-        #[cfg(target_os = "linux")]
-        if let Ok(store) = dbus_secret_service_keyring_store::Store::new() {
-            keyring_core::set_default_store(store);
-        }
-    });
-}
-
-/// Build the keychain account name for a project, platform, and role.
-fn keychain_account(bundle_id: &str, platform: &str, role: &str) -> String {
-    format!("{bundle_id}:{platform}:{role}")
-}
-
-/// Store a password in the OS keychain.
-pub fn store_password(
-    bundle_id: &str,
-    platform: &str,
-    role: &str,
-    password: &str,
-) -> BundleResult<()> {
-    ensure_store();
-    let account = keychain_account(bundle_id, platform, role);
-    let entry = keyring_core::Entry::new(KEYCHAIN_SERVICE, &account)
-        .map_err(|e| BundleError::Signing(format!("keychain open failed: {e}")))?;
-    entry
-        .set_password(password)
-        .map_err(|e| BundleError::Signing(format!("keychain write failed: {e}")))
-}
-
-/// Retrieve a password from the OS keychain, or `None` when not set.
-pub fn get_password(bundle_id: &str, platform: &str, role: &str) -> Option<String> {
-    ensure_store();
-    let account = keychain_account(bundle_id, platform, role);
-    let entry = keyring_core::Entry::new(KEYCHAIN_SERVICE, &account).ok()?;
-    entry.get_password().ok()
-}
-
-/// Remove a password from the OS keychain. Missing entries are ignored.
-pub fn delete_password(bundle_id: &str, platform: &str, role: &str) -> BundleResult<()> {
-    ensure_store();
-    let account = keychain_account(bundle_id, platform, role);
-    let entry = keyring_core::Entry::new(KEYCHAIN_SERVICE, &account)
-        .map_err(|e| BundleError::Signing(format!("keychain open failed: {e}")))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring_core::Error::NoEntry) => Ok(()),
-        Err(e) => Err(BundleError::Signing(format!("keychain delete failed: {e}"))),
+        SigningSecrets::migrate_legacy(bundle_id)
     }
+
+    /// Fold any legacy per-role items into one consolidated item, remove the
+    /// legacy items, and return the consolidated set.
+    fn migrate_legacy(bundle_id: &str) -> SigningSecrets {
+        let mut secrets = SigningSecrets::default();
+        for (platform, role) in LEGACY_ROLES {
+            let account = legacy_account(bundle_id, platform, role);
+            if let Some(password) = crate::keychain::get(KEYCHAIN_SERVICE, &account) {
+                secrets.set(platform, role, &password);
+            }
+        }
+        if !secrets.is_empty() {
+            let _ = secrets.store(bundle_id);
+            for (platform, role) in LEGACY_ROLES {
+                let account = legacy_account(bundle_id, platform, role);
+                let _ = crate::keychain::delete(KEYCHAIN_SERVICE, &account);
+            }
+        }
+        secrets
+    }
+
+    /// Look up one platform role's password.
+    pub fn get(&self, platform: &str, role: &str) -> Option<String> {
+        self.entries.get(&secret_key(platform, role)).cloned()
+    }
+
+    /// Insert or replace one platform role's password.
+    pub fn set(&mut self, platform: &str, role: &str, password: &str) {
+        self.entries
+            .insert(secret_key(platform, role), password.to_owned());
+    }
+
+    /// Remove every role stored for a platform. Returns `true` when a role was
+    /// removed.
+    pub fn remove_platform(&mut self, platform: &str) -> bool {
+        let prefix = format!("{platform}:");
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key.starts_with(&prefix));
+        self.entries.len() != before
+    }
+
+    /// `true` when no password is stored.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Persist the secrets to the keychain, replacing the item. An empty set
+    /// deletes the item. Writes once.
+    pub fn store(&self, bundle_id: &str) -> BundleResult<()> {
+        crate::keychain::ensure_store();
+        if self.entries.is_empty() {
+            return crate::keychain::delete(KEYCHAIN_SERVICE, bundle_id)
+                .map_err(|e| BundleError::Signing(format!("keychain delete failed: {e}")));
+        }
+        let raw = serde_json::to_string(self).map_err(|e| {
+            BundleError::Signing(format!("could not serialize signing secrets: {e}"))
+        })?;
+        crate::keychain::set(KEYCHAIN_SERVICE, bundle_id, &raw)
+            .map_err(|e| BundleError::Signing(format!("keychain write failed: {e}")))
+    }
+}
+
+/// The keychain lookup key for a platform role.
+fn secret_key(platform: &str, role: &str) -> String {
+    format!("{platform}:{role}")
+}
+
+/// The legacy per-role keychain account for a project, platform, and role.
+fn legacy_account(bundle_id: &str, platform: &str, role: &str) -> String {
+    format!("{bundle_id}:{platform}:{role}")
 }
 
 // ---------------------------------------------------------------------------
@@ -221,10 +262,10 @@ pub fn resolve_android(
         .and_then(|a| a.as_str())
         .unwrap_or("upload")
         .to_string();
-    let (Some(store_password), Some(key_password)) = (
-        get_password(bundle_id, "android", "store"),
-        get_password(bundle_id, "android", "key"),
-    ) else {
+    let secrets = SigningSecrets::load(bundle_id);
+    let (Some(store_password), Some(key_password)) =
+        (secrets.get("android", "store"), secrets.get("android", "key"))
+    else {
         return Ok(None);
     };
     Ok(Some(AndroidSigningKey {
@@ -249,7 +290,7 @@ pub fn resolve_apple(
     if !p12.exists() {
         return Ok(None);
     }
-    let Some(p12_password) = get_password(bundle_id, platform, "p12") else {
+    let Some(p12_password) = SigningSecrets::load(bundle_id).get(platform, "p12") else {
         return Ok(None);
     };
     let profile =
@@ -277,7 +318,7 @@ pub fn resolve_windows(
     if !pfx.exists() {
         return Ok(None);
     }
-    let Some(password) = get_password(bundle_id, "windows", "pfx") else {
+    let Some(password) = SigningSecrets::load(bundle_id).get("windows", "pfx") else {
         return Ok(None);
     };
     Ok(Some(WindowsSigningKey { pfx, password }))
@@ -610,4 +651,50 @@ pub fn osslsigncode_sign(exe: &Path, key: &WindowsSigningKey) -> BundleResult<()
         path: exe.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_get_and_remove_by_platform() {
+        let mut secrets = SigningSecrets::default();
+        assert!(secrets.is_empty());
+
+        secrets.set("android", "store", "a");
+        secrets.set("android", "key", "b");
+        secrets.set("macos", "p12", "c");
+        assert!(!secrets.is_empty());
+        assert_eq!(secrets.get("android", "store").as_deref(), Some("a"));
+        assert_eq!(secrets.get("macos", "p12").as_deref(), Some("c"));
+        assert_eq!(secrets.get("ios", "p12"), None);
+
+        // Removing one platform leaves the others in place.
+        assert!(secrets.remove_platform("android"));
+        assert_eq!(secrets.get("android", "store"), None);
+        assert_eq!(secrets.get("android", "key"), None);
+        assert_eq!(secrets.get("macos", "p12").as_deref(), Some("c"));
+
+        // Removing a platform with nothing stored reports no change.
+        assert!(!secrets.remove_platform("windows"));
+    }
+
+    #[test]
+    fn serializes_as_one_flat_blob() {
+        let mut secrets = SigningSecrets::default();
+        secrets.set("ios", "p12", "secret");
+        secrets.set("android", "store", "pw");
+
+        let json = serde_json::to_string(&secrets).unwrap();
+        // The stored item is a flat object keyed by platform:role, with no
+        // wrapper field, so one keychain item holds every password.
+        assert!(!json.contains("entries"));
+        assert!(json.contains("\"ios:p12\":\"secret\""));
+        assert!(json.contains("\"android:store\":\"pw\""));
+
+        let restored: SigningSecrets = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.get("ios", "p12").as_deref(), Some("secret"));
+        assert_eq!(restored.get("android", "store").as_deref(), Some("pw"));
+    }
 }

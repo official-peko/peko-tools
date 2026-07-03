@@ -73,6 +73,8 @@ commands! {
     format     => "normalize the indentation and spacing of Pekoscript files",
     install    => "resolve, download, and lock the project's dependencies",
     keys       => "manage per-project signing keys",
+    login      => "authenticate the cli with the Peko platform",
+    logout     => "clear the stored platform session",
     pkg        => "scaffold and pack a library package",
     project    => "create or inspect a Pekoscript project",
     publish    => "pack and publish a package to the registry",
@@ -81,7 +83,9 @@ commands! {
     test       => "type-check a Pekoscript file without producing output",
     toolchain  => "inspect and install build toolchains",
     update     => "re-resolve dependencies and refresh peko.lock",
+    verify     => "scan a .pkpkg container and verify its structure and keys",
     version    => "print the cli version and exit",
+    whoami     => "print the identity behind the stored platform session",
 }
 
 /// Look up a command by name. Returns `None` for unknown commands.

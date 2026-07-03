@@ -1,0 +1,17 @@
+peko login [OPTIONS]
+
+Authenticates the CLI with the Peko platform.
+
+Opens a browser to sign in, then receives a one-time code on a local
+loopback server, redeems it for a platform session, and stores the
+session in the operating system keychain. The stored session
+authenticates later commands such as `peko publish`.
+
+OPTIONS
+    --base=<url>          override the platform base URL for this run
+                          (default: the PEKO_PLATFORM_URL environment
+                          variable, else https://app.pekoui.com)
+
+EXAMPLES
+    peko login
+    peko login --base=http://localhost:3000

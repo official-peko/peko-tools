@@ -1,9 +1,10 @@
 //! `peko publish`: pack a package and upload it to the registry.
 //!
-//! Packing is implemented: the project becomes a `.pkpkg` container and its
-//! checksum is computed. Uploading the blob to R2, appending the index line,
-//! and mirroring a row to the search database are scaffolded until the web
-//! platform is live. Authentication via `peko login` is withheld for now.
+//! The project becomes a `.pkpkg` container that is verified locally, then
+//! uploaded through the platform publish handshake in
+//! `crate::registry::publish`. Authentication is the session from `peko login`.
+//! The server reads the package metadata from the embedded `peko.toml`,
+//! validates it, and queues the version for admin review.
 
 use std::process::ExitCode;
 
@@ -15,8 +16,6 @@ use crate::registry::pack;
 
 /// Execute the `publish` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
-    let _ = cli_info;
-
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -54,18 +53,75 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     };
     progress.finish_phase();
 
-    let checksum = pack::checksum(&bytes);
+    // Verify the packed container before anything leaves the machine. A package
+    // that fails verification must never be uploaded.
+    let report = crate::registry::verify::verify(&bytes);
+    for finding in &report.findings {
+        match finding.severity {
+            crate::registry::verify::Severity::Error => reporter.error(&finding.message),
+            crate::registry::verify::Severity::Warning => reporter.warning(&finding.message),
+        }
+    }
+    if !report.is_valid() {
+        reporter.error(format!(
+            "refusing to publish: the package failed verification with {} error(s)",
+            report.error_count()
+        ));
+        reporter.help(format!("run '{} verify' for the full report", cli_info.executable));
+        return ExitCode::FAILURE;
+    }
 
-    // TODO(platform): once the web platform is live, upload `bytes` to R2 at
-    // `blobs/<name>/<name>-<version>.pkpkg`, append an index line (with this
-    // checksum, the dependency list, features, platforms, and min compiler) to
-    // `index/<name>.jsonl`, and mirror a search row. This step is gated on
-    // `peko login` for authentication, which is also withheld for now.
-    reporter.warning("publishing is not available yet; the web platform is not live");
-    reporter.info(format!(
-        "packed {name} {version} ({} bytes, {checksum})",
-        bytes.len()
-    ));
-    reporter.help("run 'peko pkg build' to write the .pkpkg locally for inspection");
-    ExitCode::SUCCESS
+    // Publishing requires a session from `peko login`.
+    let Some(session) = crate::auth::Session::load() else {
+        reporter.error("not logged in");
+        reporter.help(format!(
+            "run '{} login' to authenticate before publishing",
+            cli_info.executable
+        ));
+        return ExitCode::FAILURE;
+    };
+    let base = crate::auth::platform_base(cli_info.flags.get_flag("base"));
+    let id_token = match crate::auth::fresh_id_token(&session).await {
+        Ok(token) => token,
+        Err(crate::auth::AuthError::Unauthorized) => {
+            reporter.error("session expired or revoked");
+            reporter.help(format!(
+                "run '{} login' to authenticate again",
+                cli_info.executable
+            ));
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            reporter.error(format!("could not authenticate: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let progress = reporter.progress();
+    progress.start_phase(&format!("Uploading {name} {version}"));
+    let outcome = crate::registry::publish::publish(&base, &id_token, &bytes).await;
+    progress.finish_phase();
+
+    match outcome {
+        Ok(done) => {
+            reporter.success(format!(
+                "published {} {} ({} bytes)",
+                done.name,
+                done.version,
+                bytes.len()
+            ));
+            if done.status == "pending" {
+                reporter.info(
+                    "the version is pending admin review and appears on the public index once approved",
+                );
+            } else {
+                reporter.info(format!("status: {}", done.status));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            reporter.error(format!("publish failed: {e}"));
+            ExitCode::FAILURE
+        }
+    }
 }

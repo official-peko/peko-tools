@@ -1,0 +1,10 @@
+peko logout
+
+Clears the stored CLI session from the operating system keychain.
+
+Removes the saved platform session. Commands that require
+authentication prompt for `peko login` again afterward. Running logout
+without an active session succeeds and reports that none was present.
+
+EXAMPLES
+    peko logout

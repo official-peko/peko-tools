@@ -45,11 +45,15 @@ import runtime;
     // Bound handlers, kept reachable for the webview's lifetime so their
     // captured environments stay live while the native side may call them.
     [private] bindings: Map<string, closure(string) => string>
+    // Whether the native drag shim has been installed. Guards against binding
+    // the drag handler and injecting the shim more than once.
+    [private] drag_enabled: bool
 
     /// Creates a window titled `title` sized `width` by `height` pixels.
     constructor(title: string, width: number, height: number) {
         this.handle = c_webview::webview_create(constant<i32>(0), null)
         this.bindings = new Map<string, closure(string) => string>()
+        this.drag_enabled = false
         c_webview::webview_set_title(this.handle, title.to_raw())
         this.set_size(width, height)
     }
@@ -85,6 +89,84 @@ import runtime;
         let w: i32 = danger_cast<i32>(width.to_raw())
         let h: i32 = danger_cast<i32>(height.to_raw())
         c_webview::webview_set_size(this.handle, w, h, hint_fixed())
+    }
+
+    /// Sets whether the window and web view are transparent. When transparent,
+    /// the native background is not painted, so CSS colors composite over the
+    /// layer behind the window. Desktop only, and a no-op on iOS and Android.
+    /// Pair it with a transparent HTML root, for example
+    /// `html, body { background: transparent }`, and CSS rgba panels.
+    fn set_transparent(transparent: bool) {
+        if transparent {
+            c_webview::peko_webview_set_transparent(this.handle, constant<i32>(1))
+        } else {
+            c_webview::peko_webview_set_transparent(this.handle, constant<i32>(0))
+        }
+    }
+
+    /// Sets whether the native titlebar is shown. Passing false hides it and
+    /// extends the content across the whole window for a custom titlebar, and
+    /// turns on native window dragging and controls: a mouse press on any
+    /// element carrying the `data-peko-drag` attribute moves the window, and a
+    /// `data-peko-no-drag` element opts a region back out. Clicking an element
+    /// carrying `data-peko-minimize`, `data-peko-maximize`, or `data-peko-close`
+    /// runs that window control, and the same controls are callable from
+    /// JavaScript as `window.peko.minimize()`, `window.peko.maximize()`, and
+    /// `window.peko.close()`. Desktop only, and a no-op on iOS and Android.
+    [mutates] fn set_decorations(decorated: bool) {
+        if decorated {
+            c_webview::peko_webview_set_decorations(this.handle, constant<i32>(1))
+        } else {
+            c_webview::peko_webview_set_decorations(this.handle, constant<i32>(0))
+            if !this.drag_enabled {
+                this.drag_enabled = true
+                let win: opaque = this.handle
+                this.bind("__peko_begin_drag", closure[win](request: string) => string {
+                    c_webview::peko_webview_begin_drag(win)
+                    return ""
+                })
+                this.bind("__peko_minimize", closure[win](request: string) => string {
+                    c_webview::peko_webview_minimize(win)
+                    return ""
+                })
+                this.bind("__peko_maximize", closure[win](request: string) => string {
+                    c_webview::peko_webview_maximize(win)
+                    return ""
+                })
+                this.bind("__peko_close", closure[win](request: string) => string {
+                    c_webview::peko_webview_close(win)
+                    return ""
+                })
+                // Inject the shims for future page loads and run them once on
+                // the current page, so they work whether set_decorations is
+                // called before or after the content is loaded. The drag shim
+                // treats a control element as a no-drag region so its click is
+                // not swallowed by a window move.
+                let drag_shim: string = "(function(){document.addEventListener('mousedown',function(e){if(e.button!==0){return}var el=e.target;while(el&&el.nodeType===1){if(el.getAttribute){if(el.getAttribute('data-peko-no-drag')!==null||el.getAttribute('data-peko-close')!==null||el.getAttribute('data-peko-minimize')!==null||el.getAttribute('data-peko-maximize')!==null){return}if(el.getAttribute('data-peko-drag')!==null){e.preventDefault();window.__peko_begin_drag();return}}el=el.parentNode}},true)})()"
+                let controls_shim: string = "(function(){window.peko=window.peko||{};window.peko.minimize=function(){window.__peko_minimize()};window.peko.maximize=function(){window.__peko_maximize()};window.peko.close=function(){window.__peko_close()};document.addEventListener('click',function(e){var el=e.target;while(el&&el.nodeType===1){if(el.getAttribute){if(el.getAttribute('data-peko-close')!==null){window.__peko_close();return}if(el.getAttribute('data-peko-minimize')!==null){window.__peko_minimize();return}if(el.getAttribute('data-peko-maximize')!==null){window.__peko_maximize();return}}el=el.parentNode}},true)})()"
+                this.init(drag_shim)
+                this.eval(drag_shim)
+                this.init(controls_shim)
+                this.eval(controls_shim)
+            }
+        }
+    }
+
+    /// Minimizes the window to the taskbar or dock. Desktop only, and a no-op
+    /// on iOS and Android.
+    fn minimize() {
+        c_webview::peko_webview_minimize(this.handle)
+    }
+
+    /// Toggles the window between maximized and restored. Desktop only, and a
+    /// no-op on iOS and Android.
+    fn maximize() {
+        c_webview::peko_webview_maximize(this.handle)
+    }
+
+    /// Closes the window. Desktop only, and a no-op on iOS and Android.
+    fn close() {
+        c_webview::peko_webview_close(this.handle)
     }
 
     /// Navigates to `url`.

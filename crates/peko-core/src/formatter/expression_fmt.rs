@@ -7,7 +7,7 @@
 //! postfix and never needs wrapping.
 
 use crate::asts::PekoAST;
-use crate::asts::data_structures::PositionedValue;
+use crate::asts::data_structures::{PositionedValue, StringChunk, StringChunkContent};
 use crate::asts::expressions::{
     ArrayAST, ArrayAccessAST, BinaryExpressionAST, CastAST, CastKind, FunctionCallAST, MapAST,
     ModuleAccessAST, ObjectAccessAST, ObjectConstructionAST, PekoXTagAST, RangeAST,
@@ -259,6 +259,13 @@ impl Format for CastAST {
 
 impl Format for PekoXTagAST {
     fn format(&self, ctx: &mut FormatContext) {
+        // A tag with no name is a text node. Its content lives in inner_text
+        // and is written directly, with no surrounding angle brackets.
+        if self.tag.is_empty() {
+            write_tag_text(ctx, &self.inner_text);
+            return;
+        }
+
         ctx.write(&format!("<{}", self.tag));
 
         // Attributes and events live in hash maps, so their names are sorted
@@ -266,7 +273,11 @@ impl Format for PekoXTagAST {
         let mut attribute_names: Vec<&String> = self.attributes.keys().collect();
         attribute_names.sort();
         for name in attribute_names {
-            ctx.write(&format!(" {name}="));
+            // The parser stores the source attribute className under the key
+            // class, which is a reserved word it cannot read back. Emit
+            // className so the output parses to the same attribute.
+            let source_name = if name == "class" { "className" } else { name.as_str() };
+            ctx.write(&format!(" {source_name}="));
             self.attributes[name].format(ctx);
         }
 
@@ -295,9 +306,31 @@ impl Format for PekoXTagAST {
         }
 
         ctx.write(">");
+        // An element can carry its own text plus child elements.
+        write_tag_text(ctx, &self.inner_text);
         for child in &self.children {
             child.format(ctx);
         }
         ctx.write(&format!("</{}>", self.tag));
+    }
+}
+
+/// Write the text content of a tag: literal chunks verbatim and interpolations
+/// re-wrapped in `${ ... }`, the syntax the parser reads them from.
+fn write_tag_text(ctx: &mut FormatContext, chunks: &[StringChunk]) {
+    for chunk in chunks {
+        match &chunk.content {
+            StringChunkContent::Text(text) => ctx.write(text),
+            StringChunkContent::Interpolation(expressions) => {
+                ctx.write("${");
+                for (index, expression) in expressions.iter().enumerate() {
+                    if index > 0 {
+                        ctx.write("; ");
+                    }
+                    expression.format(ctx);
+                }
+                ctx.write("}");
+            }
+        }
     }
 }

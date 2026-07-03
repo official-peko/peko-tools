@@ -4,7 +4,25 @@ version = "0.1.0"
 description = "The Pekoscript standard library."
 license = "MIT"
 authors = ["Preston Brown"]
-keywords = ["std", "core", "collections"]
+keywords = [
+    "std",
+    "core",
+    "collections",
+    "crypto",
+    "fs",
+    "filesystem",
+    "io",
+    "json",
+    "xml",
+    "sockets",
+    "networking",
+    "threads",
+    "concurrency",
+    "webview",
+    "random",
+    "hashing",
+    "standard-library",
+]
 categories = ["standard-library"]
 
 [lib]
@@ -28,6 +46,7 @@ sources = [
     "c/runtime/rt.c",
     "c/runtime/stackmap.c",
     "c/runtime/threads.c",
+    "c/runtime/android_entry.c",
     "c/core/conversions.c",
     "c/core/hash.c",
     "c/io/console.c",
@@ -65,7 +84,10 @@ windows = ["c/crypto/vendor/windows/libsodium.lib", "c/sockets/vendor/windows/be
 # The desktop webview links the platform WebView frameworks at the final link.
 # macOS adds Cocoa for the AppKit window (WebKit, Foundation, and libc++ come
 # from the toolchain already). Linux adds the WebKitGTK development libraries.
+# Windows adds dwmapi for the transparent-window system backdrop; WebView2 and
+# user32 come from the loader and the toolchain already.
 [native.link]
-linux = ["-lpthread", "-lm", "-lwebkit2gtk-4.1", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
+linux = ["-lpthread", "-lm", "-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
 android = ["-llog"]
 macos = ["-framework", "Cocoa"]
+windows = ["dwmapi.lib"]

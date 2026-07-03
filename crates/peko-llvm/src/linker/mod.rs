@@ -67,6 +67,7 @@ pub fn lld_link(
 
     apply_conditionals(
         target.operating_system,
+        target.console,
         shared,
         entitlements.as_deref(),
         &mut objects,
@@ -133,15 +134,29 @@ pub fn lld_link(
 ///
 /// An Android shared library swaps the executable crt objects for the shared
 /// variants and `-pie` for `-shared`. An iOS build with entitlements appends
-/// the `-sectcreate __TEXT __entitlements` section.
+/// the `-sectcreate __TEXT __entitlements` section. A non-console Windows build
+/// targets the GUI subsystem so the OS attaches no console window.
 fn apply_conditionals(
     os: OperatingSystem,
+    console: bool,
     shared: bool,
     entitlements: Option<&Path>,
     objects: &mut [PathBuf],
     flags: &mut Vec<String>,
 ) {
     match os {
+        OperatingSystem::Windows if !console => {
+            // The GUI subsystem does not attach a console window. The Peko
+            // runtime provides main, so the entry stays the console CRT
+            // startup that calls it rather than the GUI WinMainCRTStartup the
+            // subsystem would otherwise default to.
+            for flag in flags.iter_mut() {
+                if flag.eq_ignore_ascii_case("-subsystem:console") {
+                    *flag = "-subsystem:windows".to_owned();
+                }
+            }
+            flags.push("-entry:mainCRTStartup".to_owned());
+        }
         OperatingSystem::Android if shared => {
             for object in objects.iter_mut() {
                 swap_file_name(object, "crtbegin_dynamic.o", "crtbegin_so.o");

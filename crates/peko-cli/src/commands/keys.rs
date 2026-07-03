@@ -306,8 +306,11 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         return ExitCode::FAILURE;
     }
 
-    // Store the password(s) in the OS keychain.
+    // Store the password(s) in the OS keychain. All of a project's signing
+    // passwords live in one keychain item, so the existing set is loaded, this
+    // platform's roles are added, and the item is written once.
     let password = read_password(cli_info);
+    let mut secrets = signing::SigningSecrets::load(bundle_id);
     if platform == "android" {
         let store_password = cli_info
             .flags
@@ -323,14 +326,8 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
             );
             return ExitCode::FAILURE;
         };
-        if let Err(e) = signing::store_password(bundle_id, "android", "store", &store_password) {
-            reporter.error(format!("could not store password: {e}"));
-            return ExitCode::FAILURE;
-        }
-        if let Err(e) = signing::store_password(bundle_id, "android", "key", &key_password) {
-            reporter.error(format!("could not store password: {e}"));
-            return ExitCode::FAILURE;
-        }
+        secrets.set("android", "store", &store_password);
+        secrets.set("android", "key", &key_password);
     } else {
         let Some(password) = password else {
             reporter.error(format!(
@@ -339,10 +336,11 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
             return ExitCode::FAILURE;
         };
         let role = password_roles(&platform)[0];
-        if let Err(e) = signing::store_password(bundle_id, &platform, role, &password) {
-            reporter.error(format!("could not store password: {e}"));
-            return ExitCode::FAILURE;
-        }
+        secrets.set(&platform, role, &password);
+    }
+    if let Err(e) = secrets.store(bundle_id) {
+        reporter.error(format!("could not store password: {e}"));
+        return ExitCode::FAILURE;
     }
 
     reporter.success(format!("registered {platform} signing key"));
@@ -357,6 +355,9 @@ fn list(reporter: &Reporter, root: &Path, bundle_id: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // One keychain read serves the whole listing.
+    let secrets = signing::SigningSecrets::load(bundle_id);
 
     let mut any = false;
     for platform in ["android", "ios", "macos", "windows"] {
@@ -378,7 +379,7 @@ fn list(reporter: &Reporter, root: &Path, bundle_id: &str) -> ExitCode {
 
         let password_present = password_roles(platform)
             .iter()
-            .all(|role| signing::get_password(bundle_id, platform, role).is_some());
+            .all(|role| secrets.get(platform, role).is_some());
         let password_state = if password_present {
             "password set"
         } else {
@@ -430,12 +431,13 @@ fn remove(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str)
         return ExitCode::FAILURE;
     }
 
-    // Drop the stored passwords.
-    for role in password_roles(&platform) {
-        if let Err(e) = signing::delete_password(bundle_id, &platform, role) {
-            reporter.error(format!("could not remove stored password: {e}"));
-            return ExitCode::FAILURE;
-        }
+    // Drop the stored passwords for this platform, writing the item once.
+    let mut secrets = signing::SigningSecrets::load(bundle_id);
+    if secrets.remove_platform(&platform)
+        && let Err(e) = secrets.store(bundle_id)
+    {
+        reporter.error(format!("could not remove stored password: {e}"));
+        return ExitCode::FAILURE;
     }
 
     reporter.success(format!("removed {platform} signing key"));

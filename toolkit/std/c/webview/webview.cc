@@ -840,16 +840,16 @@ private:
   id create_script_message_handler() {
     auto cls = objc_allocateClassPair((Class) "NSResponder"_cls,
                                       "WebkitScriptMessageHandler", 0);
-    // class_addProtocol(cls, objc_getProtocol("WKScriptMessageHandler"));
-    // class_addMethod(
-    //     cls, "userContentController:didReceiveScriptMessage:"_sel,
-    //     (IMP)(+[](id self, SEL, id, id msg) {
-    //       auto w = get_associated_webview(self);
-    //       w->on_message(objc::msg_send<const char *>(
-    //           objc::msg_send<id>(msg, "body"_sel), "UTF8String"_sel));
-    //     }),
-    //     "v@:@@");
-    // objc_registerClassPair(cls);
+    class_addProtocol(cls, objc_getProtocol("WKScriptMessageHandler"));
+    class_addMethod(
+        cls, "userContentController:didReceiveScriptMessage:"_sel,
+        (IMP)(+[](id self, SEL, id, id msg) {
+          auto w = get_associated_webview(self);
+          w->on_message(objc::msg_send<const char *>(
+              objc::msg_send<id>(msg, "body"_sel), "UTF8String"_sel));
+        }),
+        "v@:@@");
+    objc_registerClassPair(cls);
     auto instance = objc::msg_send<id>((id)cls, "new"_sel);
     objc_setAssociatedObject(instance, "webview", (id)this,
                              OBJC_ASSOCIATION_ASSIGN);
@@ -1042,6 +1042,13 @@ using browser_engine = detail::cocoa_wkwebview_engine;
 #include <shlwapi.h>
 #include <stdlib.h>
 #include <windows.h>
+
+// DirectComposition hosting. The web view renders into a composition visual so
+// the window can present a per-pixel transparent surface over the desktop.
+#include <d3d11.h>
+#include <dcomp.h>
+#include <dxgi.h>
+#include <windowsx.h>
 
 #include "WebView2.h"
 
@@ -1642,6 +1649,13 @@ static constexpr auto controller_completed =
     cast_info_t<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>{
         IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler};
 
+// Not constexpr: the composition completed-handler IID in WebView2.h is a plain
+// const IID, which this toolchain will not read inside a constant expression.
+// The value is only compared at runtime in QueryInterface, so const suffices.
+static const auto composition_controller_completed = cast_info_t<
+    ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>{
+    IID_ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler};
+
 static constexpr auto environment_completed =
     cast_info_t<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>{
         IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler};
@@ -1659,10 +1673,12 @@ static constexpr auto permission_requested =
 class webview2_com_handler
     : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
       public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
+      public ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler,
       public ICoreWebView2WebMessageReceivedEventHandler,
       public ICoreWebView2PermissionRequestedEventHandler {
   using webview2_com_handler_cb_t =
-      std::function<void(ICoreWebView2Controller *, ICoreWebView2 *webview)>;
+      std::function<void(ICoreWebView2Controller *, ICoreWebView2 *webview,
+                         ICoreWebView2CompositionController *composition)>;
 
 public:
   webview2_com_handler(HWND hwnd, msg_cb_t msgCb, webview2_com_handler_cb_t cb)
@@ -1700,6 +1716,7 @@ public:
     // observed to be requested when using the official WebView2 loader.
 
     if (cast_if_equal_iid(riid, controller_completed, ppv) ||
+        cast_if_equal_iid(riid, composition_controller_completed, ppv) ||
         cast_if_equal_iid(riid, environment_completed, ppv) ||
         cast_if_equal_iid(riid, message_received, ppv) ||
         cast_if_equal_iid(riid, permission_requested, ppv)) {
@@ -1710,20 +1727,50 @@ public:
   }
   HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, ICoreWebView2Environment *env) {
     if (SUCCEEDED(res)) {
-      res = env->CreateCoreWebView2Controller(m_window, this);
-      if (SUCCEEDED(res)) {
-        return S_OK;
+      // Composition hosting renders into a DirectComposition visual, which the
+      // environment exposes through ICoreWebView2Environment3. This is what
+      // lets the window present a transparent surface.
+      ICoreWebView2Environment3 *env3 = nullptr;
+      if (SUCCEEDED(env->QueryInterface(IID_ICoreWebView2Environment3,
+                                        reinterpret_cast<void **>(&env3))) &&
+          env3) {
+        res = env3->CreateCoreWebView2CompositionController(m_window, this);
+        env3->Release();
+        if (SUCCEEDED(res)) {
+          return S_OK;
+        }
       }
     }
     try_create_environment();
     return S_OK;
   }
+  // The windowed controller completion is unused under composition hosting but
+  // is kept so the interface stays fully implemented.
   HRESULT STDMETHODCALLTYPE Invoke(HRESULT res,
                                    ICoreWebView2Controller *controller) {
     if (FAILED(res)) {
+      switch (res) {
+      case HRESULT_FROM_WIN32(ERROR_INVALID_STATE):
+      case E_ABORT:
+        return S_OK;
+      }
+      try_create_environment();
+      return S_OK;
+    }
+    ICoreWebView2 *webview;
+    ::EventRegistrationToken token;
+    controller->get_CoreWebView2(&webview);
+    webview->add_WebMessageReceived(this, &token);
+    webview->add_PermissionRequested(this, &token);
+    m_cb(controller, webview, nullptr);
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE Invoke(
+      HRESULT res, ICoreWebView2CompositionController *composition) {
+    if (FAILED(res)) {
       // See try_create_environment() regarding
-      // HRESULT_FROM_WIN32(ERROR_INVALID_STATE).
-      // The result is E_ABORT if the parent window has been destroyed already.
+      // HRESULT_FROM_WIN32(ERROR_INVALID_STATE). E_ABORT is reported if the
+      // parent window has been destroyed already.
       switch (res) {
       case HRESULT_FROM_WIN32(ERROR_INVALID_STATE):
       case E_ABORT:
@@ -1733,13 +1780,19 @@ public:
       return S_OK;
     }
 
-    ICoreWebView2 *webview;
+    ICoreWebView2Controller *controller = nullptr;
+    composition->QueryInterface(IID_ICoreWebView2Controller,
+                                reinterpret_cast<void **>(&controller));
+    ICoreWebView2 *webview = nullptr;
     ::EventRegistrationToken token;
     controller->get_CoreWebView2(&webview);
     webview->add_WebMessageReceived(this, &token);
     webview->add_PermissionRequested(this, &token);
 
-    m_cb(controller, webview);
+    m_cb(controller, webview, composition);
+    if (controller) {
+      controller->Release();
+    }
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE Invoke(
@@ -1809,7 +1862,7 @@ public:
       return;
     }
     // Give up.
-    m_cb(nullptr, nullptr);
+    m_cb(nullptr, nullptr, nullptr);
   }
 
 private:
@@ -1857,6 +1910,82 @@ public:
             case WM_DESTROY:
               w->terminate();
               break;
+            // Composition hosting delivers no input on its own, so mouse
+            // messages are forwarded to the web view here.
+            case WM_MOUSEMOVE:
+            case WM_MOUSELEAVE:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_LBUTTONDBLCLK:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_RBUTTONDBLCLK:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+            case WM_MBUTTONDBLCLK:
+            case WM_XBUTTONDOWN:
+            case WM_XBUTTONUP:
+            case WM_XBUTTONDBLCLK:
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+              if (w != nullptr) {
+                w->forward_mouse(hwnd, msg, wp, lp);
+              }
+              break;
+            case WM_SETCURSOR:
+              if (LOWORD(lp) == HTCLIENT && w != nullptr &&
+                  w->set_webview_cursor()) {
+                return TRUE;
+              }
+              return DefWindowProcW(hwnd, msg, wp, lp);
+            case WM_SETFOCUS:
+              if (w != nullptr && w->m_controller != nullptr) {
+                w->m_controller->MoveFocus(
+                    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+              }
+              break;
+            // A frameless window removes its whole non-client area so the
+            // content reaches every edge with no titlebar or border strip.
+            case WM_NCCALCSIZE:
+              if (wp == TRUE && w != nullptr && w->m_frameless) {
+                // A maximized frameless window would otherwise overhang the
+                // monitor by the frame thickness and cover the taskbar, so its
+                // client rect is clamped to the monitor work area.
+                if (IsZoomed(hwnd)) {
+                  auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(lp);
+                  HMONITOR monitor =
+                      MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                  MONITORINFO info;
+                  info.cbSize = sizeof(info);
+                  if (GetMonitorInfoW(monitor, &info)) {
+                    params->rgrc[0] = info.rcWork;
+                  }
+                }
+                return 0;
+              }
+              return DefWindowProcW(hwnd, msg, wp, lp);
+            // With no native frame the sizing borders are supplied here: the
+            // outer eight pixels report a resize edge, the rest is client.
+            case WM_NCHITTEST: {
+              if (w == nullptr || !w->m_frameless) {
+                return DefWindowProcW(hwnd, msg, wp, lp);
+              }
+              const int border = 8;
+              POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+              RECT rc;
+              GetWindowRect(hwnd, &rc);
+              int col = pt.x < rc.left + border    ? 0
+                        : pt.x >= rc.right - border ? 2
+                                                    : 1;
+              int row = pt.y < rc.top + border      ? 0
+                        : pt.y >= rc.bottom - border ? 2
+                                                     : 1;
+              static const LRESULT cells[3][3] = {
+                  {HTTOPLEFT, HTTOP, HTTOPRIGHT},
+                  {HTLEFT, HTCLIENT, HTRIGHT},
+                  {HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT}};
+              return cells[row][col];
+            }
             case WM_GETMINMAXINFO: {
               auto lpmmi = (LPMINMAXINFO)lp;
               if (w == nullptr) {
@@ -1876,9 +2005,13 @@ public:
             return 0;
           });
       RegisterClassExW(&wc);
-      m_window = CreateWindowW(L"webview", L"", WS_OVERLAPPEDWINDOW,
-                               CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, nullptr,
-                               nullptr, hInstance, nullptr);
+      // WS_EX_NOREDIRECTIONBITMAP gives the window no opaque GDI backing, so
+      // the DirectComposition content it presents can be per-pixel
+      // transparent over the desktop.
+      m_window = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, L"webview", L"",
+                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                 CW_USEDEFAULT, 640, 480, nullptr, nullptr,
+                                 hInstance, nullptr);
       if (m_window == nullptr) {
         return;
       }
@@ -1886,6 +2019,11 @@ public:
     } else {
       m_window = *(static_cast<HWND *>(window));
     }
+
+    // The composition device and root visual must exist before the web view's
+    // composition controller is created, since the completion handler binds the
+    // controller to the visual.
+    setup_composition();
 
     ShowWindow(m_window, SW_SHOW);
     UpdateWindow(m_window);
@@ -1911,6 +2049,26 @@ public:
     if (m_controller) {
       m_controller->Release();
       m_controller = nullptr;
+    }
+    if (m_composition_controller) {
+      m_composition_controller->Release();
+      m_composition_controller = nullptr;
+    }
+    if (m_root_visual) {
+      m_root_visual->Release();
+      m_root_visual = nullptr;
+    }
+    if (m_dcomp_target) {
+      m_dcomp_target->Release();
+      m_dcomp_target = nullptr;
+    }
+    if (m_dcomp_device) {
+      m_dcomp_device->Release();
+      m_dcomp_device = nullptr;
+    }
+    if (m_d3d_device) {
+      m_d3d_device->Release();
+      m_d3d_device = nullptr;
     }
   }
 
@@ -1938,6 +2096,11 @@ public:
     }
   }
   void *window() { return (void *)m_window; }
+  // The WebView2 controller, exposed so the Peko chrome helpers can set the
+  // default background color for transparency.
+  void *controller() { return (void *)m_controller; }
+  // Toggle the native window frame off for a custom titlebar.
+  void set_frameless(bool frameless) { m_frameless = frameless; }
   void terminate() { PostQuitMessage(0); }
   void dispatch(dispatch_fn_t f) {
     PostThreadMessage(m_main_thread, WM_APP, 0, (LPARAM) new dispatch_fn_t(f));
@@ -2013,7 +2176,8 @@ private:
 
     m_com_handler = new webview2_com_handler(
         wnd, cb,
-        [&](ICoreWebView2Controller *controller, ICoreWebView2 *webview) {
+        [&](ICoreWebView2Controller *controller, ICoreWebView2 *webview,
+            ICoreWebView2CompositionController *composition) {
           if (!controller || !webview) {
             flag.clear();
             return;
@@ -2022,6 +2186,16 @@ private:
           webview->AddRef();
           m_controller = controller;
           m_webview = webview;
+          if (composition) {
+            composition->AddRef();
+            m_composition_controller = composition;
+            // Present the web view through the composition visual so the
+            // window can show a transparent surface.
+            composition->put_RootVisualTarget(m_root_visual);
+            if (m_dcomp_device) {
+              m_dcomp_device->Commit();
+            }
+          }
           flag.clear();
         });
 
@@ -2061,6 +2235,96 @@ private:
     m_controller->put_Bounds(bounds);
   }
 
+  // Build the DirectComposition device, a target bound to the window, and a
+  // root visual the web view controller presents into.
+  void setup_composition() {
+    D3D_FEATURE_LEVEL feature_level;
+    HRESULT res = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &m_d3d_device, &feature_level, nullptr);
+    if (FAILED(res)) {
+      // Fall back to the WARP software renderer when no hardware device is
+      // available, so the window still composes.
+      res = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                              D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                              D3D11_SDK_VERSION, &m_d3d_device, &feature_level,
+                              nullptr);
+      if (FAILED(res)) {
+        return;
+      }
+    }
+    IDXGIDevice *dxgi_device = nullptr;
+    if (FAILED(m_d3d_device->QueryInterface(
+            __uuidof(IDXGIDevice), reinterpret_cast<void **>(&dxgi_device)))) {
+      return;
+    }
+    res = DCompositionCreateDevice(dxgi_device, __uuidof(IDCompositionDevice),
+                                   reinterpret_cast<void **>(&m_dcomp_device));
+    dxgi_device->Release();
+    if (FAILED(res) || m_dcomp_device == nullptr) {
+      return;
+    }
+    m_dcomp_device->CreateTargetForHwnd(m_window, TRUE, &m_dcomp_target);
+    m_dcomp_device->CreateVisual(&m_root_visual);
+    if (m_dcomp_target && m_root_visual) {
+      m_dcomp_target->SetRoot(m_root_visual);
+    }
+    m_dcomp_device->Commit();
+  }
+
+  // Forward a window mouse message to the web view. The mouse event kinds match
+  // the WM_ message codes, so the message is passed through directly. Wheel
+  // messages carry screen coordinates and the wheel delta in the high word.
+  void forward_mouse(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (m_composition_controller == nullptr) {
+      return;
+    }
+    if (msg == WM_MOUSELEAVE) {
+      m_composition_controller->SendMouseInput(
+          COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+          static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(0), 0, POINT{0, 0});
+      m_mouse_tracked = false;
+      return;
+    }
+    if (msg == WM_MOUSEMOVE && !m_mouse_tracked) {
+      TRACKMOUSEEVENT tme;
+      tme.cbSize = sizeof(tme);
+      tme.dwFlags = TME_LEAVE;
+      tme.hwndTrack = wnd;
+      tme.dwHoverTime = 0;
+      TrackMouseEvent(&tme);
+      m_mouse_tracked = true;
+    }
+    POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    UINT32 mouse_data = 0;
+    if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+      ScreenToClient(wnd, &point);
+      mouse_data = static_cast<UINT32>(GET_WHEEL_DELTA_WPARAM(wp));
+    } else if (msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP ||
+               msg == WM_XBUTTONDBLCLK) {
+      mouse_data = static_cast<UINT32>(GET_XBUTTON_WPARAM(wp));
+    }
+    auto keys = static_cast<COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS>(
+        GET_KEYSTATE_WPARAM(wp));
+    m_composition_controller->SendMouseInput(
+        static_cast<COREWEBVIEW2_MOUSE_EVENT_KIND>(msg), keys, mouse_data,
+        point);
+  }
+
+  // Apply the cursor the web view requests for the area under the pointer.
+  bool set_webview_cursor() {
+    if (m_composition_controller == nullptr) {
+      return false;
+    }
+    HCURSOR cursor = nullptr;
+    if (SUCCEEDED(m_composition_controller->get_Cursor(&cursor)) && cursor) {
+      SetCursor(cursor);
+      return true;
+    }
+    return false;
+  }
+
   bool is_webview2_available() const noexcept {
     LPWSTR version_info = nullptr;
     auto res = m_webview2_loader.get_available_browser_version_string(
@@ -2086,8 +2350,19 @@ private:
   DWORD m_main_thread = GetCurrentThreadId();
   ICoreWebView2 *m_webview = nullptr;
   ICoreWebView2Controller *m_controller = nullptr;
+  ICoreWebView2CompositionController *m_composition_controller = nullptr;
   webview2_com_handler *m_com_handler = nullptr;
   mswebview2::loader m_webview2_loader;
+  // DirectComposition presents the web view visual so the window can show a
+  // per-pixel transparent surface over the desktop.
+  ID3D11Device *m_d3d_device = nullptr;
+  IDCompositionDevice *m_dcomp_device = nullptr;
+  IDCompositionTarget *m_dcomp_target = nullptr;
+  IDCompositionVisual *m_root_visual = nullptr;
+  bool m_mouse_tracked = false;
+  // When set, the window draws no native frame; the content fills every edge
+  // and the sizing borders are provided through hit-testing.
+  bool m_frameless = false;
 };
 
 } // namespace detail
@@ -2279,6 +2554,317 @@ WEBVIEW_API void webview_return(webview_t w, const char *seq, int status,
 WEBVIEW_API const webview_version_info_t *webview_version() {
   return &webview::detail::library_version_info;
 }
+
+// ---------------------------------------------------------------------------
+// Peko desktop chrome: transparency, custom titlebar, and native window drag.
+// These are opt-in and only affect desktop backends. A backend without an
+// implementation keeps the same signatures as no-ops so the API is uniform.
+// ---------------------------------------------------------------------------
+
+#if defined(WEBVIEW_COCOA)
+
+// Bring the objc::msg_send helper and the _cls / _sel / _str literals into
+// scope for the functions below.
+using namespace webview::detail;
+
+namespace {
+// NSWindowStyleMaskFullSizeContentView extends content under the titlebar.
+constexpr NSUInteger peko_ns_full_size_content_view = 1u << 15;
+// NSWindowTitleHidden.
+constexpr NSInteger peko_ns_title_hidden = 1;
+// Event masks for the window-move loop. A mask is 1 shifted by the event type
+// (LeftMouseUp = 2, MouseMoved = 5, LeftMouseDragged = 6).
+constexpr NSUInteger peko_ns_mask_left_mouse_up = 1u << 2;
+constexpr NSUInteger peko_ns_mask_mouse_moved = 1u << 5;
+constexpr NSUInteger peko_ns_mask_left_mouse_dragged = 1u << 6;
+} // namespace
+
+extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  id content = objc::msg_send<id>(window, "contentView"_sel);
+  // The window and web view are opaque and draw a background unless the caller
+  // asks for transparency.
+  BOOL opaque = transparent ? NO : YES;
+  objc::msg_send<void>(window, "setOpaque:"_sel, opaque);
+  id color =
+      transparent ? objc::msg_send<id>("NSColor"_cls, "clearColor"_sel)
+                  : objc::msg_send<id>("NSColor"_cls, "windowBackgroundColor"_sel);
+  objc::msg_send<void>(window, "setBackgroundColor:"_sel, color);
+  // WKWebView exposes drawsBackground only through KVC on macOS.
+  id number = objc::msg_send<id>("NSNumber"_cls, "numberWithBool:"_sel, opaque);
+  objc::msg_send<void>(content, "setValue:forKey:"_sel, number,
+                       "drawsBackground"_str);
+}
+
+extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  auto mask = objc::msg_send<NSUInteger>(window, "styleMask"_sel);
+  if (decorated) {
+    mask &= ~peko_ns_full_size_content_view;
+    objc::msg_send<void>(window, "setStyleMask:"_sel, mask);
+    objc::msg_send<void>(window, "setTitlebarAppearsTransparent:"_sel, NO);
+    objc::msg_send<void>(window, "setTitleVisibility:"_sel, (NSInteger)0);
+  } else {
+    mask |= peko_ns_full_size_content_view;
+    objc::msg_send<void>(window, "setStyleMask:"_sel, mask);
+    objc::msg_send<void>(window, "setTitlebarAppearsTransparent:"_sel, YES);
+    objc::msg_send<void>(window, "setTitleVisibility:"_sel, peko_ns_title_hidden);
+  }
+}
+
+extern "C" void peko_webview_begin_drag(webview_t w) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  // Follow the live cursor to move the window. The DOM drag shim posts this
+  // asynchronously, so the originating mouse event is gone, which rules out
+  // performWindowDragWithEvent. The web view also captures the mouse events, so
+  // a loop that moves only on dequeued drag events never advances. Reading the
+  // global cursor position each frame sidesteps both: it repositions the window
+  // to track the cursor until the button is released. The guard makes a message
+  // that arrives after a plain click return at once.
+  if ((objc::msg_send<NSUInteger>("NSEvent"_cls, "pressedMouseButtons"_sel) &
+       1u) == 0) {
+    return;
+  }
+
+  id app = objc::msg_send<id>("NSApplication"_cls, "sharedApplication"_sel);
+  CGPoint start = objc::msg_send<CGPoint>("NSEvent"_cls, "mouseLocation"_sel);
+  CGRect frame = objc::msg_send<CGRect>(window, "frame"_sel);
+  double origin_x = frame.origin.x;
+  double origin_y = frame.origin.y;
+  id mode = "NSEventTrackingRunLoopMode"_str;
+  NSUInteger mask = peko_ns_mask_left_mouse_up | peko_ns_mask_mouse_moved |
+                    peko_ns_mask_left_mouse_dragged;
+
+  while ((objc::msg_send<NSUInteger>("NSEvent"_cls, "pressedMouseButtons"_sel) &
+          1u) != 0) {
+    CGPoint now = objc::msg_send<CGPoint>("NSEvent"_cls, "mouseLocation"_sel);
+    objc::msg_send<void>(
+        window, "setFrameOrigin:"_sel,
+        CGPointMake(origin_x + (now.x - start.x), origin_y + (now.y - start.y)));
+    // Yield about 8 ms and drain queued mouse input so the web view does not
+    // also act on the drag.
+    id until = objc::msg_send<id>("NSDate"_cls,
+                                  "dateWithTimeIntervalSinceNow:"_sel, 0.008);
+    objc::msg_send<id>(app, "nextEventMatchingMask:untilDate:inMode:dequeue:"_sel,
+                       mask, until, mode, YES);
+  }
+}
+
+extern "C" void peko_webview_minimize(webview_t w) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  objc::msg_send<void>(window, "miniaturize:"_sel, (id) nullptr);
+}
+
+extern "C" void peko_webview_maximize(webview_t w) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  // zoom toggles between the standard and zoomed frame.
+  objc::msg_send<void>(window, "zoom:"_sel, (id) nullptr);
+}
+
+extern "C" void peko_webview_close(webview_t w) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  objc::msg_send<void>(window, "close"_sel);
+}
+
+#elif defined(WEBVIEW_GTK)
+
+extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  GtkWidget *child = gtk_bin_get_child(GTK_BIN(window));
+  if (child && WEBKIT_IS_WEB_VIEW(child)) {
+    GdkRGBA color;
+    color.red = 0;
+    color.green = 0;
+    color.blue = 0;
+    color.alpha = transparent ? 0.0 : 1.0;
+    webkit_web_view_set_background_color(WEBKIT_WEB_VIEW(child), &color);
+  }
+  // An RGBA visual plus an app-paintable window lets the transparent web view
+  // show what is behind it. This needs a running compositor to take effect.
+  if (transparent) {
+    GdkScreen *screen = gtk_widget_get_screen(window);
+    GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
+    if (visual) {
+      gtk_widget_set_visual(window, visual);
+    }
+  }
+  gtk_widget_set_app_paintable(window, transparent ? TRUE : FALSE);
+}
+
+extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  gtk_window_set_decorated(GTK_WINDOW(window), decorated ? TRUE : FALSE);
+}
+
+extern "C" void peko_webview_begin_drag(webview_t w) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  // gtk_window_begin_move_drag drives the native move on both X11 and Wayland.
+  // The pointer position and button come from the seat's current pointer.
+  GdkDisplay *display = gtk_widget_get_display(window);
+  GdkSeat *seat = gdk_display_get_default_seat(display);
+  GdkDevice *pointer = gdk_seat_get_pointer(seat);
+  gint x = 0;
+  gint y = 0;
+  gdk_device_get_position(pointer, nullptr, &x, &y);
+  gtk_window_begin_move_drag(GTK_WINDOW(window), 1, x, y, GDK_CURRENT_TIME);
+}
+
+extern "C" void peko_webview_minimize(webview_t w) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  gtk_window_iconify(GTK_WINDOW(window));
+}
+
+extern "C" void peko_webview_maximize(webview_t w) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  if (gtk_window_is_maximized(GTK_WINDOW(window))) {
+    gtk_window_unmaximize(GTK_WINDOW(window));
+  } else {
+    gtk_window_maximize(GTK_WINDOW(window));
+  }
+}
+
+extern "C" void peko_webview_close(webview_t w) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  gtk_window_close(GTK_WINDOW(window));
+}
+
+#elif defined(WEBVIEW_EDGE)
+
+#include <dwmapi.h>
+
+// The Win11 backdrop attribute and values, defined here for SDKs that predate
+// them so the call degrades to a no-op rather than failing to build.
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+#ifndef DWMSBT_NONE
+#define DWMSBT_NONE 1
+#endif
+#ifndef DWMSBT_MAINWINDOW
+#define DWMSBT_MAINWINDOW 2
+#endif
+
+extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
+  // The window presents through a DirectComposition visual with no opaque
+  // backing, so a fully transparent default background composites the page
+  // over the desktop per pixel. CSS rgba panels then read as translucent
+  // glass. An opaque default paints solid white behind the page.
+  auto *engine = static_cast<webview::webview *>(w);
+  auto *controller =
+      static_cast<ICoreWebView2Controller *>(engine->controller());
+  if (!controller) {
+    return;
+  }
+  ICoreWebView2Controller2 *controller2 = nullptr;
+  if (SUCCEEDED(controller->QueryInterface(__uuidof(ICoreWebView2Controller2),
+                                           (void **)&controller2)) &&
+      controller2) {
+    COREWEBVIEW2_COLOR color;
+    color.A = transparent ? 0 : 255;
+    color.R = 255;
+    color.G = 255;
+    color.B = 255;
+    controller2->put_DefaultBackgroundColor(color);
+    controller2->Release();
+  }
+}
+
+extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
+  auto *engine = static_cast<webview::webview *>(w);
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (!hwnd) {
+    return;
+  }
+  // Framelessness is applied through WM_NCCALCSIZE, which drops the entire
+  // non-client area, so no titlebar and no border strip remain. The window
+  // keeps its overlapped style so snapping and animations still work; the
+  // sizing borders come back through WM_NCHITTEST.
+  engine->set_frameless(decorated == 0);
+  SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+               SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                   SWP_NOACTIVATE);
+  // The frame change resizes the client area but does not raise WM_SIZE, so the
+  // web view is refit to the new client rect here to cover the whole window.
+  auto *controller =
+      static_cast<ICoreWebView2Controller *>(engine->controller());
+  if (controller) {
+    RECT bounds;
+    GetClientRect(hwnd, &bounds);
+    controller->put_Bounds(bounds);
+  }
+}
+
+extern "C" void peko_webview_begin_drag(webview_t w) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (!hwnd) {
+    return;
+  }
+  // The DOM shim posts on mouse-down while the button is held, so handing the
+  // window a caption non-client click starts the native move loop.
+  ReleaseCapture();
+  SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+}
+
+extern "C" void peko_webview_minimize(webview_t w) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd) {
+    ShowWindow(hwnd, SW_MINIMIZE);
+  }
+}
+
+extern "C" void peko_webview_maximize(webview_t w) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (!hwnd) {
+    return;
+  }
+  // Toggle between maximized and restored.
+  ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+}
+
+extern "C" void peko_webview_close(webview_t w) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (hwnd) {
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+  }
+}
+
+#endif
 
 #endif /* WEBVIEW_HEADER */
 #endif /* __cplusplus */

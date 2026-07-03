@@ -5,9 +5,11 @@
 //! `commands/`.
 #![allow(clippy::too_many_arguments)]
 
+pub mod auth;
 pub mod bundler;
 pub mod cli;
 pub mod execution;
+pub mod keychain;
 pub mod project;
 pub mod registry;
 pub mod toolchain;

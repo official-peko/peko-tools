@@ -14,7 +14,9 @@ pub mod client;
 pub mod index;
 pub mod install;
 pub mod pack;
+pub mod publish;
 pub mod resolver;
+pub mod verify;
 
 use std::path::PathBuf;
 
@@ -23,6 +25,7 @@ use thiserror::Error;
 pub use cache::Cache;
 pub use client::RegistryClient;
 pub use index::IndexEntry;
+pub use verify::{PackageReport, verify};
 pub use resolver::{ResolvedPackage, Resolver};
 
 /// One failure mode for a registry operation.

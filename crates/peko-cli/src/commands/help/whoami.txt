@@ -1,0 +1,15 @@
+peko whoami [OPTIONS]
+
+Prints the identity behind the stored CLI session.
+
+Refreshes the session token and asks the platform to verify it, then
+prints the account uid, email, display name, role, and tier. Exits with
+an error when no session is stored or the session is expired or revoked.
+
+OPTIONS
+    --base=<url>          override the platform base URL for this run
+                          (default: the PEKO_PLATFORM_URL environment
+                          variable, else https://app.pekoui.com)
+
+EXAMPLES
+    peko whoami
