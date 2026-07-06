@@ -158,10 +158,7 @@ pub async fn login(base: &str, reporter: &Reporter) -> Result<Session, AuthError
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(AuthError::Loopback)?;
-    let port = listener
-        .local_addr()
-        .map_err(AuthError::Loopback)?
-        .port();
+    let port = listener.local_addr().map_err(AuthError::Loopback)?.port();
     let state = random_state();
 
     let auth_url = format!("{base}/cli/auth?port={port}&state={state}");
@@ -177,7 +174,8 @@ pub async fn login(base: &str, reporter: &Reporter) -> Result<Session, AuthError
 
     let http = http_client()?;
     let redeemed = redeem_code(&http, base, &code).await?;
-    let firebase = sign_in_with_custom_token(&http, &redeemed.api_key, &redeemed.custom_token).await?;
+    let firebase =
+        sign_in_with_custom_token(&http, &redeemed.api_key, &redeemed.custom_token).await?;
 
     let session = Session {
         refresh_token: firebase.refresh_token,
@@ -330,13 +328,11 @@ async fn sign_in_with_custom_token(
 // ---------------------------------------------------------------------------
 
 /// A page shown in the browser after a successful callback.
-const SUCCESS_PAGE: &str =
-    "<!doctype html><title>Peko</title><body style=\"font-family:sans-serif;padding:3rem\">\
+const SUCCESS_PAGE: &str = "<!doctype html><title>Peko</title><body style=\"font-family:sans-serif;padding:3rem\">\
 <h1>Signed in</h1><p>You can close this tab and return to the terminal.</p></body>";
 
 /// A page shown in the browser after a failed callback.
-const ERROR_PAGE: &str =
-    "<!doctype html><title>Peko</title><body style=\"font-family:sans-serif;padding:3rem\">\
+const ERROR_PAGE: &str = "<!doctype html><title>Peko</title><body style=\"font-family:sans-serif;padding:3rem\">\
 <h1>Sign-in failed</h1><p>Return to the terminal for details.</p></body>";
 
 /// Accept loopback connections until the `/callback` request arrives, verify
@@ -369,7 +365,9 @@ async fn wait_for_callback(
         let parsed = match reqwest::Url::parse(&format!("http://127.0.0.1{target}")) {
             Ok(url) => url,
             Err(_) => {
-                respond(&mut stream, "400 Bad Request", ERROR_PAGE).await.ok();
+                respond(&mut stream, "400 Bad Request", ERROR_PAGE)
+                    .await
+                    .ok();
                 return Err(AuthError::BadRequest);
             }
         };
@@ -513,7 +511,8 @@ mod tests {
 
     #[tokio::test]
     async fn callback_rejects_a_state_mismatch() {
-        let result = drive_callback("GET /callback?code=abc&state=wrong HTTP/1.1", "expected").await;
+        let result =
+            drive_callback("GET /callback?code=abc&state=wrong HTTP/1.1", "expected").await;
         assert!(matches!(result, Err(AuthError::StateMismatch)));
     }
 

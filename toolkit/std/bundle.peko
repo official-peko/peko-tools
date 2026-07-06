@@ -1,0 +1,38 @@
+//! std::bundle: compile-time project metadata.
+//!
+//! The compiler fills these globals from the project manifest during a
+//! build. A build outside a project keeps the declared defaults. The
+//! module is auto-imported as `bundle`, so code reads the values through
+//! the prefix, for example bundle::name or bundle::framework.
+//!
+//! The text fields are managed `string` values, so they read directly where a
+//! string is needed. Pass one to a C function through its `to_raw` byte buffer.
+
+import { * } from core;
+
+/// The application display name.
+[public constant] let name: string = ""
+
+/// The reverse-DNS bundle identifier. Empty when the manifest sets none.
+[public constant] let identifier: string = ""
+
+/// The platform-assigned app id. Empty when unassigned.
+[public constant] let app_id: string = ""
+
+/// The application version string.
+[public constant] let version: string = ""
+
+/// The UI framework identifier. One of native, static, server, or cli for
+/// a command-line application.
+[public constant] let framework: string = "cli"
+
+/// The custom URL scheme the app registers for deep links, for example
+/// `myapp`. Empty when the manifest sets none.
+[public constant] let scheme: string = ""
+
+/// The initial window size as "WIDTHxHEIGHT" (for example "900x700"). Empty
+/// when the manifest sets none, in which case the app uses its default size.
+[public constant] let window: string = ""
+
+/// True for a debug build, false for a release build.
+[public constant] let debug: bool = false

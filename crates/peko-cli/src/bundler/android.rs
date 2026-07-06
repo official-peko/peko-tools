@@ -96,18 +96,18 @@ pub fn bundle(
     // app's NativeActivity can dlopen it.
     progress.tick("Android: compiling native library");
     let android_target = PekoTarget::new(OperatingSystem::Android, Architecture::Arm, false);
-    let (_, diagnostics) = execution::incremental::compile_project(
+    let diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         android_target,
         project.get_root().join(".peko/incremental"),
         Some(lib_directory.join("libPekoApp.so")),
-        true, // shared library
+        true,
+        // shared library
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = diagnostics {

@@ -1322,37 +1322,6 @@ impl PekoValueSimulator for ImportStatementAST {
                 import_as_module_name.clone(),
             )));
 
-            // Bind the module name into the current scope unless the
-            // import was a wildcard unpack (`import x.{All}`).
-            if !(self.symbols_to_unpack.len() == 1
-                && matches!(self.symbols_to_unpack[0], UnpackItem::All))
-            {
-                simulator_context
-                    .module_context
-                    .current_module()
-                    .write()
-                    .unwrap()
-                    .scope
-                    .write()
-                    .unwrap()
-                    .symbols
-                    .insert(
-                        import_as_module_name.clone(),
-                        ScopeSymbol::Module(
-                            ScopeModule::new(
-                                module_docinfo.clone(),
-                                import_as_module_name.clone(),
-                                PositionData {
-                                    file: module_entry_file_path.clone(),
-                                    ..PositionData::default()
-                                },
-                                parser.get_current_position(),
-                            ),
-                            VisibilityData::open_visibility(),
-                        ),
-                    );
-            }
-
             // When the local alias is already taken by a different file, name
             // this module by its canonical id so its name-mangled symbols (the
             // globals initializer) stay unique. The alias resolves through
@@ -1399,34 +1368,17 @@ impl PekoValueSimulator for ImportStatementAST {
                 .top_level_modules
                 .insert_before(1, module_local_name.clone(), Arc::clone(&new_module));
 
-            // Every imported module gets the standard library imports
-            // baked in (unless it *is* one of those libraries).
-            let default_imports = ["Runtime", "standard", "console", "ui"];
-            for import in default_imports {
-                if import_as_module_name == "Runtime" {
-                    break;
+            // Every imported module receives the standard-library prelude so
+            // its own declarations resolve the core types without an explicit
+            // import, matching what the main source file gets. The prelude is
+            // simulated eagerly here, before the module's declarations, so the
+            // types are in scope when they are processed. Foundational modules
+            // are excluded by module_prelude_imports; FFI headers are excluded
+            // here (they are a raw C surface, not Peko source).
+            if !ffi::is_ffi_header(&module_entry_file_path) {
+                for prelude_import in crate::asts::module_prelude_imports(&module_name) {
+                    prelude_import.simulate(simulator_context);
                 }
-
-                if import_as_module_name == import
-                    || (import_as_module_name == "standard" && import == "console")
-                    || !simulator_context
-                        .module_context
-                        .top_level_modules
-                        .contains_key(import)
-                {
-                    continue;
-                }
-
-                let module =
-                    Arc::clone(&simulator_context.module_context.top_level_modules[import]);
-                simulator_context.import_module(
-                    module,
-                    if import == "standard" {
-                        vec![UnpackItem::All]
-                    } else {
-                        Vec::new()
-                    },
-                );
             }
 
             // Declarations lowered from an FFI header stay external for their
@@ -1490,17 +1442,65 @@ impl PekoValueSimulator for ImportStatementAST {
         // Restore the root folder now that the imported module is loaded.
         simulator_context.root_folder = previous_root_folder;
 
-        // Bind the alias in the importing module so qualified access resolves
-        // per-module. Two modules may then import different files under the
-        // same alias without colliding in the global registry.
-        if !has_unpack_list {
+        // Bind the module name into the current scope so it appears as an
+        // in-scope symbol (completion, hover), unless the import was a wildcard
+        // unpack (`import { * } from x`). Done here rather than in the loading
+        // path so a reused (already-loaded, memoized) module still binds its
+        // name; the docinfo and end position come from the resolved module so
+        // both paths behave the same.
+        if !(self.symbols_to_unpack.len() == 1
+            && matches!(self.symbols_to_unpack[0], UnpackItem::All))
+        {
+            let (module_docinfo, module_end) = {
+                let module = module_to_import.read().unwrap();
+                (
+                    module.docinfo.clone(),
+                    module.scope.read().unwrap().end.clone(),
+                )
+            };
             simulator_context
                 .module_context
                 .current_module()
                 .write()
                 .unwrap()
+                .scope
+                .write()
+                .unwrap()
+                .symbols
+                .insert(
+                    import_as_module_name.clone(),
+                    ScopeSymbol::Module(
+                        ScopeModule::new(
+                            module_docinfo,
+                            import_as_module_name.clone(),
+                            PositionData {
+                                file: module_entry_file_path.clone(),
+                                ..PositionData::default()
+                            },
+                            module_end,
+                        ),
+                        VisibilityData::open_visibility(),
+                    ),
+                );
+        }
+
+        // Bind the alias in the importing module so qualified access resolves
+        // per-module. Two modules may then import different files under the
+        // same alias without colliding in the global registry.
+        if !has_unpack_list {
+            let current_module = simulator_context.module_context.current_module();
+            let mut current_module = current_module.write().unwrap();
+            current_module
                 .module_aliases
                 .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+            // An export also registers the module as a submodule of the current
+            // module, so a package entry (lib.peko) re-exports it and callers
+            // reach it as `package::submodule`.
+            if self.is_export {
+                current_module
+                    .modules
+                    .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+            }
         }
 
         simulator_context.import_module(module_to_import, self.symbols_to_unpack.clone());

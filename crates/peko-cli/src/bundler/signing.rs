@@ -263,9 +263,10 @@ pub fn resolve_android(
         .unwrap_or("upload")
         .to_string();
     let secrets = SigningSecrets::load(bundle_id);
-    let (Some(store_password), Some(key_password)) =
-        (secrets.get("android", "store"), secrets.get("android", "key"))
-    else {
+    let (Some(store_password), Some(key_password)) = (
+        secrets.get("android", "store"),
+        secrets.get("android", "key"),
+    ) else {
         return Ok(None);
     };
     Ok(Some(AndroidSigningKey {

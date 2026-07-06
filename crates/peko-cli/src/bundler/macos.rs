@@ -23,7 +23,7 @@ use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, run_tool, s
 use crate::cli::CLIInfo;
 use crate::cli::reporting::{ProgressSink, Reporter};
 use crate::execution;
-use crate::project::PekoProject;
+use crate::project::{PekoProject, ProjectIcon};
 
 /// Build a universal macOS `.app` bundle for the project.
 pub fn bundle(
@@ -79,10 +79,12 @@ pub fn bundle(
         fs::copy(&privacy_src, resources_dir.join("PrivacyInfo.xcprivacy")),
     )?;
 
-    // Icon into Contents/Resources.
+    // App icon. Current macOS renders the real app icon from a compiled asset
+    // catalog (Assets.car) named by CFBundleIconName. A bare .icns is treated
+    // as legacy and drawn shrunken on a light rounded tile, so the icon is
+    // written as an asset catalog, with a plain .icns alongside it.
     let icon = &project.ui_project_info.as_ref().unwrap().icon;
-    let icns = resources_dir.join("icon.icns");
-    icon.to_icns(&mut io_at(&icns, File::create(&icns))?);
+    compile_app_icon(icon, &resources_dir)?;
 
     // Project assets into Contents/Resources with subdirectories
     // preserved. The assets package's Apple native layer resolves
@@ -100,7 +102,7 @@ pub fn bundle(
 
     progress.tick("macOS: compiling arm64 binary");
     let arm_target = PekoTarget::new(OperatingSystem::MacOS, Architecture::Arm, false);
-    let (_, arm_diagnostics) = execution::incremental::compile_project(
+    let arm_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         arm_target,
@@ -110,8 +112,7 @@ pub fn bundle(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = arm_diagnostics {
@@ -120,7 +121,7 @@ pub fn bundle(
 
     progress.tick("macOS: compiling x86_64 binary");
     let x86_64_target = PekoTarget::new(OperatingSystem::MacOS, Architecture::X86_64, false);
-    let (_, x86_64_diagnostics) = execution::incremental::compile_project(
+    let x86_64_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         x86_64_target,
@@ -130,8 +131,7 @@ pub fn bundle(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = x86_64_diagnostics {
@@ -156,6 +156,23 @@ pub fn bundle(
     io_at(&intermediates, fs::remove_dir_all(&intermediates))?;
 
     guard.commit();
+    Ok(())
+}
+
+/// Writes the project icon into `Contents/Resources/Assets.car`, the
+/// asset-catalog form current macOS uses to render the real app icon at every
+/// size. The catalog is named by CFBundleIconName in Info.plist. A plain
+/// `AppIcon.icns` is written alongside it as the legacy icon some contexts
+/// still read.
+///
+/// The asset catalog is built in process by [`ProjectIcon::to_car_macos`], so
+/// bundling does not depend on Xcode or `actool`.
+fn compile_app_icon(icon: &ProjectIcon, resources_dir: &Path) -> BundleResult<()> {
+    let car = resources_dir.join("Assets.car");
+    icon.to_car_macos(&mut io_at(&car, File::create(&car))?);
+
+    let icns = resources_dir.join("AppIcon.icns");
+    icon.to_icns(&mut io_at(&icns, File::create(&icns))?);
     Ok(())
 }
 

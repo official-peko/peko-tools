@@ -59,6 +59,35 @@ pub fn class_carrier_substitution(
 // `crate::codegen::context::substitute_generic_params` references keep working.
 pub use peko_core::types::{infer_generic_bindings, substitute_generic_params, substitute_self};
 
+/// Compile-time project metadata injected into the `bundle` module's
+/// globals. When set on the codegen context, [`init_module_globals`]
+/// substitutes these values for the matching `bundle::*` global
+/// initializers instead of building the module's declared defaults.
+///
+/// [`init_module_globals`]: crate::codegen::builders::prelude::GlobalBuilder::init_module_globals
+#[derive(Clone, Debug, Default)]
+pub struct BundleInfo {
+    /// The application display name (`bundle::name`).
+    pub name: String,
+    /// The reverse-DNS bundle identifier (`bundle::identifier`).
+    pub identifier: String,
+    /// The platform-assigned app id, empty when unassigned (`bundle::app_id`).
+    pub app_id: String,
+    /// The application version string (`bundle::version`).
+    pub version: String,
+    /// The UI framework identifier: `native`, `static`, `server`, or `cli`
+    /// for a command-line application (`bundle::framework`).
+    pub framework: String,
+    /// The custom URL scheme the app registers for deep links, empty when the
+    /// manifest sets none (`bundle::scheme`).
+    pub scheme: String,
+    /// The initial window size as "WIDTHxHEIGHT" from the manifest, empty for
+    /// the default (`bundle::window`).
+    pub window: String,
+    /// True for a debug build, false for a release build (`bundle::debug`).
+    pub debug: bool,
+}
+
 #[derive(Clone)]
 pub struct PekoCodegenContext {
     pub unnamed_offset: usize,
@@ -125,10 +154,10 @@ pub struct PekoCodegenContext {
 
     pub files_to_link: Vec<PathBuf>,
 
-    pub imported_styles: HashMap<PathBuf, String>,
-    pub compiled_styles_folder: Option<PathBuf>,
-    pub application_id: Option<String>,
-    pub asset_debug_folder: Option<PathBuf>,
+    /// Compile-time project metadata for the injected `bundle` module.
+    /// `None` outside a project build (the module's declared defaults are
+    /// used instead).
+    pub bundle_info: Option<BundleInfo>,
 
     pub previous_scoped_variables: Vec<HashMap<String, CodegenVariable>>,
     pub scoped_variables: HashMap<String, CodegenVariable>,
@@ -229,10 +258,7 @@ impl PekoCodegenContext {
 
             files_to_link: Vec::new(),
 
-            imported_styles: HashMap::new(),
-            compiled_styles_folder: None,
-            asset_debug_folder: None,
-            application_id: None,
+            bundle_info: None,
 
             module_context: ExecutionModuleContext::new(main_module, extern_module),
 
@@ -799,7 +825,7 @@ impl
     ) -> Option<CodegenClass> {
         // The template carries its source AST; a non-template class cannot be
         // instantiated.
-        let source = generic.source_class.clone()?;
+        let source = generic.source_class.as_deref().cloned()?;
 
         // Box is the one generic the compiler monomorphizes: each Box<T> is a
         // distinct class laid out with T's real representation (so a raw FFI

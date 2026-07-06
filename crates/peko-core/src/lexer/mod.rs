@@ -107,6 +107,7 @@ pub enum TokenType {
     In,                 // in
     Module,             // module
     Import,             // import
+    Export,             // export
     As,                 // as
     Link,               // link
     Platform,           // platform
@@ -219,6 +220,7 @@ impl TokenType {
             Self::In => "'in'",
             Self::Module => "'module'",
             Self::Import => "'import'",
+            Self::Export => "'export'",
             Self::As => "'as'",
             Self::Link => "'link'",
             Self::Platform => "'platform'",
@@ -642,6 +644,7 @@ impl TokenList {
                         "in" => TokenType::In,
                         "module" => TokenType::Module,
                         "import" => TokenType::Import,
+                        "export" => TokenType::Export,
                         "as" => TokenType::As,
                         "link" => TokenType::Link,
                         "platform" => TokenType::Platform,

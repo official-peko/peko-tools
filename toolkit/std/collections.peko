@@ -1010,6 +1010,13 @@ import runtime;
         result[this.count] = nul
         return new string(result, this.count)
     }
+
+    /// Returns the accumulated text as a string. The same result as build, so
+    /// a StringBuilder stringifies to its contents rather than the default
+    /// object description.
+    [public] fn to_string() => string {
+        return this.build()
+    }
 }
 
 // ---------------------------------------------------------------------------

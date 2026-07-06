@@ -25,8 +25,8 @@ use thiserror::Error;
 pub use cache::Cache;
 pub use client::RegistryClient;
 pub use index::IndexEntry;
-pub use verify::{PackageReport, verify};
 pub use resolver::{ResolvedPackage, Resolver};
+pub use verify::{PackageReport, verify};
 
 /// One failure mode for a registry operation.
 #[derive(Debug, Error)]

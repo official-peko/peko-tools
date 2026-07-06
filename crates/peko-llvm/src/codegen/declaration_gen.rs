@@ -55,7 +55,7 @@ fn build_generic_class_template(
         std::collections::HashMap::new(),
     );
     class.generic_typenames = ast.generics.clone();
-    class.source_class = Some(source);
+    class.source_class = Some(std::sync::Arc::new(source));
     class.template_filename = current_file;
     class
 }
@@ -1606,7 +1606,7 @@ impl PekoValueBuilder for ClassAST {
                         ));
                     }
                     Some(parent) => {
-                        parent_class = Some(Box::new(parent.clone()));
+                        parent_class = Some(std::sync::Arc::new(parent.clone()));
 
                         // Inherit attributes (except the vtable slot).
                         for (attribute_name, attribute) in &parent.attributes {

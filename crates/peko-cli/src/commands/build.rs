@@ -98,6 +98,56 @@ fn handle_clean(project: PekoProject, reporter: &Reporter) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Build the web frontend of a static UI project into `assets/`.
+///
+/// When the project carries a `package.json`, install its dependencies once
+/// (when `node_modules` is absent) and run its build script. The scaffolded
+/// Vite config writes into `assets/`, which the platform bundlers then embed.
+/// A project without a `package.json` is left as-is, so a hand-authored
+/// `assets/` still works.
+fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), ExitCode> {
+    let root = project.get_root();
+    if !root.join("package.json").is_file() {
+        return Ok(());
+    }
+
+    if !root.join("node_modules").is_dir() {
+        reporter.status("Installing", "web dependencies (npm install)");
+        match std::process::Command::new("npm")
+            .arg("install")
+            .current_dir(root)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(_) => {
+                reporter.error("npm install failed");
+                return Err(ExitCode::FAILURE);
+            }
+            Err(e) => {
+                reporter.error(format!("could not run npm install: {e}"));
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    reporter.status("Building", "web app (npm run build)");
+    match std::process::Command::new("npm")
+        .args(["run", "build"])
+        .current_dir(root)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => {
+            reporter.error("web build failed (npm run build)");
+            Err(ExitCode::FAILURE)
+        }
+        Err(e) => {
+            reporter.error(format!("could not run npm run build: {e}"));
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
 /// Wipe the per-mode output build directory (e.g. `build/debug/`) so
 /// stale artifacts from previous builds don't leak across runs. Called
 /// at the start of every build pass.
@@ -161,15 +211,14 @@ fn build_cli_project(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     );
 
     progress.finish_phase();
 
     let diagnostics = match compile_result {
-        Ok((_, diag)) => diag,
+        Ok(diag) => diag,
         Err(e) => {
             reporter.error(format!("compilation failed: {e}"));
             return ExitCode::FAILURE;
@@ -210,6 +259,17 @@ fn build_ui_project(
             build_directory.display()
         ));
         return ExitCode::FAILURE;
+    }
+
+    // For a static (SSG) web app, build the web frontend into assets/ before
+    // bundling, so the platform bundlers embed the compiled dist.
+    if project
+        .ui_project_info
+        .as_ref()
+        .is_some_and(|ui| ui.framework == "static")
+        && let Err(code) = build_web_frontend(&project, reporter)
+    {
+        return code;
     }
 
     // Generate the bundling config templates if they don't exist yet

@@ -42,13 +42,34 @@ fn create_linux_squashfs(
     toolchain_lib_dir: &Path,
     bundle_dylibs: &[String],
     multiarch_triple: &str,
+    release: bool,
 ) -> BundleResult<()> {
     let mut filesystem_writer = backhand::FilesystemWriter::default();
     filesystem_writer.set_current_time();
     filesystem_writer.set_block_size(backhand::DEFAULT_BLOCK_SIZE);
     filesystem_writer.set_only_root_id();
+    // Gzip is the squashfs compressor every reader supports. The AppImage
+    // runtime reads zstd, but libappimage (AppImageLauncher's desktop
+    // integration) uses an older squashfuse that fails to read zstd blocks,
+    // reporting a sqfs_read_range error during registration. Gzip avoids that.
+    //
+    // Passing no options makes backhand use gzip level 9, the slowest, which
+    // spends over a minute on the WebKit/GTK payload. A release build keeps a
+    // balanced level 6 for a smaller AppImage; a development build uses the
+    // fastest level 1, since iteration speed matters more than bundle size.
+    let compression_level: u32 = if release { 6 } else { 1 };
     filesystem_writer.set_compressor(
-        backhand::FilesystemCompressor::new(backhand::compression::Compressor::Zstd, None).unwrap(),
+        backhand::FilesystemCompressor::new(
+            backhand::compression::Compressor::Gzip,
+            Some(backhand::compression::CompressionOptions::Gzip(
+                backhand::compression::Gzip {
+                    compression_level,
+                    window_size: 15,
+                    strategies: 0,
+                },
+            )),
+        )
+        .unwrap(),
     );
     filesystem_writer.set_kind(backhand::kind::Kind::from_const(backhand::kind::LE_V4_0).unwrap());
 
@@ -78,14 +99,29 @@ fn create_linux_squashfs(
     // .desktop manifest tells the desktop environment how to launch the
     // app and what icon to show. The Icon field is a name with no
     // extension, not a file path. It must match the icon file basename
-    // (icon.png on disk becomes Icon=icon here).
+    // (icon.png on disk becomes Icon=icon here). When the app registers a
+    // custom URL scheme, Exec takes %u so a deep-link URL reaches the app as
+    // an argument, and MimeType claims the scheme so the desktop routes it
+    // here.
+    let scheme = project
+        .ui_project_info
+        .as_ref()
+        .and_then(|ui| ui.scheme.as_deref());
+    let exec_line = match scheme {
+        Some(_) => "Exec=exec %u",
+        None => "Exec=exec",
+    };
+    let mime_line = match scheme {
+        Some(scheme) => format!("\nMimeType=x-scheme-handler/{scheme};"),
+        None => String::new(),
+    };
     let desktop_file_contents = format!(
         "[Desktop Entry]\n\
          StartupWMClass=Exec\n\
          Name={}\n\
-         Exec=exec\n\
+         {exec_line}\n\
          Icon=icon\n\
-         Type=Application",
+         Type=Application{mime_line}",
         project.name
     );
     filesystem_writer
@@ -149,6 +185,10 @@ fn create_linux_squashfs(
     // bundle, and bwrap is often absent, so it makes webkit fail to
     // spawn its child processes. A local app UI loading its own trusted
     // content does not need the sandbox.
+    // The trailing "$@" forwards the AppImage's command-line arguments to the
+    // app. A deep-link launch (Exec=exec %u, or a direct ./App.AppImage
+    // "scheme://path" invocation) passes the URL as an argument, so it must
+    // reach the binary for deep-link handling to see it.
     let app_run_contents = "#!/bin/sh\n\
         CD=\"$(dirname \"$(readlink -f \"${0}\")\")\"\n\
         cd \"${CD}\"\n\
@@ -157,7 +197,7 @@ fn create_linux_squashfs(
         export GIO_MODULE_DIR=\"${CD}/usr/lib/gio/modules\"\n\
         export GIO_USE_VFS=local\n\
         export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1\n\
-        exec \"${EXEC}\"\n";
+        exec \"${EXEC}\" \"$@\"\n";
     filesystem_writer
         .push_file(
             Cursor::new(app_run_contents.as_bytes().to_vec()),
@@ -520,7 +560,7 @@ pub fn bundle(
     progress.tick("Linux: compiling arm64 binary");
     let arm_app_binary = arm_build_dir.join("exec");
     let arm_target = PekoTarget::new(OperatingSystem::Linux, Architecture::Arm, false);
-    let (_, arm_diagnostics) = execution::incremental::compile_project(
+    let arm_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         arm_target,
@@ -530,8 +570,7 @@ pub fn bundle(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = arm_diagnostics {
@@ -541,7 +580,7 @@ pub fn bundle(
     progress.tick("Linux: compiling x86_64 binary");
     let x86_64_app_binary = x86_64_build_dir.join("exec");
     let x86_64_target = PekoTarget::new(OperatingSystem::Linux, Architecture::X86_64, false);
-    let (_, x86_64_diagnostics) = execution::incremental::compile_project(
+    let x86_64_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         x86_64_target,
@@ -551,8 +590,7 @@ pub fn bundle(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = x86_64_diagnostics {
@@ -570,6 +608,7 @@ pub fn bundle(
     let arm_dylibs = load_bundle_dylibs(&toolchain_root.join("arm"))?;
     let x86_64_dylibs = load_bundle_dylibs(&toolchain_root.join("x86_64"))?;
 
+    let release = cli_info.flags.has_flag("release");
     let arm_squashfs = arm_build_dir.join("appdir.squashfs");
     create_linux_squashfs(
         project,
@@ -578,6 +617,7 @@ pub fn bundle(
         &arm_lib_dir,
         &arm_dylibs,
         "aarch64-linux-gnu",
+        release,
     )?;
 
     let x86_64_squashfs = x86_64_build_dir.join("appdir.squashfs");
@@ -588,6 +628,7 @@ pub fn bundle(
         &x86_64_lib_dir,
         &x86_64_dylibs,
         "x86_64-linux-gnu",
+        release,
     )?;
 
     // Concatenate runtime + squashfs to produce the AppImage.

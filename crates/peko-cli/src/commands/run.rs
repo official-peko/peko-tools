@@ -2,35 +2,23 @@
 //!
 //! For CLI projects this is a one-shot: compile, then exec the binary.
 //!
-//! For UI projects this enters a hot-reload loop:
-//!
-//! 1. Compile the project once and start the `appserver` subprocess.
-//! 2. Compile the standalone `apprender` (a webview host that points at
-//!    the appserver) and start it.
-//! 3. Wait for both subprocesses to call back over a TCP listener
-//!    (`127.0.0.1:7357`) to signal they're ready.
-//! 4. In a polling loop:
-//!    - Detect SCSS source changes, recompile to CSS, and ping the app's
-//!      style-update listener at `127.0.0.1:7358`.
-//!    - Detect Pekoscript source changes, rebuild the appserver to a
-//!      new binary (alternating `appserver0`/`appserver1` so the old
-//!      one can keep running), and swap it in.
-//! 5. Exit when the apprender exits.
+//! For UI projects this is a one-shot compile. The interactive dev-run
+//! (webview host plus live reload) is being reworked under the pekoui
+//! package, so `peko run` on a UI project builds the project and reports
+//! the result rather than launching a window. Use `peko build` to produce
+//! a distributable bundle.
 
-use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, Command, ExitCode};
+use std::sync::atomic::Ordering;
 
 use peko_core::target::PekoTarget;
 
 use crate::cli::CLIInfo;
-use crate::cli::reporting::Reporter;
-use crate::execution::{self, incremental::ProjectIncrementalMap};
+use crate::cli::reporting::{IndicatifSink, Reporter};
+use crate::commands::devtools::{self, DevAction, DevChannel};
+use crate::execution;
 use crate::project::PekoProject;
-use crate::toolchain::resolve_for_target;
 
 /// Execute the `run` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
@@ -68,23 +56,111 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         // CLI projects exec a child and wait; Ctrl-C is delivered by
         // the terminal to the whole process group, so the child sees
         // SIGINT and exits, and the parent's `.status()` returns
-        // naturally. No need to install our own handler for that case.
-        return run_cli_project(cli_info, project, build_directory, reporter);
+        // naturally.
+        run_cli_project(cli_info, project, build_directory, reporter)
+    } else {
+        // The terminal dev loop. `peko run --devtools` takes a different entry
+        // (execute_with_devtools) handled in main before the async dispatch,
+        // since its window must own the process main thread.
+        run_ui_project(
+            cli_info.get_peko_root(),
+            release,
+            project,
+            build_directory,
+            reporter,
+            None,
+        )
+        .await
+    }
+}
+
+/// Entry for `peko run --devtools`, called from `main` on the process main
+/// thread (winit requires the window's event loop there). The dev loop runs on
+/// a background thread with its own runtime and streams events to the window;
+/// closing the window signals the loop to stop.
+pub fn execute_with_devtools(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    reporter.info("opening devtools window");
+
+    let peko_root = cli_info.get_peko_root().to_path_buf();
+    let release = cli_info.flags.has_flag("release");
+    let (dev, events, actions, shutdown) = devtools::channel();
+
+    // The dev loop (npm, compile, watch, relaunch) runs off the main thread so
+    // the window can own it.
+    let background = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        runtime.block_on(devtools_dev_loop(peko_root, release, dev));
+    });
+
+    // Runs until the window is closed.
+    let result = devtools::run_window(events, actions);
+
+    // Tell the loop to tear down, then wait for it.
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = background.join();
+
+    // Belt and suspenders: restore the terminal to a sane line mode in case a
+    // child left it altered, so the shell prompt behaves normally on return.
+    restore_terminal();
+    result
+}
+
+/// Reset the controlling terminal to a sane cooked mode. A no-op where `stty`
+/// is unavailable or stdin is not a terminal.
+fn restore_terminal() {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("stty").arg("sane").status();
+    }
+}
+
+/// The dev loop under devtools: load the project, resolve dependencies, then run
+/// the shared UI loop streaming events to the window.
+async fn devtools_dev_loop(peko_root: PathBuf, release: bool, dev: DevChannel) -> ExitCode {
+    let reporter = Reporter::new().with_progress(IndicatifSink::new());
+
+    let project = match PekoProject::from_current_directory() {
+        Ok(project) => project,
+        Err(e) => {
+            dev.status(format!("could not load project: {e}"));
+            reporter.error(format!("could not load project: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let progress = reporter.progress();
+    progress.start_phase("Resolving dependencies");
+    let ensured =
+        crate::registry::install::ensure_dependencies(&peko_root, project.get_root(), progress)
+            .await;
+    progress.finish_phase();
+    if let Err(e) = ensured {
+        dev.status(format!("dependency resolution failed: {e}"));
+        reporter.error(format!("could not resolve dependencies: {e}"));
+        return ExitCode::FAILURE;
     }
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_for_handler = Arc::clone(&shutdown);
-    if let Err(e) = ctrlc::set_handler(move || {
-        shutdown_for_handler.store(true, Ordering::SeqCst);
-    }) {
-        // Not fatal. The run loop will still work, the user just
-        // won't be able to Ctrl-C cleanly.
-        reporter.warning(format!(
-            "could not install Ctrl-C handler: {e}; force-quit may leave subprocesses behind"
-        ));
-    }
+    let build_directory = project.get_root().join(if release {
+        "build/release"
+    } else {
+        "build/debug"
+    });
 
-    run_ui_project(cli_info, project, reporter, shutdown)
+    run_ui_project(
+        &peko_root,
+        release,
+        project,
+        build_directory,
+        &reporter,
+        Some(dev),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -128,15 +204,14 @@ fn run_cli_project(
         Vec::new(),
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     );
 
     progress.finish_phase();
 
     let diagnostics = match compile_result {
-        Ok((_, diag)) => diag,
+        Ok(diag) => diag,
         Err(e) => {
             reporter.error(format!("compilation failed: {e}"));
             return ExitCode::FAILURE;
@@ -167,635 +242,617 @@ fn run_cli_project(
 }
 
 // ---------------------------------------------------------------------------
-// UI project: hot reload loop.
+// UI project: live dev loop.
 // ---------------------------------------------------------------------------
 
-fn run_ui_project(
-    cli_info: &CLIInfo,
+/// Run a UI project as a live dev loop. The framework's own dev server (npm run
+/// dev) serves the web UI with hot reload, and the native window loads that dev
+/// URL instead of a bundled asset server, so JS, CSS, and component edits reload
+/// live with no involvement here. Changes to the `.peko` source recompile the
+/// native binary incrementally and relaunch the window, restoring the route the
+/// user was on. The project stays in memory across rebuilds, so the incremental
+/// object cache keeps external packages compiled and only changed files rebuild.
+async fn run_ui_project(
+    peko_root: &Path,
+    release: bool,
     mut project: PekoProject,
+    build_directory: PathBuf,
     reporter: &Reporter,
-    shutdown: Arc<AtomicBool>,
+    dev: Option<DevChannel>,
 ) -> ExitCode {
-    reporter.info(format!(
-        "running {} as a UI project with hot reload",
-        project.name
-    ));
+    reporter.info(format!("running {} as a UI project", project.name));
 
-    // ---- Per-run scratch directory layout -------------------------------
-    let incremental_run_dir = project.get_root().join(".peko/incremental/run");
-    let incremental_info =
-        ProjectIncrementalMap::from_incremental_directory(&incremental_run_dir, false);
-    project.incremental_info = incremental_info.clone();
+    let root = project.get_root().to_path_buf();
 
-    // If on-disk incremental data was unreadable but the directory
-    // exists, scrub it so the next build starts fresh.
-    if incremental_info.is_none()
-        && incremental_run_dir.exists()
-        && let Err(e) = std::fs::remove_dir_all(&incremental_run_dir)
-    {
-        reporter.warning(format!(
-            "could not remove stale incremental dir {}: {e}",
-            incremental_run_dir.display()
-        ));
-    }
-
-    let project_style_directory = incremental_run_dir.join("styles");
-    if let Err(e) = std::fs::create_dir_all(&project_style_directory) {
-        reporter.error(format!(
-            "could not create style directory {}: {e}",
-            project_style_directory.display()
-        ));
+    // The dev loop drives the framework's own hot reload, which needs a `dev`
+    // script (npm run dev). Without one there is nothing to serve live.
+    if !dev_script_present(&root) {
+        reporter.error(
+            "peko run needs a framework dev script (a `dev` entry in package.json, e.g. npm run dev). Use `peko build` for a distributable bundle",
+        );
         return ExitCode::FAILURE;
     }
-
-    // Debug runs serve assets straight from the project's asset directory,
-    // so edits to assets appear without a rebuild. The directory is passed
-    // to the codegen context as the asset debug folder.
-    let asset_debug_directory = project.assets_dir();
 
     let default_target = PekoTarget::default();
-
-    // The appserver executable alternates between two filenames so we
-    // can rebuild the new one while the old one is still running and
-    // holding a lock on its binary.
-    let mut appserver_uid = false;
-    let appserver_executable = incremental_run_dir.join(format!(
-        "appserver{}",
-        if appserver_uid { "0" } else { "1" }
-    ));
-
-    // ---- Initial compile of the project entrypoint ----------------------
-    let progress = reporter.progress();
-    progress.start_phase(&format!("Building {} (initial)", project.name));
-
-    let (preloaded_modules, preloaded_libs) = match execution::load_required_packages(
-        cli_info.get_peko_root(),
-        default_target,
-        Some(project_style_directory.clone()),
-        Some(asset_debug_directory.clone()),
-    ) {
-        Ok(tuple) => tuple,
-        Err(e) => {
-            progress.finish_phase();
-            reporter.error(format!("could not load required packages: {e}"));
-            return ExitCode::FAILURE;
-        }
-    };
-    let preloaded_modules = Some(preloaded_modules);
-
-    let initial_compile = execution::incremental::compile_project(
-        cli_info.get_peko_root(),
-        &mut project,
-        default_target,
-        incremental_run_dir.clone(),
-        Some(appserver_executable.clone()),
-        false,
-        preloaded_libs.clone(),
-        Some(project_style_directory.clone()),
-        Some(asset_debug_directory.clone()),
-        preloaded_modules.clone(),
-        None,
-        progress,
-    );
-
-    let (imported_styles, diagnostics) = match initial_compile {
-        Ok(tuple) => tuple,
-        Err(e) => {
-            progress.finish_phase();
-            reporter.error(format!("initial compile failed: {e}"));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if let Some(d) = &diagnostics
-        && d.get_error_count() > 0
-    {
-        progress.finish_phase();
-        reporter.report_diagnostics(d);
-        reporter.error("initial run failed due to compile errors");
-        return ExitCode::FAILURE;
-    }
-
-    // ---- Compile all the SCSS styles once -------------------------------
-    // (maps style_file to (current_source_text, output_basename))
-    let mut styles_to_watch: HashMap<PathBuf, (String, String)> = HashMap::new();
-    if let Err(code) = compile_styles_initial(
-        &imported_styles,
-        &project_style_directory,
-        &mut styles_to_watch,
-        reporter,
-    ) {
-        progress.finish_phase();
-        return code;
-    }
-
-    progress.finish_phase();
-
-    // ---- Compile the standalone apprender (webview host) ----------------
-    let apprender_object = incremental_run_dir.join("apprender.o");
-    let hotreloadapp_peko_path = incremental_run_dir.join("hotreloadapp.peko");
-
-    let reload_template = cli_info
-        .get_peko_root()
-        .join("Compiler/bundling/reload.peko");
-    let reload_source = match std::fs::read_to_string(&reload_template) {
-        Ok(s) => s,
-        Err(e) => {
-            reporter.error(format!(
-                "could not read hot-reload template at {}: {e}",
-                reload_template.display()
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Err(e) = std::fs::write(&hotreloadapp_peko_path, reload_source.as_bytes()) {
-        reporter.error(format!("could not write hotreloadapp.peko: {e}"));
-        return ExitCode::FAILURE;
-    }
-
-    let resolved = match resolve_for_target(cli_info.get_peko_root(), &default_target) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            reporter.error(format!("could not resolve toolchain: {e}"));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let progress = reporter.progress();
-    progress.start_phase("Building apprender");
-
-    let apprender_outcome = match execution::compile(
-        cli_info.get_peko_root(),
-        default_target,
-        hotreloadapp_peko_path.clone(),
-        project.get_root().to_path_buf(),
-        apprender_object.clone(),
-    ) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            progress.finish_phase();
-            reporter.error(format!("apprender compile failed: {e}"));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    reporter.report_diagnostics(&apprender_outcome.diagnostics);
-    if apprender_outcome.diagnostics.get_error_count() > 0 {
-        progress.finish_phase();
-        return ExitCode::FAILURE;
-    }
-
-    let apprender_executable = incremental_run_dir.join("apprender");
-    peko_llvm::linker::lld_link(
-        default_target,
-        apprender_object,
-        apprender_outcome.codegen_context.files_to_link.clone(),
-        &resolved.toolchain,
-        &resolved.dir,
-        Some(apprender_executable.clone()),
-        false,
-        None,
-        Vec::new(),
-    );
-
-    progress.finish_phase();
-
-    // ---- Bring up the listener, then the renderer and the appserver -----
-    // The update listener at 127.0.0.1:7357 is used both as the
-    // renderer's "ready" signal and the appserver's "ready" signal.
-    // Set non-blocking so wait_for_ready_or_shutdown can poll without
-    // pinning a thread; the helper interleaves accept attempts with
-    // checks of the shutdown flag so Ctrl-C is honored within ~100ms
-    // even while we're waiting on a subprocess to come up.
-    let update_listener = match std::net::TcpListener::bind("127.0.0.1:7357") {
-        Ok(l) => l,
-        Err(e) => {
-            reporter.error(format!(
-                "could not bind hot-reload listener on 127.0.0.1:7357: {e}"
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Err(e) = update_listener.set_nonblocking(true) {
+    let arch_build_dir = build_directory
+        .join(default_target.operating_system.to_string())
+        .join(default_target.architecture.to_string());
+    if let Err(e) = std::fs::create_dir_all(&arch_build_dir) {
         reporter.error(format!(
-            "could not set hot-reload listener non-blocking: {e}"
+            "could not create build directory {}: {e}",
+            arch_build_dir.display()
         ));
         return ExitCode::FAILURE;
     }
+    let binary = arch_build_dir.join(&project.name);
+    let incremental_dir = root.join(".peko/incremental");
 
-    let mut apprenderer = match Command::new(&apprender_executable).spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            reporter.error(format!(
-                "could not launch apprender at {}: {e}",
-                apprender_executable.display()
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
+    // The launched app writes its current route here on every route change, so a
+    // rebuild can relaunch and restore it. Start clean.
+    let dev_state = root.join(".peko/dev-route");
+    let _ = std::fs::remove_file(&dev_state);
 
-    // Wait for apprender ready signal, interruptible by Ctrl-C.
-    match wait_for_ready_or_shutdown(&update_listener, &shutdown) {
-        WaitOutcome::Ready => {}
-        WaitOutcome::Shutdown => {
-            let _ = apprenderer.kill();
-            let _ = apprenderer.wait();
-            return ExitCode::SUCCESS;
-        }
-        WaitOutcome::Error(e) => {
-            reporter.error(format!("hot-reload listener accept failed: {e}"));
-            let _ = apprenderer.kill();
-            return ExitCode::FAILURE;
-        }
-    }
-
-    reporter.status("Ready", "hot reload watching for changes");
-
-    let mut current_appserver = match Command::new(&appserver_executable).spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            reporter.error(format!(
-                "could not launch appserver at {}: {e}",
-                appserver_executable.display()
-            ));
-            let _ = apprenderer.kill();
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Wait for appserver ready signal, interruptible by Ctrl-C.
-    match wait_for_ready_or_shutdown(&update_listener, &shutdown) {
-        WaitOutcome::Ready => {}
-        WaitOutcome::Shutdown => {
-            let _ = current_appserver.kill();
-            let _ = current_appserver.wait();
-            let _ = apprenderer.kill();
-            let _ = apprenderer.wait();
-            return ExitCode::SUCCESS;
-        }
-        WaitOutcome::Error(e) => {
-            reporter.error(format!("hot-reload listener accept failed: {e}"));
-            let _ = apprenderer.kill();
-            let _ = current_appserver.kill();
-            return ExitCode::FAILURE;
+    // Install web dependencies once, then start the framework dev server and
+    // learn the URL it serves on.
+    if !root.join("node_modules").is_dir() {
+        reporter.status("Installing", "web dependencies (npm install)");
+        let status = Command::new("npm").arg("install").current_dir(&root).status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(_) => {
+                reporter.error("npm install failed");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                reporter.error(format!("could not run npm install: {e}"));
+                return ExitCode::FAILURE;
+            }
         }
     }
 
-    // ---- Hot-reload polling loop ----------------------------------------
-    //
-    // Sleeps 100ms between iterations so the loop doesn't spin and burn
-    // a CPU core polling the filesystem. 100ms is short enough that
-    // change-to-reload latency feels instantaneous to a human, and long
-    // enough that idle cost stays close to zero.
-    //
-    // Ctrl-C is honored within ~100ms throughout: the listener is in
-    // non-blocking mode, and `wait_for_ready_or_shutdown` interleaves
-    // accept attempts with shutdown-flag checks. No path in this loop
-    // blocks for longer than one poll interval without checking
-    // shutdown.
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    reporter.status("Starting", "framework dev server (npm run dev)");
+    if let Some(dev) = &dev {
+        dev.status("starting dev server...");
+    }
+    let (mut dev_server, dev_url) = match start_dev_server(&root) {
+        Ok(pair) => pair,
+        Err(e) => {
+            reporter.error(format!("could not start the dev server: {e}"));
+            if let Some(dev) = &dev {
+                dev.status(format!("dev server error: {e}"));
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    reporter.success(format!("dev server ready at {dev_url}"));
+    if let Some(dev) = &dev {
+        dev.status(format!("dev server ready at {dev_url}"));
+    }
+
+    // First build, then launch the window pointed at the dev server. A failed
+    // build still enters the watch loop, so the next save can fix it.
+    let mut app_child: Option<Child> = None;
+    if compile_ui(
+        peko_root,
+        release,
+        &mut project,
+        default_target,
+        &incremental_dir,
+        &binary,
+        reporter,
+        dev.as_ref(),
+    ) {
+        match spawn_app(&binary, &dev_url, "", &dev_state, dev.as_ref()) {
+            Ok(child) => app_child = Some(child),
+            Err(e) => reporter.error(format!("could not launch {}: {e}", binary.display())),
+        }
+    }
+
+    // Watch the peko source and manifest. Events arrive on a Tokio channel so
+    // the loop can select against Ctrl-C.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = match notify::recommended_watcher(
+        move |res: notify::Result<notify::Event>| {
+            let _ = tx.send(res);
+        },
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            reporter.error(format!("could not start the file watcher: {e}"));
+            let _ = dev_server.kill();
+            return ExitCode::FAILURE;
+        }
+    };
+    use notify::Watcher;
+    let _ = watcher.watch(&root.join("source"), notify::RecursiveMode::Recursive);
+    let _ = watcher.watch(&root.join("peko.toml"), notify::RecursiveMode::NonRecursive);
+    // Under devtools, also watch the dev-route file to stream navigations to the
+    // window. It sits directly in .peko, so a non-recursive watch avoids the
+    // churn of the incremental object cache under .peko/incremental.
+    if dev.is_some() {
+        let _ = watcher.watch(&root.join(".peko"), notify::RecursiveMode::NonRecursive);
+    }
+
+    // Under devtools, connect to the app's bridge so the window can drive the
+    // interactive console and view source. The client reconnects across
+    // relaunches; outgoing calls flow through this sender.
+    let mut call_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
+    if let Some(channel) = &dev {
+        let bridge_file = root.join(".peko/dev-bridge");
+        let _ = std::fs::remove_file(&bridge_file);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(crate::commands::bridge_client::run(
+            bridge_file,
+            channel.sender(),
+            rx,
+            channel.shutdown.clone(),
+        ));
+        call_tx = Some(tx);
+    }
+
+    if dev.is_some() {
+        reporter.info("watching peko source for changes - close the devtools window to stop");
+    } else {
+        reporter.info("watching peko source for changes - press Ctrl-C to stop");
+    }
 
     loop {
-        // Honor a Ctrl-C signal. The ctrlc handler installed in
-        // `execute` sets this flag; we observe it on each polling
-        // iteration and break out to run the cleanup path below.
-        if shutdown.load(Ordering::SeqCst) {
-            if !cli_info.flags.has_flag("quiet") {
-                reporter.info("shutdown requested, cleaning up");
+        // Devtools: honor window actions and the shutdown signal before waiting.
+        if let Some(channel) = &dev {
+            if channel.shutdown.load(Ordering::Relaxed) {
+                break;
             }
-            break;
-        }
-
-        // Renderer exiting ends the session.
-        match apprenderer.try_wait() {
-            Ok(Some(_)) | Err(_) => break,
-            Ok(None) => {}
-        }
-
-        // Detect SCSS source changes by content comparison. The clone
-        // is required so the loop body can mutate `styles_to_watch`
-        // without aliasing the iterator.
-        let watched_snapshot = styles_to_watch.clone();
-        for (style_file, (style_contents, style_name)) in &watched_snapshot {
-            handle_style_change(
-                style_file,
-                style_contents,
-                style_name,
-                &project_style_directory,
-                &mut styles_to_watch,
-                cli_info,
-                reporter,
-            );
-        }
-
-        // Detect Pekoscript source changes via the project's
-        // incremental file map. If nothing changed, we still fall
-        // through to the sleep at the end of the iteration.
-        let pekoscript_changed = project
-            .incremental_info
-            .as_ref()
-            .map(|info| info.tracked_files_changed())
-            .unwrap_or(false);
-
-        if pekoscript_changed {
-            if !cli_info.flags.has_flag("quiet") {
-                reporter.info("change detected, rebuilding...");
-            }
-
-            // Swap to the other appserver slot so the old one stays
-            // executable while the new one builds.
-            appserver_uid = !appserver_uid;
-            let new_appserver_executable = incremental_run_dir.join(format!(
-                "appserver{}",
-                if appserver_uid { "0" } else { "1" }
-            ));
-
-            let progress = reporter.progress();
-            progress.start_phase("Rebuilding appserver");
-
-            let rebuild = execution::incremental::compile_project(
-                cli_info.get_peko_root(),
-                &mut project,
-                default_target,
-                incremental_run_dir.clone(),
-                Some(new_appserver_executable.clone()),
-                false,
-                preloaded_libs.clone(),
-                Some(project_style_directory.clone()),
-                Some(asset_debug_directory.clone()),
-                preloaded_modules.clone(),
-                None,
-                progress,
-            );
-
-            match rebuild {
-                Err(e) => {
-                    progress.finish_phase();
-                    reporter.error(format!("rebuild failed: {e}"));
-                }
-                Ok((imported_styles, Some(diagnostics))) if diagnostics.get_error_count() > 0 => {
-                    progress.finish_phase();
-                    reporter.report_diagnostics(&diagnostics);
-                    reporter.error("rebuild failed");
-                    // Even though the rebuild failed, the
-                    // imported_styles list is still useful, pick up
-                    // any new SCSS files so we can hot-reload styles
-                    // independent of the broken Pekoscript build.
-                    let _ = imported_styles;
-                }
-                Ok((imported_styles, _)) => {
-                    // Pick up any new SCSS files that got imported in
-                    // the rebuild.
-                    for (style_file, style_name) in &imported_styles {
-                        if styles_to_watch.contains_key(style_file) {
-                            continue;
+            let mut want_rebuild = false;
+            let mut want_restart = false;
+            while let Ok(action) = channel.actions.try_recv() {
+                match action {
+                    DevAction::Shutdown => channel.shutdown.store(true, Ordering::Relaxed),
+                    DevAction::Rebuild => want_rebuild = true,
+                    DevAction::RestartApp => want_restart = true,
+                    DevAction::Eval(code) => {
+                        if let Some(tx) = &call_tx {
+                            let _ = tx.send(devtools_eval_call("eval", &code));
                         }
-                        compile_and_register_style(
-                            style_file,
-                            style_name,
-                            &project_style_directory,
-                            &mut styles_to_watch,
-                            reporter,
-                        );
                     }
-
-                    // Hot-swap appserver subprocesses. The new
-                    // appserver pings the listener when it's ready;
-                    // we wait for that before killing the old one so
-                    // the UI never sees a gap. Wait is interruptible
-                    // by Ctrl-C. If shutdown is set we abandon the
-                    // new appserver and the outer loop's shutdown
-                    // check breaks us out cleanly on the next pass.
-                    match Command::new(&new_appserver_executable).spawn() {
-                        Ok(mut new_appserver) => {
-                            match wait_for_ready_or_shutdown(&update_listener, &shutdown) {
-                                WaitOutcome::Ready => {}
-                                WaitOutcome::Shutdown => {
-                                    // Don't swap; let the outer loop
-                                    // tear down current_appserver as
-                                    // usual. Kill the partially-
-                                    // initialized new one so it
-                                    // doesn't outlive us.
-                                    let _ = new_appserver.kill();
-                                    let _ = new_appserver.wait();
-                                    progress.finish_phase();
-                                    continue;
-                                }
-                                WaitOutcome::Error(e) => {
-                                    reporter.warning(format!(
-                                        "hot-reload accept after rebuild failed: {e}"
-                                    ));
-                                }
-                            }
-
-                            if let Err(e) = current_appserver.kill() {
-                                reporter.warning(format!("could not kill previous appserver: {e}"));
-                            }
-                            current_appserver = new_appserver;
-
-                            progress.finish_phase();
-
-                            if !cli_info.flags.has_flag("quiet") {
-                                reporter.status("Reloaded", "update sent to app");
-                            }
-                        }
-                        Err(e) => {
-                            progress.finish_phase();
-                            reporter.error(format!(
-                                "could not launch new appserver at {}: {e}",
-                                new_appserver_executable.display()
-                            ));
+                    DevAction::ViewSource => {
+                        if let Some(tx) = &call_tx {
+                            let _ = tx.send(devtools_eval_call("source", ""));
                         }
                     }
                 }
             }
+            if channel.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            if want_restart {
+                let route = std::fs::read_to_string(&dev_state)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if let Some(mut child) = app_child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                match spawn_app(&binary, &dev_url, &route, &dev_state, Some(channel)) {
+                    Ok(child) => {
+                        app_child = Some(child);
+                        channel.status("app restarted");
+                    }
+                    Err(e) => channel.status(format!("restart failed: {e}")),
+                }
+            }
+            if want_rebuild {
+                rebuild_and_relaunch(
+                    peko_root,
+                    release,
+                    &mut project,
+                    default_target,
+                    &incremental_dir,
+                    &binary,
+                    &dev_url,
+                    &dev_state,
+                    reporter,
+                    Some(channel),
+                    &mut app_child,
+                );
+            }
         }
 
-        std::thread::sleep(POLL_INTERVAL);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c(), if dev.is_none() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(150)), if dev.is_some() => {}
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                let event = match event {
+                    Ok(event) => event,
+                    Err(_) => continue,
+                };
+
+                // Under devtools, a dev-route file change is a navigation, not a
+                // source edit: stream it to the window without a rebuild.
+                if let Some(channel) = &dev
+                    && event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("dev-route"))
+                {
+                    if let Ok(route) = std::fs::read_to_string(&dev_state) {
+                        let route = route.trim();
+                        if !route.is_empty() {
+                            channel.route(route);
+                        }
+                    }
+                    continue;
+                }
+
+                if !touches_peko_source(&event) {
+                    continue;
+                }
+                // A save often lands as several events; let them settle so the
+                // rebuild runs once.
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                while rx.try_recv().is_ok() {}
+                rebuild_and_relaunch(
+                    peko_root,
+                    release,
+                    &mut project,
+                    default_target,
+                    &incremental_dir,
+                    &binary,
+                    &dev_url,
+                    &dev_state,
+                    reporter,
+                    dev.as_ref(),
+                    &mut app_child,
+                );
+            }
+        }
     }
 
-    // Best-effort cleanup of both spawned subprocesses on exit. The
-    // appserver is the inner process; the apprenderer is the webview
-    // host. Either may already have exited under us (e.g. the loop
-    // broke because apprenderer's `try_wait` returned), in which case
-    // these kills no-op.
-    let _ = current_appserver.kill();
-    let _ = apprenderer.kill();
-    // Wait briefly for the OS to reap them so we don't leave zombies.
-    let _ = current_appserver.wait();
-    let _ = apprenderer.wait();
+    // Tear down the window and the dev server on the way out.
+    if let Some(mut child) = app_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let _ = dev_server.kill();
+    let _ = dev_server.wait();
+    reporter.info("dev session stopped");
+    if let Some(channel) = &dev {
+        channel.status("dev session stopped");
+    }
     ExitCode::SUCCESS
 }
 
-/// Compile every SCSS file in `imported_styles` once, write the CSS
-/// output into `project_style_directory`, and seed `styles_to_watch`
-/// with the file content for change detection.
-fn compile_styles_initial(
-    imported_styles: &HashMap<PathBuf, String>,
-    project_style_directory: &Path,
-    styles_to_watch: &mut HashMap<PathBuf, (String, String)>,
+/// Build a bridge call that asks the page to evaluate an expression (kind
+/// "eval") or return its source (kind "source"). The reply is ignored; the
+/// result comes back as a devtools:result event through the bridge client.
+fn devtools_eval_call(kind: &str, code: &str) -> String {
+    serde_json::json!({
+        "t": "call",
+        "id": 0,
+        "method": "devtools.eval",
+        "params": { "id": 0, "kind": kind, "code": code },
+    })
+    .to_string()
+}
+
+/// Read the last route, recompile, and relaunch the window restoring it. Shared
+/// by the file-watch path and the devtools Rebuild action. Compilation is
+/// CPU-bound and synchronous, so it runs off the async runtime.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_and_relaunch(
+    peko_root: &Path,
+    release: bool,
+    project: &mut PekoProject,
+    target: PekoTarget,
+    incremental_dir: &Path,
+    binary: &Path,
+    dev_url: &str,
+    dev_state: &Path,
     reporter: &Reporter,
-) -> Result<(), ExitCode> {
-    for (style_file, style_name) in imported_styles {
-        compile_and_register_style(
-            style_file,
-            style_name,
-            project_style_directory,
-            styles_to_watch,
+    dev: Option<&DevChannel>,
+    app_child: &mut Option<Child>,
+) {
+    let route = std::fs::read_to_string(dev_state)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    reporter.status("Rebuilding", &project.name);
+    if let Some(channel) = dev {
+        channel.status("rebuilding...");
+    }
+    let built = tokio::task::block_in_place(|| {
+        compile_ui(
+            peko_root,
+            release,
+            project,
+            target,
+            incremental_dir,
+            binary,
             reporter,
-        );
-    }
-    Ok(())
-}
-
-/// Compile one SCSS file to CSS, write the output to
-/// `<project_style_directory>/<style_name>`, and record the source
-/// text under `styles_to_watch` for change detection.
-fn compile_and_register_style(
-    style_file: &Path,
-    style_name: &str,
-    project_style_directory: &Path,
-    styles_to_watch: &mut HashMap<PathBuf, (String, String)>,
-    reporter: &Reporter,
-) {
-    let source = match std::fs::read_to_string(style_file) {
-        Ok(s) => s,
-        Err(e) => {
-            reporter.warning(format!(
-                "could not read style {}: {e}",
-                style_file.display()
-            ));
-            return;
-        }
-    };
-
-    styles_to_watch.insert(
-        style_file.to_path_buf(),
-        (source.clone(), style_name.to_owned()),
-    );
-
-    let css_text = match grass::from_string(source, &grass::Options::default()) {
-        Ok(css) => css,
-        Err(e) => {
-            reporter.warning(format!(
-                "SCSS compilation failed for {}: {e}",
-                style_file.display()
-            ));
-            String::new()
-        }
-    };
-    let output_path = project_style_directory.join(style_name);
-    if let Err(e) = std::fs::write(&output_path, css_text.as_bytes()) {
-        reporter.warning(format!(
-            "could not write compiled style {}: {e}",
-            output_path.display()
-        ));
-    }
-}
-
-/// React to a possible change in a single SCSS source file. If the
-/// on-disk content differs from what's recorded in `styles_to_watch`,
-/// recompile the file and ping the app's style-update listener.
-fn handle_style_change(
-    style_file: &Path,
-    recorded_contents: &str,
-    style_name: &str,
-    project_style_directory: &Path,
-    styles_to_watch: &mut HashMap<PathBuf, (String, String)>,
-    cli_info: &CLIInfo,
-    reporter: &Reporter,
-) {
-    let new_contents = match std::fs::read_to_string(style_file) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    if new_contents == recorded_contents {
+            dev,
+        )
+    });
+    if !built {
         return;
     }
-
-    if !cli_info.flags.has_flag("quiet") {
-        reporter.info(format!(
-            "stylesheet {} changed, recompiling",
-            style_file.display()
-        ));
+    if let Some(mut child) = app_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
+    match spawn_app(binary, dev_url, &route, dev_state, dev) {
+        Ok(child) => {
+            *app_child = Some(child);
+            let message = if route.is_empty() {
+                "reloaded".to_string()
+            } else {
+                format!("reloaded at {route}")
+            };
+            reporter.success(message.clone());
+            if let Some(channel) = dev {
+                channel.status(message);
+                if !route.is_empty() {
+                    channel.route(route);
+                }
+            }
+        }
+        Err(e) => {
+            reporter.error(format!("could not relaunch: {e}"));
+            if let Some(channel) = dev {
+                channel.status(format!("relaunch failed: {e}"));
+            }
+        }
+    }
+}
 
-    styles_to_watch.insert(
-        style_file.to_path_buf(),
-        (new_contents.clone(), style_name.to_owned()),
+/// Compile the UI project's peko source for the host, linking the native binary.
+/// Reports diagnostics (to the terminal and, under devtools, to the window) and
+/// returns whether the build succeeded.
+#[allow(clippy::too_many_arguments)]
+fn compile_ui(
+    peko_root: &Path,
+    release: bool,
+    project: &mut PekoProject,
+    target: PekoTarget,
+    incremental_dir: &Path,
+    binary: &Path,
+    reporter: &Reporter,
+    dev: Option<&DevChannel>,
+) -> bool {
+    let progress = reporter.progress();
+    progress.start_phase(&format!("Building {}", project.name));
+    let result = execution::incremental::compile_project(
+        peko_root,
+        project,
+        target,
+        incremental_dir.to_path_buf(),
+        Some(binary.to_path_buf()),
+        false,
+        Vec::new(),
+        None,
+        None,
+        !release,
+        progress,
     );
+    progress.finish_phase();
 
-    let css_text = match grass::from_string(new_contents, &grass::Options::default()) {
-        Ok(css) => css,
-        Err(e) => {
-            reporter.warning(format!(
-                "SCSS compilation failed for {}: {e}",
-                style_file.display()
-            ));
-            String::new()
+    match result {
+        Ok(Some(diagnostics)) => {
+            reporter.report_diagnostics(&diagnostics);
+            reporter.error(format!("compilation of {} failed", project.name));
+            if let Some(channel) = dev {
+                channel.diagnostics(&diagnostics);
+                channel.status(format!(
+                    "build failed ({} diagnostics)",
+                    diagnostics.get_diagnostics().len()
+                ));
+            }
+            false
         }
+        Ok(None) => {
+            if let Some(channel) = dev {
+                channel.clear_diagnostics();
+                channel.status("built");
+            }
+            true
+        }
+        Err(e) => {
+            reporter.error(format!("compilation failed: {e}"));
+            if let Some(channel) = dev {
+                channel.status(format!("build error: {e}"));
+            }
+            false
+        }
+    }
+}
+
+/// Launch the built app pointed at the dev server. PEKO_DEV_SERVER selects dev
+/// mode in the pekoui host, PEKO_INITIAL_ROUTE restores the route the last build
+/// was on, and PEKO_DEV_STATE names the file the app writes its route to.
+fn spawn_app(
+    binary: &Path,
+    dev_url: &str,
+    route: &str,
+    dev_state: &Path,
+    dev: Option<&DevChannel>,
+) -> std::io::Result<Child> {
+    let mut command = Command::new(binary);
+    command
+        .env("PEKO_DEV_SERVER", dev_url)
+        .env("PEKO_INITIAL_ROUTE", route)
+        .env("PEKO_DEV_STATE", dev_state)
+        // A webview app never reads the terminal, so deny it stdin rather than
+        // risk a child leaving the terminal in a strange mode after a kill.
+        .stdin(std::process::Stdio::null());
+
+    // Under devtools the app prints console lines to stdout with a marker; pipe
+    // it so a reader thread can split those out. PEKO_DEVTOOLS also tells the
+    // client SDK to forward the console, and PEKO_DEV_BRIDGE names the file the
+    // app publishes its bridge URL and token to for the devtools bridge client.
+    if dev.is_some() {
+        command.env("PEKO_DEVTOOLS", "1");
+        if let Some(parent) = dev_state.parent() {
+            command.env("PEKO_DEV_BRIDGE", parent.join("dev-bridge"));
+        }
+        command.stdout(std::process::Stdio::piped());
+    }
+
+    let mut child = command.spawn()?;
+
+    if let Some(channel) = dev
+        && let Some(stdout) = child.stdout.take()
+    {
+        let events = channel.sender();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                match line.strip_prefix("@@PEKO_DEVTOOLS@@ ") {
+                    Some(payload) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                            let level = value
+                                .get("level")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("log")
+                                .to_string();
+                            let text = value
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let _ = events.send(devtools::DevEvent::Console(
+                                devtools::DevConsoleLine { level, text },
+                            ));
+                        }
+                    }
+                    None => println!("{line}"),
+                }
+            }
+        });
+    }
+
+    Ok(child)
+}
+
+/// Whether a filesystem event touches the peko source: a `.peko` file or the
+/// project manifest. Web assets are the dev server's concern and are ignored.
+fn touches_peko_source(event: &notify::Event) -> bool {
+    event.paths.iter().any(|path| {
+        path.extension().and_then(|e| e.to_str()) == Some("peko")
+            || path.file_name().and_then(|n| n.to_str()) == Some("peko.toml")
+    })
+}
+
+/// Whether the project's package.json declares a `dev` script.
+fn dev_script_present(root: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root.join("package.json")) else {
+        return false;
     };
-    let output_path = project_style_directory.join(style_name);
-    if let Err(e) = std::fs::write(&output_path, css_text.as_bytes()) {
-        reporter.warning(format!(
-            "could not write compiled style {}: {e}",
-            output_path.display()
-        ));
-        return;
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    json.get("scripts")
+        .and_then(|s| s.get("dev"))
+        .and_then(|d| d.as_str())
+        .is_some()
+}
+
+/// Start `npm run dev` and read back the local URL it serves on. The child's
+/// output is forwarded so the framework's logs stay visible, and its handle is
+/// returned so the caller can stop it. Waits up to 30 seconds for the URL.
+fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = Command::new("npm")
+        .arg("run")
+        .arg("dev")
+        .current_dir(root)
+        // No stdin: a dev server (Vite) reads the terminal for its interactive
+        // shortcuts, which puts it in raw mode. Since the dev loop stops the
+        // server by killing it, it never restores the terminal, leaving typing
+        // broken until the shell resets. With no stdin it never grabs it.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run npm run dev: {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "npm run dev produced no output".to_string())?;
+    let stderr = child.stderr.take();
+
+    let (url_tx, url_rx) = std::sync::mpsc::channel::<String>();
+
+    // Forward stdout, and report the first local URL it prints.
+    let tx = url_tx.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(url) = extract_local_url(&line) {
+                let _ = tx.send(url);
+            }
+            println!("{line}");
+        }
+    });
+    // Forward stderr too (Vite prints some startup notices there).
+    if let Some(stderr) = stderr {
+        let tx = url_tx.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(url) = extract_local_url(&line) {
+                    let _ = tx.send(url);
+                }
+                eprintln!("{line}");
+            }
+        });
     }
 
-    // Ping the running app's style-update listener at port 7358.
-    match std::net::TcpStream::connect("127.0.0.1:7358") {
-        Ok(mut stream) => {
-            if let Err(e) = stream.write_all(b"message") {
-                reporter.warning(format!("style update ping write failed: {e}"));
-            }
-            let _ = stream.flush();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            if !cli_info.flags.has_flag("quiet") {
-                reporter.status("Reloaded", "update sent to app");
-            }
-        }
-        Err(e) => {
-            reporter.warning(format!(
-                "could not connect to running app's style-update listener (127.0.0.1:7358): {e}"
-            ));
+    match url_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(url) => Ok((child, url)),
+        Err(_) => {
+            let _ = child.kill();
+            Err("timed out waiting for the dev server URL".to_string())
         }
     }
 }
 
-/// Outcome of a `wait_for_ready_or_shutdown` call.
-enum WaitOutcome {
-    /// A subprocess connected to the listener and signalled ready.
-    Ready,
-    /// The shutdown flag was set while waiting. The caller should
-    /// abandon whatever it was waiting for and tear down.
-    Shutdown,
-    /// The listener returned a non-WouldBlock error. Treated as fatal
-    /// to the wait; the caller decides what to do.
-    Error(std::io::Error),
+/// Extract a localhost dev URL from a line of dev-server output, ignoring ANSI
+/// color codes. Matches the first `http://localhost:<port>` or
+/// `http://127.0.0.1:<port>` and trims a trailing slash.
+fn extract_local_url(line: &str) -> Option<String> {
+    let clean = strip_ansi(line);
+    let start = clean.find("http://localhost").or_else(|| clean.find("http://127.0.0.1"))?;
+    let rest = &clean[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim_end_matches('/');
+    if url.contains(':') && url.rsplit(':').next().is_some_and(|p| p.parse::<u16>().is_ok()) {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
-/// Wait for the next connection on `listener`, but interleave the wait
-/// with polls of `shutdown`. The listener is expected to be in
-/// non-blocking mode (set via `set_nonblocking(true)` once at
-/// creation). Polls every 100ms; returns immediately when either a
-/// connection lands or shutdown is set.
-fn wait_for_ready_or_shutdown(
-    listener: &std::net::TcpListener,
-    shutdown: &Arc<AtomicBool>,
-) -> WaitOutcome {
-    const POLL: std::time::Duration = std::time::Duration::from_millis(100);
-    loop {
-        if shutdown.load(Ordering::SeqCst) {
-            return WaitOutcome::Shutdown;
-        }
-        match listener.accept() {
-            Ok(_) => return WaitOutcome::Ready,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(POLL);
+/// Remove ANSI escape sequences (CSI ... final byte) from a string.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip an escape sequence: the introducer, then up to a letter.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
             }
-            Err(e) => return WaitOutcome::Error(e),
+            continue;
         }
+        out.push(c);
     }
+    out
 }

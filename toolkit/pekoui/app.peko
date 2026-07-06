@@ -1,0 +1,442 @@
+//! pekoui::app: the core application that hosts a web UI in a native webview.
+//!
+//! An App pairs the pekoui webview with the pekoui asset server and the native
+//! bridge. from_bundle builds one from the project's bundle metadata; run
+//! serves the bundled UI over the loopback asset server, starts the bridge,
+//! injects the bridge endpoint for the client SDK, points the webview at the
+//! UI, and drives the native event loop until the window closes. Used through
+//! the pekoui::app prefix.
+
+import webview;
+import assets;
+import bridge;
+import storage;
+import keychain;
+import menu;
+import env;
+import std::fs;
+import std::io;
+import c::menu::menu as c_menu;
+import c::deeplink::deeplink as c_deeplink;
+import std::runtime;
+import std::crypto;
+import std::json;
+
+/// Holds the app's current client-side route. The web UI reports each route
+/// change through the route.changed capability, so native code (menus, deep
+/// links, window state) can read where the app is.
+[public] class RouteState {
+    [private] current: string
+
+    constructor() {
+        this.current = "/"
+    }
+
+    [mutates] fn set(path: string) {
+        this.current = path
+    }
+
+    [public] fn get() => string {
+        return this.current
+    }
+}
+
+/// A native application window hosting a web UI served from the app bundle,
+/// with a native bridge for app<->native interop.
+[public] class App {
+    [private] view: webview::WebView
+    [private] channel: bridge::Bridge
+    [private] token: string
+    [private] routes: RouteState
+    // Whether the app draws its menu in HTML rather than a native menu bar. When
+    // true, set_menu installs nothing native and the client SDK renders the HTML
+    // menu on every platform.
+    [private] html_menu: bool
+
+    /// Create an App with a titled window of the given size. A per-run bridge
+    /// token is minted and the built-in capabilities are registered.
+    constructor(title: string, width: number, height: number) {
+        this.view = new webview::WebView(title, width, height)
+        this.token = crypto::random_hex(16)
+        this.channel = new bridge::Bridge(this.token)
+        this.routes = new RouteState()
+        this.html_menu = false
+        this.register_builtins()
+    }
+
+    /// Registers the built-in native capabilities: sys.ping (a health echo),
+    /// storage.* (a per-app key/value store), keychain.* (a per-app secret
+    /// store), and assets.url (bundled asset URLs).
+    [mutates] fn register_builtins() {
+        this.channel.on("sys.ping", closure(params: string) => string {
+            return params
+        })
+
+        let store: storage::Storage = new storage::Storage()
+        this.channel.on("storage.get", closure[store](params: string) => string {
+            return store.get(string_field(as_object(params), "key"))
+        })
+        this.channel.on("storage.set", closure[store](params: string) => string {
+            let object: json::JsonObject = as_object(params)
+            store.set(string_field(object, "key"), raw_field(object, "value"))
+            return `true`
+        })
+        this.channel.on("storage.remove", closure[store](params: string) => string {
+            store.remove(string_field(as_object(params), "key"))
+            return `true`
+        })
+        this.channel.on("storage.keys", closure[store](params: string) => string {
+            return store.keys()
+        })
+        this.channel.on("storage.clear", closure[store](params: string) => string {
+            store.clear()
+            return `true`
+        })
+
+        let vault: keychain::Keychain = new keychain::Keychain()
+        this.channel.on("keychain.get", closure[vault](params: string) => string {
+            return vault.get(string_field(as_object(params), "name"))
+        })
+        this.channel.on("keychain.set", closure[vault](params: string) => string {
+            let object: json::JsonObject = as_object(params)
+            vault.set(string_field(object, "name"), string_field(object, "value"))
+            return `true`
+        })
+        this.channel.on("keychain.remove", closure[vault](params: string) => string {
+            vault.remove(string_field(as_object(params), "name"))
+            return `true`
+        })
+
+        this.channel.on("assets.url", closure(params: string) => string {
+            let url: string = assets::get_asset_url(string_field(as_object(params), "name"))
+            return new json::JsonString(url).to_string()
+        })
+
+        // In the dev loop (peko run) PEKO_DEV_STATE names a file the current
+        // route is written to, so a rebuild can relaunch and restore it. A
+        // production bundle leaves it unset and no file is written.
+        let routes: RouteState = this.routes
+        let dev_state: string = env::get("PEKO_DEV_STATE")
+        this.channel.on("route.changed", closure[routes, dev_state](params: string) => string {
+            let path: string = string_field(as_object(params), "path")
+            routes.set(path)
+            if dev_state.size() > 0 {
+                fs::write_file(dev_state, path)
+            }
+            return `true`
+        })
+
+        // The devtools window (peko run --devtools) forwards the web console to
+        // native here. The line is printed to stdout with a marker the dev loop
+        // parses. A production build never calls this.
+        this.channel.on("devtools.log", closure(params: string) => string {
+            io::println(`@@PEKO_DEVTOOLS@@ ${params}`)
+            return `true`
+        })
+
+        // Devtools request/response relay for the interactive console and view
+        // source. The devtools window is a bridge client; it calls devtools.eval
+        // {id, kind, code}, which is relayed to the web UI as a devtools:run
+        // event. The web UI runs it and calls devtools.result {id, kind, ok,
+        // result}, relayed back to every client as a devtools:result event so
+        // the window receives it. Both are inert without a devtools client.
+        let relay: bridge::Bridge = this.channel
+        this.channel.on("devtools.eval", closure[relay](params: string) => string {
+            relay.emit("devtools:run", params)
+            return `{}`
+        })
+        this.channel.on("devtools.result", closure[relay](params: string) => string {
+            relay.emit("devtools:result", params)
+            return `{}`
+        })
+
+        // The launch route, when the app was opened with a deep-link URL and
+        // the platform delivers it after the UI connects (iOS). Empty otherwise.
+        this.channel.on("deeplink.initial", closure(params: string) => string {
+            let route: string = runtime::create_managed(c_deeplink::peko_deeplink_take_initial())
+            return new json::JsonString(route).to_string()
+        })
+    }
+
+    /// The underlying webview, so callers can adjust window chrome
+    /// (decorations, transparency, size) before run.
+    [public] fn webview() => webview::WebView {
+        return this.view
+    }
+
+    /// Registers a native handler reachable from the app as peko.<ns>.<method>.
+    /// The handler receives the call params as a JSON string and returns the
+    /// result as a JSON string.
+    [mutates] fn on(method: string, handler: closure(string) => string) {
+        this.channel.on(method, handler)
+    }
+
+    /// Pushes an event to the app. data is a JSON string.
+    [public] fn emit(name: string, data: string) {
+        this.channel.emit(name, data)
+    }
+
+    /// The app's current client-side route, as last reported by the web UI
+    /// through the route.changed capability. Defaults to "/" before the first
+    /// report.
+    [public] fn route() => string {
+        return this.routes.get()
+    }
+
+    /// Registers a native deep-link handler. When the OS opens the app with the
+    /// registered custom-scheme URL, the route path that follows the scheme is
+    /// pushed to the app as a navigate event. Desktop only; a no-op where deep-
+    /// link delivery is not wired.
+    [mutates] fn enable_deeplinks() {
+        c_deeplink::peko_deeplink_register(bundle::scheme.to_raw(), bundle::name.to_raw())
+        c_deeplink::peko_deeplink_set_window(this.view.native_handle())
+        let handler: closure(cstr) => void = closure[this](path: cstr) => void {
+            let route: string = runtime::create_managed(path)
+            this.navigate(route)
+        }
+        c_deeplink::peko_deeplink_set_handler(
+            danger_cast<opaque>(handler.function),
+            handler.context)
+    }
+
+    /// Navigates the app to a client-side route. Pushes a navigate event that
+    /// the client SDK applies to the framework router, so native code, menus,
+    /// and deep links can drive in-app navigation.
+    [public] fn navigate(path: string) {
+        let data: string = `{"path":${new json::JsonString(path).to_string()}}`
+        this.emit("navigate", data)
+    }
+
+    /// Chooses the HTML menu over the native menu bar. macOS keeps a global
+    /// menu bar and Linux packs one above the web view even on a frameless
+    /// window, so their menu items are always present. Calling this before run
+    /// suppresses the native menu on every platform and tells the client SDK to
+    /// render the HTML menu (peko.menu / the framework Menu component) instead,
+    /// so a custom menu is the only one shown. set_menu then installs nothing.
+    [mutates] fn use_html_menu() {
+        this.html_menu = true
+    }
+
+    /// Installs a native menu bar. Choosing a plain item pushes a menu event
+    /// {"id": <action id>} the app handles with peko.on("menu", ...); standard
+    /// role items are handled natively. Desktop only; a no-op on iOS and
+    /// Android, and a no-op after use_html_menu.
+    [mutates] fn set_menu(bar: menu::Menu) {
+        // The app chose an HTML menu, so no native menu bar is installed.
+        if this.html_menu {
+            return
+        }
+        c_menu::peko_menu_begin(bundle::name.to_raw())
+
+        // The standard application menu (About, Hide, Quit) is created natively,
+        // so the first user submenu is not absorbed as the app menu. Any entries
+        // attached to the app menu are appended to it.
+        let app_entries: Array<menu::MenuEntry> = bar.app_extras.entries
+        if app_entries.size() > 0 {
+            c_menu::peko_menu_app_open()
+            this.emit_entries(app_entries)
+        }
+
+        let submenus: Array<menu::Submenu> = bar.submenus
+        let submenu_count: number = submenus.size()
+        let one: number = 1
+        let submenu_index: number = 0
+        while submenu_index < submenu_count {
+            let sub: menu::Submenu = submenus[submenu_index]
+            c_menu::peko_menu_submenu(sub.label.to_raw())
+            this.emit_entries(sub.entries)
+            submenu_index = submenu_index + one
+        }
+
+        // The click callback pushes a menu event with the item's action id.
+        let callback: closure(cstr) => void = closure[this](action_id: cstr) => void {
+            let id: string = runtime::create_managed(action_id)
+            let data: string = `{"id":${new json::JsonString(id).to_string()}}`
+            this.emit("menu", data)
+        }
+        c_menu::peko_menu_apply(
+            danger_cast<opaque>(callback.function),
+            callback.context,
+            this.view.native_handle())
+    }
+
+    /// Emits one submenu's entries into the currently open native submenu.
+    /// Separators, standard role items, and plain items each map to their
+    /// c_menu call. The native menu layer holds the open submenu.
+    [private] fn emit_entries(entries: Array<menu::MenuEntry>) {
+        let entry_count: number = entries.size()
+        let one: number = 1
+        let entry_index: number = 0
+        while entry_index < entry_count {
+            let entry: menu::MenuEntry = entries[entry_index]
+            switch entry.kind {
+                menu::MenuEntryKind::Separator => {
+                    c_menu::peko_menu_separator()
+                }
+                menu::MenuEntryKind::Role => {
+                    let code: i32 = danger_cast<i32>(menu::role_code(entry.role).to_raw())
+                    c_menu::peko_menu_role(entry.label.to_raw(), code)
+                }
+                menu::MenuEntryKind::Item => {
+                    c_menu::peko_menu_item(
+                        entry.label.to_raw(),
+                        entry.action_id.to_raw(),
+                        entry.accelerator.to_raw())
+                }
+            }
+            entry_index = entry_index + one
+        }
+    }
+
+    /// Serve the UI and run. Starts the bridge, injects the bridge endpoint and
+    /// token for the client SDK, points the webview at the UI, and drives the
+    /// native event loop until the window closes. A production build serves the
+    /// bundled UI over the loopback asset server. Under the dev loop (peko run),
+    /// PEKO_DEV_SERVER names the framework dev server to load instead, so its
+    /// hot reload drives the UI, and PEKO_INITIAL_ROUTE restores the route the
+    /// last build was on.
+    [public] fn run() {
+        // The dev loop sets PEKO_DEV_SERVER to the framework dev-server URL.
+        let dev_server: string = env::get("PEKO_DEV_SERVER")
+        let is_dev: bool = dev_server.size() > 0
+
+        // Become the single running instance for the scheme first. A second
+        // launch forwards its URL to this one and exits before anything else
+        // starts, so the running window is reused. The dev loop relaunches the
+        // app on every rebuild, so it stays multi-instance.
+        if !is_dev {
+            c_deeplink::peko_deeplink_single_instance(bundle::scheme.to_raw())
+        }
+
+        // A production build serves the bundled UI over the loopback asset
+        // server. In dev the framework dev server serves the UI.
+        if !is_dev {
+            assets::start()
+        }
+        let ws_port: number = this.channel.start()
+        let token: string = this.token
+
+        // The launch route. In dev PEKO_INITIAL_ROUTE restores the route the
+        // last build was on; otherwise it is the deep-link URL the OS opened the
+        // app with. It is injected into the boot config so the client SDK can
+        // apply it before the UI mounts. Empty on a normal launch.
+        let initial: string = env::get("PEKO_INITIAL_ROUTE")
+        if initial.size() == 0 {
+            initial = runtime::create_managed(c_deeplink::peko_deeplink_take_initial())
+        }
+        let initial_json: string = new json::JsonString(initial).to_string()
+
+        // Whether the window is frameless, so the client SDK knows to draw a
+        // custom titlebar with window controls rather than expect native ones.
+        let frameless: string = "false"
+        if !this.view.is_decorated() {
+            frameless = "true"
+        }
+
+        // Whether the OS still draws native window controls over the frameless
+        // content (macOS traffic lights). When true the client SDK leaves the
+        // window controls to the OS and only insets its titlebar content clear
+        // of them; when false it draws its own controls.
+        let native_controls: string = "false"
+        if this.view.has_native_controls() {
+            native_controls = "true"
+        }
+
+        // Whether the app draws its menu in HTML, so the client SDK renders the
+        // HTML menu on every platform rather than expecting a native bar.
+        let html_menu: string = "false"
+        if this.html_menu {
+            html_menu = "true"
+        }
+
+        // Whether the devtools window is attached, so the client SDK forwards
+        // the web console to it. Set by the dev loop under peko run --devtools.
+        let devtools: string = "false"
+        if env::get("PEKO_DEVTOOLS").size() > 0 {
+            devtools = "true"
+            this.channel.set_trace(true)
+        }
+
+        // The devtools window is a bridge client. Publish this run's bridge URL
+        // and token to the file the dev loop named, so it can connect. Rewritten
+        // on every relaunch with the new ephemeral port.
+        let bridge_file: string = env::get("PEKO_DEV_BRIDGE")
+        if bridge_file.size() > 0 {
+            fs::write_file(bridge_file, `{"url":"ws://127.0.0.1:${ws_port}/","token":"${token}"}`)
+        }
+        let boot: string = `window.__PEKO__ = { url: "ws://127.0.0.1:${ws_port}/", token: "${token}", initialRoute: ${initial_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: ${html_menu}, devtools: ${devtools} };`
+        this.view.init(boot)
+
+        // Deep-link scheme registration is a production concern; the dev loop
+        // relaunches the app itself, so it is skipped in dev.
+        if !is_dev {
+            this.enable_deeplinks()
+        }
+
+        // In dev the webview loads the framework dev server so its hot reload
+        // drives the UI; a production build loads the bundled index.html.
+        let url: string = dev_server
+        if !is_dev {
+            url = assets::get_asset_url("index.html")
+        }
+        this.view.navigate(url)
+        this.view.run()
+    }
+}
+
+/// Build an App from the project bundle: a window titled with the bundle name
+/// at a default size. The window can be adjusted through webview before run.
+[public] fn from_bundle() => App {
+    let title: string = bundle::name
+    let width: number = 500
+    let height: number = 500
+
+    // The manifest may set the initial window size as "WIDTHxHEIGHT"; otherwise
+    // the defaults above apply.
+    let window: string = bundle::window
+    if window.contains("x") {
+        let one: number = 1
+        let separator: number = window.index_of("x")
+        let parsed_width: number = window.substring(0, separator).to_number()
+        let parsed_height: number = window.substring(separator + one, window.size()).to_number()
+        if parsed_width > 0 {
+            width = parsed_width
+        }
+        if parsed_height > 0 {
+            height = parsed_height
+        }
+    }
+    return new App(title, width, height)
+}
+
+/// Parses call params into a JSON object, or an empty object when the text is
+/// not a JSON object.
+[private] fn as_object(params: string) => json::JsonObject {
+    let value: json::JsonValue = json::parse(params)
+    if value.kind() == "object" {
+        return danger_cast<json::JsonObject>(value)
+    }
+    return new json::JsonObject()
+}
+
+/// The string value of a field, or empty when absent or not a string.
+[private] fn string_field(object: json::JsonObject, key: string) => string {
+    let found: json::JsonValue? = object.get(key)
+    if !found.is_value() {
+        return ""
+    }
+    let value: json::JsonValue = found.unwrap()
+    if value.kind() != "string" {
+        return ""
+    }
+    return danger_cast<json::JsonString>(value).get()
+}
+
+/// The raw JSON text of a field, or the literal null when absent.
+[private] fn raw_field(object: json::JsonObject, key: string) => string {
+    let found: json::JsonValue? = object.get(key)
+    if !found.is_value() {
+        return `null`
+    }
+    return found.unwrap().to_string()
+}

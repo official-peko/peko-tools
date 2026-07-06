@@ -63,6 +63,9 @@ pub struct ApplicationManifest {
     pub platforms: Platforms,
     /// The `[native]` table.
     pub native: Option<Native>,
+    /// The capabilities the app declares in `[capabilities].uses`. Reserved for
+    /// per-permission gating; currently informational.
+    pub capabilities: Vec<String>,
 }
 
 /// A package manifest built from `[package]` and `[lib]`.
@@ -102,6 +105,14 @@ pub struct Ui {
     pub framework: Framework,
     /// The path to a square PNG app icon, relative to the project root.
     pub icon: Option<PathBuf>,
+    /// A custom URL scheme the app registers for deep links, for example
+    /// `myapp` so `myapp://path` opens the app at that route. Absent when the
+    /// app registers no scheme.
+    pub scheme: Option<String>,
+    /// The initial window width in pixels. Absent uses the default.
+    pub width: Option<f64>,
+    /// The initial window height in pixels. Absent uses the default.
+    pub height: Option<f64>,
 }
 
 /// The UI build path an application uses.
@@ -615,6 +626,14 @@ struct RawManifest {
     dependencies: BTreeMap<String, RawDependency>,
     platforms: Option<RawPlatforms>,
     native: Option<RawNative>,
+    capabilities: Option<RawCapabilities>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapabilities {
+    #[serde(default)]
+    uses: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -633,6 +652,9 @@ struct RawProject {
 struct RawUi {
     framework: String,
     icon: Option<String>,
+    scheme: Option<String>,
+    width: Option<f64>,
+    height: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -729,6 +751,10 @@ impl RawManifest {
             .native
             .map(|raw| build_native(raw, source))
             .transpose()?;
+        let capabilities = self
+            .capabilities
+            .map(|raw| raw.uses)
+            .unwrap_or_default();
 
         if is_application {
             let project = build_project(self.project.unwrap(), source)?;
@@ -747,6 +773,7 @@ impl RawManifest {
                 dependencies,
                 platforms,
                 native,
+                capabilities,
             }));
         }
 
@@ -811,10 +838,39 @@ fn build_ui(raw: RawUi, source: &Path) -> Result<Ui, ConfigError> {
             ),
         )
     })?;
+    let scheme = raw
+        .scheme
+        .map(|scheme| validate_url_scheme(scheme, source))
+        .transpose()?;
     Ok(Ui {
         framework,
         icon: raw.icon.map(PathBuf::from),
+        scheme,
+        width: raw.width,
+        height: raw.height,
     })
+}
+
+/// Validate a custom URL scheme against the RFC 3986 grammar: a leading letter
+/// followed by letters, digits, and any of `+`, `-`, `.`. The scheme is
+/// lowercased so it registers consistently across platforms.
+fn validate_url_scheme(scheme: String, source: &Path) -> Result<String, ConfigError> {
+    let valid_start = scheme
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic());
+    let valid_body = scheme
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'));
+    if !valid_start || !valid_body {
+        return Err(ConfigError::invalid(
+            source,
+            format!(
+                "invalid ui.scheme '{scheme}'; a URL scheme starts with a letter and uses only letters, digits, '+', '-', and '.'"
+            ),
+        ));
+    }
+    Ok(scheme.to_ascii_lowercase())
 }
 
 fn build_package(raw: RawPackage, source: &Path) -> Result<PackageMeta, ConfigError> {
@@ -977,4 +1033,34 @@ fn parse_version_req(text: &str, field: &str, source: &Path) -> Result<VersionRe
             format!("invalid version requirement in {field}: {err}"),
         )
     })
+}
+
+#[cfg(test)]
+mod scheme_tests {
+    use super::validate_url_scheme;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_valid_schemes_and_lowercases() {
+        let path = Path::new("peko.toml");
+        assert_eq!(
+            validate_url_scheme("MyApp".to_owned(), path).unwrap(),
+            "myapp"
+        );
+        assert_eq!(
+            validate_url_scheme("peko+deep.link-1".to_owned(), path).unwrap(),
+            "peko+deep.link-1"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_schemes() {
+        let path = Path::new("peko.toml");
+        // A leading digit, a space, an underscore, and an empty string are all
+        // outside the URL-scheme grammar.
+        assert!(validate_url_scheme("1app".to_owned(), path).is_err());
+        assert!(validate_url_scheme("my app".to_owned(), path).is_err());
+        assert!(validate_url_scheme("my_app".to_owned(), path).is_err());
+        assert!(validate_url_scheme(String::new(), path).is_err());
+    }
 }

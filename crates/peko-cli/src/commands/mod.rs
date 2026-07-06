@@ -88,6 +88,14 @@ commands! {
     whoami     => "print the identity behind the stored platform session",
 }
 
+/// The devtools window shown by `peko run --devtools`. A helper module rather
+/// than a subcommand, driven from `run`.
+pub mod devtools;
+
+/// The devtools window's client of the running app's bridge, for the
+/// interactive console and view source.
+pub mod bridge_client;
+
 /// Look up a command by name. Returns `None` for unknown commands.
 pub fn lookup(name: &str) -> Option<&'static Command> {
     ALL_COMMANDS.iter().find(|c| c.name == name)

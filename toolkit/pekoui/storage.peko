@@ -1,0 +1,117 @@
+//! pekoui::storage: a per-app key/value store persisted as a JSON file.
+//!
+//! Values are JSON, held in memory and written to storage.json in the app data
+//! directory on every change. Backs the storage.* bridge capability
+//! (get/set/remove/keys/clear).
+
+import paths;
+import std::fs;
+import std::json;
+
+/// A per-app key/value store. Keys are strings; values are arbitrary JSON kept
+/// as their text form.
+[public] class Storage {
+    [private] path: string
+    [private] data: Map<string, string>
+
+    /// Opens the store for the current app, loading any persisted entries.
+    constructor() {
+        let dir: string = paths::app_data_dir()
+        this.path = `${dir}/storage.json`
+        this.data = new Map<string, string>()
+        this.load()
+    }
+
+    /// The stored value for key as JSON text, or the literal null when absent.
+    [public] fn get(key: string) => string {
+        let value: string? = this.data.get(key)
+        if !value.is_value() {
+            return `null`
+        }
+        return value.unwrap()
+    }
+
+    /// Stores value, given as JSON text, under key.
+    [mutates] fn set(key: string, value_json: string) {
+        this.data.set(key, value_json)
+        this.persist()
+    }
+
+    /// Removes key.
+    [mutates] fn remove(key: string) {
+        this.data.remove(key)
+        this.persist()
+    }
+
+    /// A JSON array of the stored keys.
+    [public] fn keys() => string {
+        let keys: Array<string> = this.data.key_list()
+        let count: number = keys.size()
+        let builder: StringBuilder = new StringBuilder()
+        builder.append("[")
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            if index > 0 {
+                builder.append(",")
+            }
+            builder.append(new json::JsonString(keys[index]).to_string())
+            index = index + one
+        }
+        builder.append("]")
+        return builder.build()
+    }
+
+    /// Removes every entry.
+    [mutates] fn clear() {
+        this.data = new Map<string, string>()
+        this.persist()
+    }
+
+    /// Loads persisted entries from disk into memory.
+    [mutates] fn load() {
+        if !fs::exists(this.path) {
+            return
+        }
+        let text: string? = fs::read_file(this.path)
+        if !text.is_value() {
+            return
+        }
+        let value: json::JsonValue = json::parse(text.unwrap())
+        if value.kind() != "object" {
+            return
+        }
+        let object: json::JsonObject = danger_cast<json::JsonObject>(value)
+        let keys: Array<string> = object.entries.key_list()
+        let count: number = keys.size()
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            let key: string = keys[index]
+            this.data.set(key, object.get(key).unwrap().to_string())
+            index = index + one
+        }
+    }
+
+    /// Writes the current entries to disk as a JSON object.
+    [private] fn persist() {
+        let keys: Array<string> = this.data.key_list()
+        let count: number = keys.size()
+        let builder: StringBuilder = new StringBuilder()
+        builder.append("{")
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            if index > 0 {
+                builder.append(",")
+            }
+            let key: string = keys[index]
+            builder.append(new json::JsonString(key).to_string())
+            builder.append(":")
+            builder.append(this.data.get(key).unwrap())
+            index = index + one
+        }
+        builder.append("}")
+        fs::write_file(this.path, builder.build())
+    }
+}

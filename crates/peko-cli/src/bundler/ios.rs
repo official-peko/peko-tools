@@ -115,7 +115,7 @@ pub fn bundle(
 
     progress.tick("iOS: compiling arm64 binary");
     let arm_target = PekoTarget::new(OperatingSystem::IOS, Architecture::Arm, false);
-    let (_, arm_diagnostics) = execution::incremental::compile_project(
+    let arm_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         arm_target,
@@ -124,9 +124,8 @@ pub fn bundle(
         false,
         Vec::new(),
         None,
-        None,
-        None,
         Some(entitlements.clone()),
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = arm_diagnostics {
@@ -136,7 +135,7 @@ pub fn bundle(
     if !release {
         progress.tick("iOS: compiling x86_64 simulator binary");
         let x86_64_target = PekoTarget::new(OperatingSystem::IOS, Architecture::X86_64, false);
-        let (_, x86_64_diagnostics) = execution::incremental::compile_project(
+        let x86_64_diagnostics = execution::incremental::compile_project(
             cli_info.get_peko_root(),
             project,
             x86_64_target,
@@ -145,9 +144,8 @@ pub fn bundle(
             false,
             Vec::new(),
             None,
-            None,
-            None,
             Some(entitlements.clone()),
+            !cli_info.flags.has_flag("release"),
             progress,
         )?;
         if let Some(diagnostics) = x86_64_diagnostics {

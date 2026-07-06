@@ -164,7 +164,7 @@ impl ModuleManager for PekoCodegenContext {
                 .variable_value
                 .contains_key(&to_uuid)
             {
-                let (qualified_name, external, variable_type_inner) = {
+                let (qualified_name, external, mut variable_pointer_type) = {
                     let variable = variable.read().unwrap();
                     (
                         variable.qualified_name.clone(),
@@ -172,6 +172,15 @@ impl ModuleManager for PekoCodegenContext {
                         variable.variable_type.clone(),
                     )
                 };
+                // The re-published value is a pointer to the global's storage,
+                // the same form a local global's value carries (see
+                // `create_named_global`, which adds one array level). Without
+                // this, loading the imported reference dereferences one level
+                // too far: for a managed pointer type like `string` the loaded
+                // type collapses to its pointee (`char`), so the importing
+                // module resolves the wrong overloads and reads garbage.
+                variable_pointer_type.array_depth += 1;
+
                 let variable_qualified_name =
                     cstr(qualified_name.as_ref().unwrap().to_string(!external));
 
@@ -189,7 +198,7 @@ impl ModuleManager for PekoCodegenContext {
                         core::LLVMSetExternallyInitialized(llvm_value, 1);
                         llvm_value
                     },
-                    variable_type_inner,
+                    variable_pointer_type,
                 );
 
                 variable

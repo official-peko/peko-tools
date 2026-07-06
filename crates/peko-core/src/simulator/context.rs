@@ -96,6 +96,12 @@ pub struct PekoSimulatorContext {
     /// than reported in their original location.
     pub minified_import_errors: bool,
 
+    /// When `true`, a function declaration registers its signature but skips
+    /// simulating its body. The header pass sets this so every function in a
+    /// module is registered before any body is checked, which lets a function
+    /// call another declared later in the same module.
+    pub declaring_signatures_only: bool,
+
     /// Diagnostics accumulated during simulation.
     pub diagnostics: diagnostics::DiagnosticList,
 
@@ -312,6 +318,7 @@ impl PekoSimulatorContext {
 
         PekoSimulatorContext {
             minified_import_errors: false,
+            declaring_signatures_only: false,
             diagnostics: diagnostics::DiagnosticList::new(),
             external_modules: HashMap::new(),
             target,
@@ -1125,55 +1132,61 @@ impl PekoSimulatorContext {
             return available_symbols;
         }
 
-        // Otherwise, the first segment must be a top-level module
-        // (e.g. an imported package).
-        if self
+        // Otherwise, resolve the first segment as a module: an alias bound in
+        // the current module (`import pekoui as ui`), or a top-level module by
+        // name (`import pekoui`). With package memoization a reused package
+        // stays in top_level_modules under its own name while the alias lives
+        // only in the importing module's module_aliases, so both are checked.
+        let module_start = self
             .module_context
-            .top_level_modules
-            .contains_key(first_name)
-        {
-            let mut module_referenced = self.module_context.top_level_modules[first_name].clone();
+            .current_module()
+            .read()
+            .unwrap()
+            .module_aliases
+            .get(first_name)
+            .cloned()
+            .or_else(|| self.module_context.top_level_modules.get(first_name).cloned());
 
+        if let Some(mut module_referenced) = module_start {
             // Descend into submodules.
             let mut found = true;
             while !module_path.is_empty() {
                 let current_module_to_find = module_path.remove(0);
-
-                found = module_referenced
-                    .as_ref()
+                let child = module_referenced
                     .read()
                     .unwrap()
                     .modules
-                    .contains_key(current_module_to_find);
-                if module_referenced
-                    .clone()
-                    .as_ref()
-                    .read()
-                    .unwrap()
-                    .modules
-                    .contains_key(current_module_to_find)
-                {
-                    module_referenced = module_referenced.clone().as_ref().read().unwrap().modules
-                        [current_module_to_find]
-                        .clone();
-                }
-
-                if !found {
-                    break;
+                    .get(current_module_to_find)
+                    .cloned();
+                match child {
+                    Some(child) => module_referenced = child,
+                    None => {
+                        found = false;
+                        break;
+                    }
                 }
             }
 
-            // If found, surface the resolved module's own declarations. As in
-            // the scope-tree branch above, a symbol whose start or end lies in
-            // another file was pulled in by an import and is not a member of
-            // this module.
+            // Surface the resolved module's own declarations plus its exported
+            // submodules. A module-kind symbol is a member only when it is an
+            // actual submodule (registered by `export`); a plain `import` alias
+            // is not, so it is dropped. A non-module symbol whose file differs
+            // from this module's was pulled in by an unpack and is not a member.
             if found {
-                let module_scope = module_referenced.as_ref().read().unwrap().scope.clone();
-                let module_own_file = module_scope.as_ref().read().unwrap().end.file.clone();
-                for (_, symbol) in &module_scope.as_ref().read().unwrap().symbols {
-                    if symbol.get_kind() == "module"
-                        || symbol.get_start().file != module_own_file
-                    {
+                let module = module_referenced.read().unwrap();
+                let module_scope = module.scope.clone();
+                let submodules: std::collections::HashSet<String> =
+                    module.modules.keys().cloned().collect();
+                drop(module);
+
+                let scope = module_scope.read().unwrap();
+                let module_own_file = scope.end.file.clone();
+                for (_, symbol) in &scope.symbols {
+                    if symbol.get_kind() == "module" {
+                        if !submodules.contains(&symbol.get_name()) {
+                            continue;
+                        }
+                    } else if symbol.get_start().file != module_own_file {
                         continue;
                     }
                     available_symbols.push(symbol.clone());
@@ -1904,7 +1917,7 @@ impl
     ) -> Option<SimulatorClass> {
         // The template carries its source AST; a non-template class cannot be
         // instantiated.
-        let source = generic.source_class.clone()?;
+        let source = generic.source_class.as_deref().cloned()?;
 
         let mut type_parameters_expanded = Vec::new();
         let mut name_parts: Vec<String> = Vec::new();
@@ -2051,12 +2064,26 @@ impl
             types::PekoType::from_string(&function_name.to_string(), String::new());
         function_name_type = self.expand_type(&function_name_type)?;
 
-        // Walk the module path to find the function's defining module.
-        let mut next_module =
-            self.module_context.top_level_modules[&function_name_type.module_names()[0]].clone();
-        for i in 1..function_name_type.module_names().len() {
-            let child =
-                next_module.read().unwrap().modules[&function_name_type.module_names()[i]].clone();
+        // Walk the module path to find the function's defining module. The
+        // first segment may be a per-file alias (`import pekoui as ui`) bound in
+        // the current module, or a top-level module by name.
+        let module_names = function_name_type.module_names();
+        let mut next_module = self
+            .module_context
+            .current_module()
+            .read()
+            .unwrap()
+            .module_aliases
+            .get(&module_names[0])
+            .cloned()
+            .or_else(|| self.module_context.top_level_modules.get(&module_names[0]).cloned())?;
+        for module_name in &module_names[1..] {
+            let child = next_module
+                .read()
+                .unwrap()
+                .modules
+                .get(module_name)
+                .cloned()?;
             next_module = child;
         }
 

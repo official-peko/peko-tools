@@ -270,6 +270,11 @@ pub trait AnalysisEngine: Send + Sync + 'static {
     /// Called once during LSP initialization.
     fn update_project_root(&mut self, path: &Path);
 
+    /// Preload and memoize the project's packages (standard library and
+    /// dependencies) so later requests reuse the loaded modules. Expensive, so
+    /// the server runs it off the initialize path, on a background task.
+    fn preload_packages(&mut self);
+
     /// Called when a file is opened or its content changes. The engine should
     /// store the text, invalidate caches, and kick off whatever background
     /// indexing it needs.

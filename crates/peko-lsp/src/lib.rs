@@ -1,26 +1,29 @@
-//! Peko Language Server entry point.
+//! Peko Language Server.
 //!
-//! Boots the tokio runtime, sets up tracing to stderr (so it does not corrupt
-//! the JSON-RPC stream on stdout), and hands the rest of the lifecycle to
-//! `tower_lsp_server::Server`.
+//! The analysis engine and LSP backend, exposed as a library so the `peko`
+//! CLI can run the server in-process as `peko lsp`. The server speaks LSP over
+//! stdio: it reads requests on stdin and writes the JSON-RPC stream on stdout,
+//! so nothing else may write to stdout while it runs.
 #![allow(clippy::too_many_arguments)]
 
-mod analyzer;
-mod server;
+pub mod analyzer;
+pub mod server;
 
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use server::backend::Backend;
 
-#[tokio::main]
-async fn main() {
-    // LSP clients communicate over stdio. Tracing must go to stderr or it
-    // would corrupt the JSON-RPC stream that the editor reads on stdout.
-    fmt()
+/// Run the language server over stdio until the client disconnects.
+///
+/// Tracing is routed to stderr so it does not corrupt the JSON-RPC stream on
+/// stdout. Installing the tracing subscriber is best-effort: a caller that has
+/// already set a global subscriber keeps its own.
+pub async fn serve() {
+    let _ = fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
-        .init();
+        .try_init();
 
     tracing::info!("starting Peko language server");
 

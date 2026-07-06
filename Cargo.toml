@@ -12,6 +12,7 @@ repository = "https://github.com/peko-lang/peko"
 [workspace.dependencies]
 peko-core = { version = "1.0.0", path = "crates/peko-core" }
 peko-llvm = { version = "1.0.0", path = "crates/peko-llvm" }
+peko-lsp = { version = "1.0.0", path = "crates/peko-lsp" }
 
 tokio = { version = "1.47" }
 thiserror = "2"

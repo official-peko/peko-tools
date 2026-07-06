@@ -1,0 +1,144 @@
+//! pekoui::keychain: a per-app secret store using authenticated encryption.
+//!
+//! Secrets are encrypted with libsodium secretbox under a key kept in the app
+//! data directory. This is the portable encrypted-file fallback for platforms
+//! or builds without an OS keychain: the key file sits beside the data, so it
+//! guards against casual reading rather than a determined local attacker. Backs
+//! the keychain.* bridge capability (get/set/remove).
+
+import paths;
+import std::fs;
+import std::json;
+import std::crypto;
+
+/// A per-app secret store. Each secret is stored as its nonce and ciphertext,
+/// base64 encoded and joined with a colon.
+[public] class Keychain {
+    [private] data_path: string
+    [private] key_path: string
+    [private] key: string
+    [private] data: Map<string, string>
+
+    /// Opens the store for the current app, loading the encryption key and any
+    /// persisted secrets.
+    constructor() {
+        let dir: string = paths::app_data_dir()
+        this.data_path = `${dir}/keychain.json`
+        this.key_path = `${dir}/keychain.key`
+        this.key = this.load_or_create_key()
+        this.data = new Map<string, string>()
+        this.load()
+    }
+
+    /// Stores secret under name.
+    [mutates] fn set(name: string, secret: string) {
+        let nonce: string = crypto::secretbox_nonce()
+        let cipher: string = crypto::secretbox_encrypt(secret, nonce, this.key)
+        let encoded: string = `${crypto::to_base64(nonce)}:${crypto::to_base64(cipher)}`
+        this.data.set(name, encoded)
+        this.persist()
+    }
+
+    /// The secret under name as a JSON string, or the literal null when absent
+    /// or when decryption fails.
+    [public] fn get(name: string) => string {
+        let stored: string? = this.data.get(name)
+        if !stored.is_value() {
+            return `null`
+        }
+        let encoded: string = stored.unwrap()
+        let separator: number = encoded.index_of(":")
+        let zero: number = 0
+        if separator < zero {
+            return `null`
+        }
+        let one: number = 1
+        let nonce_b64: string = encoded.substring(0, separator)
+        let cipher_b64: string = encoded.substring(separator + one, encoded.size())
+        let nonce: string? = crypto::from_base64(nonce_b64)
+        let cipher: string? = crypto::from_base64(cipher_b64)
+        if !nonce.is_value() {
+            return `null`
+        }
+        if !cipher.is_value() {
+            return `null`
+        }
+        let plain: string? = crypto::secretbox_decrypt(cipher.unwrap(), nonce.unwrap(), this.key)
+        if !plain.is_value() {
+            return `null`
+        }
+        return new json::JsonString(plain.unwrap()).to_string()
+    }
+
+    /// Removes the secret under name.
+    [mutates] fn remove(name: string) {
+        this.data.remove(name)
+        this.persist()
+    }
+
+    /// Reads the base64 key file, creating a fresh key when none exists.
+    [private] fn load_or_create_key() => string {
+        if fs::exists(this.key_path) {
+            let stored: string? = fs::read_file(this.key_path)
+            if stored.is_value() {
+                let decoded: string? = crypto::from_base64(stored.unwrap())
+                if decoded.is_value() {
+                    return decoded.unwrap()
+                }
+            }
+        }
+        let fresh: string = crypto::secretbox_keygen()
+        fs::write_file(this.key_path, crypto::to_base64(fresh))
+        return fresh
+    }
+
+    /// Loads persisted secrets from disk into memory.
+    [mutates] fn load() {
+        if !fs::exists(this.data_path) {
+            return
+        }
+        let text: string? = fs::read_file(this.data_path)
+        if !text.is_value() {
+            return
+        }
+        let value: json::JsonValue = json::parse(text.unwrap())
+        if value.kind() != "object" {
+            return
+        }
+        let object: json::JsonObject = danger_cast<json::JsonObject>(value)
+        let names: Array<string> = object.entries.key_list()
+        let count: number = names.size()
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            let name: string = names[index]
+            let stored: json::JsonValue = object.get(name).unwrap()
+            if stored.kind() == "string" {
+                this.data.set(name, danger_cast<json::JsonString>(stored).get())
+            }
+            index = index + one
+        }
+    }
+
+    /// Writes the current secrets to disk as a JSON object of encoded strings.
+    [private] fn persist() {
+        let names: Array<string> = this.data.key_list()
+        let count: number = names.size()
+        let builder: StringBuilder = new StringBuilder()
+        builder.append("{")
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            if index > 0 {
+                builder.append(",")
+            }
+            let name: string = names[index]
+            builder.append(new json::JsonString(name).to_string())
+            builder.append(":")
+            builder.append(new json::JsonString(this.data.get(name).unwrap()).to_string())
+            index = index + one
+        }
+        builder.append("}")
+        fs::write_file(this.data_path, builder.build())
+    }
+}

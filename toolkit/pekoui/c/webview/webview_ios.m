@@ -123,6 +123,41 @@ static PekoWebView *g_webview = nil;
 
 @end
 
+/* A launch or activation URL is handed to the deep-link layer, which stores the
+ * route for the client SDK to fetch once the bridge connects. */
+extern void peko_deeplink_ios_deliver(const char *url);
+
+/* Deliver a deep-link URL: store it for the connect-time fetch (covers a cold
+ * launch, where the page is not loaded yet), and, when the page is already
+ * loaded, push the route straight into it so a URL that arrives after connect
+ * still navigates. */
+static void peko_ios_deliver_url(NSURL *url) {
+    if (!url) {
+        return;
+    }
+    NSString *full = [url absoluteString];
+    peko_deeplink_ios_deliver([full UTF8String]);
+
+    NSRange separator = [full rangeOfString:@"://"];
+    NSString *route = (separator.location != NSNotFound)
+                          ? [full substringFromIndex:separator.location + separator.length]
+                          : full;
+    if (![route hasPrefix:@"/"]) {
+        route = [@"/" stringByAppendingString:route];
+    }
+
+    if (g_webview && g_webview.web_view) {
+        NSString *escaped =
+            [[route stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+        NSString *js = [NSString
+            stringWithFormat:@"window.__peko_deeplink&&window.__peko_deeplink(\"%@\")", escaped];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [g_webview.web_view evaluateJavaScript:js completionHandler:nil];
+        });
+    }
+}
+
 /* The app delegate builds the window around the singleton web view at launch. */
 @interface PekoAppDelegate : UIResponder <UIApplicationDelegate>
 @property(nonatomic, strong) UIWindow *window;
@@ -132,6 +167,13 @@ static PekoWebView *g_webview = nil;
 
 - (BOOL)application:(UIApplication *)application
     didFinishLaunchingWithOptions:(NSDictionary *)options {
+    // A cold launch through a registered-scheme URL carries it in the launch
+    // options; hand it to the deep-link layer as the launch route.
+    NSURL *launch_url = options[UIApplicationLaunchOptionsURLKey];
+    if (launch_url) {
+        peko_ios_deliver_url(launch_url);
+    }
+
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
 
     UIViewController *root = [[UIViewController alloc] init];
@@ -157,6 +199,16 @@ static PekoWebView *g_webview = nil;
 
     self.window.rootViewController = root;
     [self.window makeKeyAndVisible];
+    return YES;
+}
+
+/* A URL opened while the app runs is handed to the deep-link layer too. */
+- (BOOL)application:(UIApplication *)application
+            openURL:(NSURL *)url
+            options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options {
+    (void)application;
+    (void)options;
+    peko_ios_deliver_url(url);
     return YES;
 }
 
@@ -323,6 +375,17 @@ void peko_webview_maximize(webview_t w) {
 
 void peko_webview_close(webview_t w) {
     (void)w;
+}
+
+/* A view fills the screen on iOS with no native window controls. */
+void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
+    (void)w;
+    (void)hidden;
+}
+
+int peko_webview_has_native_window_controls(webview_t w) {
+    (void)w;
+    return 0;
 }
 
 #endif /* __APPLE__ && TARGET_OS_IPHONE */

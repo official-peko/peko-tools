@@ -224,6 +224,10 @@ pub struct ImportStatementAST {
     pub import_as: Option<PositionedValue<String>>,
     pub symbols_to_unpack: Vec<UnpackItem>,
     pub module_version: Option<PositionedValue<String>>,
+    /// An `export` re-exports the module as a submodule of the current one so a
+    /// package entry (lib.peko) exposes it as `package::submodule`. A plain
+    /// `import` leaves this false.
+    pub is_export: bool,
 }
 
 impl Spanned for ImportStatementAST {

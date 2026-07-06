@@ -77,6 +77,7 @@ fn default_imports() -> Vec<PekoAST> {
             alias.map(no_position),
             unpack,
             Option::None,
+            false,
         ))
     }
 

@@ -1092,7 +1092,17 @@ impl PekoParser {
         if self.expect_token_value("(", "danger_cast value") {
             self.tokens.increase_index();
         }
+        // The opening paren was consumed above, so parse the value with
+        // count_parens set. The value's own parens (a nested call such as
+        // `mod::f(x).to_raw()`) balance against each other, and the closing
+        // danger_cast paren ends the value. Preserving an outer count_parens
+        // keeps a danger_cast inside an argument list working.
+        let was_count_parens = self.has_state("count_parens");
+        self.set_state("count_parens");
         let value = self.parse();
+        if !was_count_parens {
+            self.remove_state("count_parens");
+        }
         if self.expect_token_value(")", "danger_cast value") {
             self.tokens.increase_index();
         }
@@ -1116,7 +1126,16 @@ impl PekoParser {
         if self.expect_token_value("(", "constant value") {
             self.tokens.increase_index();
         }
+        // Parse the value with count_parens set: the opening paren was consumed
+        // above, so the value's own nested parens balance against each other and
+        // the closing constant paren ends it. Preserving an outer count_parens
+        // keeps a constant inside an argument list working.
+        let was_count_parens = self.has_state("count_parens");
+        self.set_state("count_parens");
         let value = self.parse();
+        if !was_count_parens {
+            self.remove_state("count_parens");
+        }
         if self.expect_token_value(")", "constant value") {
             self.tokens.increase_index();
         }
@@ -2702,9 +2721,14 @@ impl PekoParser {
                     self.remove_state("skip_accessors");
                 }
 
-                // `[index]` access.
+                // `[index]` access. A `[` that begins a new line is a new
+                // statement (for example the next declaration's visibility
+                // block), not a subscript, so the postfix only applies when
+                // the reference and the `[` sit on the same line.
                 lexer::TokenType::LBracket => {
-                    if self.has_state("skip_accessors") {
+                    if self.has_state("skip_accessors")
+                        || self.tokens.get_token_backward(1).has_trailing_newline()
+                    {
                         break;
                     }
 
@@ -3114,7 +3138,7 @@ impl PekoParser {
 
     /// Parses an `import` statement, including any unpack list, version pin,
     /// and `as` alias.
-    pub fn parse_import(&mut self) -> ImportStatementAST {
+    pub fn parse_import(&mut self, is_export: bool) -> ImportStatementAST {
         let starting_position = self.get_current_position();
 
         self.tokens.increase_index();
@@ -3190,6 +3214,7 @@ impl PekoParser {
             import_as,
             symbols_to_unwrap,
             module_version,
+            is_export,
         )
     }
 
@@ -3974,9 +3999,15 @@ impl PekoParser {
                     previous_was_value = true;
                 }
 
-                // `[index]` suffix on the most recent operand.
+                // `[index]` suffix on the most recent operand. A `[` that
+                // begins a new line is a new statement (for example the
+                // visibility block of the next declaration), not a subscript
+                // of the previous value, so the postfix only applies when the
+                // operand and the `[` sit on the same line.
                 lexer::TokenType::LBracket
-                    if state == ExpressionOperatorType::Binary && !operand_stack.is_empty() =>
+                    if state == ExpressionOperatorType::Binary
+                        && !operand_stack.is_empty()
+                        && !self.tokens.get_token_backward(1).has_trailing_newline() =>
                 {
                     self.tokens.increase_index();
 
@@ -4184,7 +4215,8 @@ impl PekoParser {
                 PekoAST::ModuleCreation(module_declaration)
             }
 
-            lexer::TokenType::Import => PekoAST::ImportStatement(self.parse_import()),
+            lexer::TokenType::Import => PekoAST::ImportStatement(self.parse_import(false)),
+            lexer::TokenType::Export => PekoAST::ImportStatement(self.parse_import(true)),
             lexer::TokenType::Link => PekoAST::LinkStatement(self.parse_link()),
             lexer::TokenType::Style => PekoAST::StyleStatement(self.parse_style()),
 

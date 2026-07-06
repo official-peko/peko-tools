@@ -19,7 +19,7 @@ include = []
 driver = "ld64.lld"
 lib_paths = []
 libs = ["objc", "c++", "c"]
-frameworks = ["Security", "Foundation", "WebKit", "UIKit", "CoreGraphics"]
+frameworks = ["Security", "Foundation", "UIKit", "CoreGraphics"]
 objects = ["../openssl_libs/libssl.a", "../openssl_libs/libcrypto.a"]
 flags = [
   "-w",

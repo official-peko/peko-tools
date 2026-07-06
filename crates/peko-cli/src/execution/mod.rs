@@ -26,7 +26,7 @@ use peko_core::ExternalModuleInfo;
 use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::{PositionData, PositionedValue, UnpackItem};
 use peko_core::asts::statements::ImportStatementAST;
-use peko_core::diagnostics::DiagnosticList;
+use peko_core::diagnostics::{DiagnosticList, DiagnosticType, PekoDiagnostic};
 use peko_core::error::PekoResult;
 use peko_core::lexer::TokenList;
 use peko_core::parser::PekoParser;
@@ -83,6 +83,7 @@ fn default_imports() -> Vec<PekoAST> {
             alias.map(no_position),
             unpack,
             Option::None,
+            false,
         ))
     }
 
@@ -92,6 +93,7 @@ fn default_imports() -> Vec<PekoAST> {
         import("std::runtime", Some("runtime"), Vec::new()),
         import("std::xml", Some("xml"), Vec::new()),
         import("std::json", Some("json"), Vec::new()),
+        import("std::bundle", Some("bundle"), Vec::new()),
     ]
 }
 
@@ -162,6 +164,55 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
     }
 
     modules
+}
+
+/// Parse a project component file into ASTs.
+///
+/// An FFI header (`.peko.h`) is parsed as a C interop surface and lowered to
+/// external Peko declarations, matching the import path so an incrementally
+/// recompiled header is handled the same way as on a full build. An ordinary
+/// source file is parsed with the default-import prelude.
+pub(super) fn parse_component_source(file: PathBuf) -> (Vec<PekoAST>, DiagnosticList) {
+    let raw_source = std::fs::read_to_string(&file).unwrap();
+
+    if !peko_core::ffi::is_ffi_header(&file) {
+        return parse_peko_source(file, raw_source);
+    }
+
+    let mut diagnostics = DiagnosticList::new();
+    let parsed = peko_core::ffi::parse_header(&raw_source);
+    for error in &parsed.errors {
+        diagnostics.report_diagnostic(PekoDiagnostic::new(
+            PositionData::new(1, 0, 1, file.clone()),
+            PositionData::new(1, 0, 1, file.clone()),
+            format!("FFI header `{}`: {error}", file.display()),
+            DiagnosticType::Error,
+            file.clone(),
+        ));
+    }
+
+    // The lowered header is a list of `[external]` declarations, so it parses
+    // without the default-import prelude.
+    let source = peko_core::ffi::header_to_peko_source(&parsed);
+    let mut parser = PekoParser::new(TokenList::from_source(&source, &file), &file);
+    let mut asts = Vec::new();
+    while !parser.tokens.finished() || parser.has_pending() {
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+        if parser.tokens.finished() {
+            break;
+        }
+        asts.push(parser.parse());
+        if parser.tokens.current_token().equals(";") || parser.tokens.current_token().equals("}") {
+            parser.tokens.increase_index();
+        }
+    }
+    for diagnostic in parser.get_diagnostics().get_diagnostics() {
+        diagnostics.report_diagnostic(diagnostic.clone());
+    }
+
+    (asts, diagnostics)
 }
 
 /// Assign the lock-scoped external-module map onto a context's
@@ -436,18 +487,10 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
 /// the runtime defines so it can resolve cross-module symbols). The
 /// `main` module is removed from the returned map because the caller will
 /// be supplying its own.
-///
-/// `project_style_directory` is forwarded to
-/// [`PekoCodegenContext::compiled_styles_folder`] so cached SCSS output
-/// gets reused. `asset_debug_directory` is forwarded to
-/// [`PekoCodegenContext::asset_debug_folder`] so debug runs serve assets
-/// from that directory; pass `None` to serve assets from the bundle.
 #[allow(clippy::type_complexity)]
 pub fn load_required_packages(
     peko_root: &Path,
     target: PekoTarget,
-    project_style_directory: Option<PathBuf>,
-    asset_debug_directory: Option<PathBuf>,
 ) -> PekoResult<(IndexMap<String, Arc<RwLock<CodegenModule>>>, Vec<PathBuf>)> {
     let asts = default_imports();
 
@@ -458,8 +501,6 @@ pub fn load_required_packages(
         PathBuf::new(),
     );
     codegen_context.creating_required = true;
-    codegen_context.compiled_styles_folder = project_style_directory;
-    codegen_context.asset_debug_folder = asset_debug_directory;
 
     load_external_modules!(codegen_context, peko_root, Option::<&Path>::None);
     codegen_context.windowsgui = !target.console;
@@ -520,6 +561,13 @@ pub fn test(
     );
 
     load_external_modules!(simulator_context, peko_root, Some(&compilation_root));
+
+    // Header pass: register every top-level signature (functions, classes,
+    // traits, enums) before checking any body, so a declaration can reference
+    // another regardless of source order.
+    for ast in &asts {
+        PekoValueSimulator::declare(ast, &mut simulator_context);
+    }
 
     for ast in asts {
         ast.simulate(&mut simulator_context);

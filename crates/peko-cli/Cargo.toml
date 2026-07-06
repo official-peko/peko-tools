@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 peko-core = { workspace = true }
 peko-llvm = { workspace = true }
+peko-lsp = { workspace = true }
 
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
@@ -24,6 +25,7 @@ indexmap = { workspace = true }
 itertools = { workspace = true }
 
 console = "0.16"
+dialoguer = { version = "0.11", default-features = false }
 indicatif = "0.18"
 rustyline = "15"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
@@ -45,6 +47,9 @@ md5 = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 grass = "0.13"
 ctrlc = "3"
+notify = "6"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 apple-codesign = "0.29.0"
 keyring-core = "1.0.0"
 app-store-connect = "0.7.0"

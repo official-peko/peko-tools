@@ -171,16 +171,29 @@ impl LanguageServer for Backend {
         // marker, so a single folder is enough in most cases.
         // TODO: Iterate all workspace folders and pick the first one that
         // resolves to a Peko project.
-        if let Some(folder) = params
+        let workspace_root = params
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
-        {
+            .map(|folder| uri_to_path(&folder.uri));
+
+        if let Some(path) = &workspace_root {
             self.analysis
                 .write()
                 .await
                 .engine
-                .update_project_root(&uri_to_path(&folder.uri));
+                .update_project_root(path);
+        }
+
+        // Preload and memoize the project's packages on a background task so
+        // initialize returns immediately instead of blocking on the (multi-
+        // second) preload. Requests that arrive before it finishes load modules
+        // on demand; once it completes they reuse the memoized modules.
+        if workspace_root.is_some() {
+            let analysis = Arc::clone(&self.analysis);
+            tokio::task::spawn_blocking(move || {
+                analysis.blocking_write().engine.preload_packages();
+            });
         }
 
         Ok(InitializeResult {

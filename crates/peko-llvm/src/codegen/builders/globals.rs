@@ -203,15 +203,24 @@ impl GlobalBuilder for PekoCodegenContext {
         let entry_block = self.create_new_block(Some("entry".to_string()));
         self.goto_block_end(entry_block);
 
-        // Initialize the foundational modules' globals first, in this order, so
-        // later modules can rely on them. A module that declares no globals (and
-        // so has no `set_globals`) is simply skipped rather than required.
-        ["runtime", "core", "collections"]
+        // Initialize the foundational modules' globals first, in dependency
+        // order (core is the base; runtime and collections build on it), so
+        // later modules can rely on them. A module is imported either under an
+        // alias (`runtime`) or, when unpacked, under its canonical id
+        // (`std__core`), so both spellings of each set_globals name are
+        // matched. A module that declares no globals (and so has no
+        // `set_globals`) is simply skipped rather than required.
+        ["core", "runtime", "collections"]
             .iter()
             .for_each(|modname| {
-                let Some((index, _)) = global_sets.iter().find_position(|global_set| {
-                    global_set.as_str() == format!("{modname}::set_globals")
-                }) else {
+                let candidates = [
+                    format!("{modname}::set_globals"),
+                    format!("std__{modname}::set_globals"),
+                ];
+                let Some((index, _)) = global_sets
+                    .iter()
+                    .find_position(|global_set| candidates.iter().any(|c| c == *global_set))
+                else {
                     return;
                 };
                 let global_method = global_sets.remove(index);
@@ -269,38 +278,35 @@ impl GlobalBuilder for PekoCodegenContext {
         let globals_entry_block = self.create_new_block(Some("entry".to_string()));
         self.goto_block_end(globals_entry_block);
 
+        let bundle_info = self.bundle_info.clone();
+
         for (global, global_ast) in top_level_info.globals_info.globals_to_set {
             self.current_expected_type_options = Some(vec![global.variable_type.clone()]);
 
-            // Special-cased compiler-injected globals for the styles
-            // subsystem. When `compiled_styles_folder` is set, these two
-            // globals get fixed values rather than going through the AST.
-            let value = if self.compiled_styles_folder.is_some()
-                && global.variable_name == "ui::debug_styles_dir"
-            {
-                self.create_string(
-                    self.compiled_styles_folder
-                        .clone()
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
-                )
-            } else if (self.compiled_styles_folder.is_some()
-                && global.variable_name == "ui::debug_mode")
-                || (self.asset_debug_folder.is_some()
-                    && global.variable_name == "assets::asset_debug")
-            {
-                self.create_constant_boolean(true)
-            } else if self.asset_debug_folder.is_some()
-                && global.variable_name == "assets::asset_debug_dir"
-            {
-                self.create_cstring(self.asset_debug_folder.clone().unwrap().to_str().unwrap())
-            } else if self.application_id.is_some()
-                && global.variable_name == "storage::application_identifier"
-            {
-                self.create_cstring(self.application_id.clone().unwrap())
-            } else {
-                global_ast.build_value(self)
+            // Compiler-injected `bundle` module globals. When project
+            // metadata is present, these globals take fixed values from the
+            // manifest rather than the module's declared defaults. The value
+            // is boxed to the global's declared type by the shared step
+            // below, so a raw `i1` or `string` reconciles with `bool` /
+            // `string` as needed.
+            let injected = match &bundle_info {
+                Some(bundle) => match global.variable_name.as_str() {
+                    "bundle::name" => Some(self.create_string(bundle.name.clone())),
+                    "bundle::identifier" => Some(self.create_string(bundle.identifier.clone())),
+                    "bundle::app_id" => Some(self.create_string(bundle.app_id.clone())),
+                    "bundle::version" => Some(self.create_string(bundle.version.clone())),
+                    "bundle::framework" => Some(self.create_string(bundle.framework.clone())),
+                    "bundle::scheme" => Some(self.create_string(bundle.scheme.clone())),
+                    "bundle::window" => Some(self.create_string(bundle.window.clone())),
+                    "bundle::debug" => Some(self.create_constant_boolean(bundle.debug)),
+                    _ => None,
+                },
+                None => None,
+            };
+
+            let value = match injected {
+                Some(value) => value,
+                None => global_ast.build_value(self),
             };
 
             let (previous_line, previous_file) = self.track_call_position(

@@ -302,7 +302,8 @@ const ANDROID_MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="utf-8" stand
                  tools:replace="android:icon,android:theme,android:allowBackup,label"
                  android:icon="@mipmap/icon">
         <activity android:configChanges="keyboardHidden|orientation"
-                  android:name="android.app.NativeActivity"
+                  android:name="dev.peko.webview.PekoNativeActivity"
+                  android:launchMode="singleTop"
                   android:label="{name}"
                   android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="PekoApp"/>
@@ -310,7 +311,7 @@ const ANDROID_MANIFEST_XML: &str = r#"<?xml version="1.0" encoding="utf-8" stand
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-        </activity>
+{android_url_scheme}        </activity>
     </application>
 </manifest>
 "#;
@@ -333,6 +334,10 @@ const IOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <array><string>iPhoneOS</string></array>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>ITSAppUsesNonExemptEncryption</key><false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -370,7 +375,7 @@ const IOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>CFBundleIconName</key><string>AppIcon</string>
         </dict>
     </dict>
-</dict>
+{apple_url_scheme}</dict>
 </plist>
 "#;
 
@@ -442,17 +447,22 @@ const MACOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <key>CFBundleShortVersionString</key><string>{version}</string>
     <key>CFBundleVersion</key><string>{version}</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundleSupportedPlatforms</key>
     <array><string>MacOSX</string></array>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>ITSAppUsesNonExemptEncryption</key><false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
     <key>DTPlatformName</key><string>macosx</string>
     <key>DTSDKName</key><string>macosx26.2</string>
     <key>DTPlatformVersion</key><string>26.2</string>
-</dict>
+{apple_url_scheme}</dict>
 </plist>
 "#;
 
@@ -505,11 +515,54 @@ fn normalize_version(version: &str) -> String {
     }
 }
 
+/// The `CFBundleURLTypes` entry that registers a custom URL scheme in an
+/// Apple Info.plist, indented to sit inside the plist dictionary.
+fn apple_url_scheme_block(bundle_id: &str, scheme: &str) -> String {
+    format!(
+        "    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>{bundle_id}</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>{scheme}</string></array>
+        </dict>
+    </array>
+"
+    )
+}
+
+/// The VIEW `intent-filter` that registers a custom URL scheme in the Android
+/// manifest, indented to sit inside the launcher activity.
+fn android_url_scheme_block(scheme: &str) -> String {
+    format!(
+        "            <intent-filter>
+                <action android:name=\"android.intent.action.VIEW\"/>
+                <category android:name=\"android.intent.category.DEFAULT\"/>
+                <category android:name=\"android.intent.category.BROWSABLE\"/>
+                <data android:scheme=\"{scheme}\"/>
+            </intent-filter>
+"
+    )
+}
+
 /// Substitute the placeholders in a template with the actual project
-/// values.
-fn fill_template(template: &str, name: &str, bundle_id: &str, version: &str) -> String {
+/// values. `scheme` fills the URL-scheme blocks, which collapse to nothing
+/// when the app registers no scheme.
+fn fill_template(
+    template: &str,
+    name: &str,
+    bundle_id: &str,
+    version: &str,
+    scheme: Option<&str>,
+) -> String {
     let version = normalize_version(version);
+    let apple_url_scheme = scheme
+        .map(|scheme| apple_url_scheme_block(bundle_id, scheme))
+        .unwrap_or_default();
+    let android_url_scheme = scheme.map(android_url_scheme_block).unwrap_or_default();
     template
+        .replace("{apple_url_scheme}", &apple_url_scheme)
+        .replace("{android_url_scheme}", &android_url_scheme)
         .replace("{name}", name)
         .replace("{bundle_id}", bundle_id)
         .replace(
@@ -527,10 +580,11 @@ fn write_template(
     name: &str,
     bundle_id: &str,
     version: &str,
+    scheme: Option<&str>,
 ) -> BundleResult<()> {
     io_at(
         path,
-        fs::write(path, fill_template(template, name, bundle_id, version)),
+        fs::write(path, fill_template(template, name, bundle_id, version, scheme)),
     )
 }
 
@@ -565,6 +619,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
     let name = &project.name;
     let bundle_id = &ui_info.bundle_id;
     let version = &ui_info.version;
+    let scheme = ui_info.scheme.as_deref();
 
     // Android
     let android_folder = project_bundling_folder.join("android");
@@ -575,6 +630,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
     write_template(
         &android_folder.join("AndroidManifest.xml"),
@@ -582,6 +638,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
 
     // iOS
@@ -593,6 +650,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
     write_template(
         &ios_folder.join("app.entitlements"),
@@ -600,6 +658,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
     write_template(
         &ios_folder.join("PrivacyInfo.xcprivacy"),
@@ -607,6 +666,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
 
     // macOS
@@ -618,6 +678,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
     write_template(
         &macos_folder.join("PrivacyInfo.xcprivacy"),
@@ -625,6 +686,7 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
         name,
         bundle_id,
         version,
+        scheme,
     )?;
 
     Ok(())

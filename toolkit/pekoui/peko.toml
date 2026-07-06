@@ -1,0 +1,55 @@
+[package]
+name = "pekoui"
+version = "0.1.0"
+description = "The PekoUI framework: a native webview host and UI runtime."
+license = "MIT"
+authors = ["Preston Brown"]
+keywords = ["ui", "webview", "gui", "desktop", "pekoui"]
+categories = ["gui"]
+
+[lib]
+root = "lib.peko"
+
+# The desktop webview, compiled from C/C++/Objective-C source at build time.
+# Only a project that depends on pekoui compiles and links these, so a
+# command-line or non-UI binary never pulls in the platform WebView.
+[native]
+sources = [
+    "c/webview/webview.cc",
+    "c/webview/webview_bridge.c",
+    "c/webview/webview_ios.m",
+    "c/webview/webview_android.c",
+    "c/assets/peko_asset_server.c",
+    "c/assets/peko_asset_bytes.c",
+    "c/assets/peko_assets_apple.m",
+    "c/assets/peko_assets_android.c",
+    "c/assets/peko_assets_linux.c",
+    "c/assets/peko_assets_windows.c",
+    "c/appdir/peko_appdir.c",
+    "c/env/peko_env.c",
+    "c/menu/peko_menu_apple.m",
+    "c/menu/peko_menu_windows.c",
+    "c/menu/peko_menu_linux.c",
+    "c/menu/peko_menu_stub.c",
+    "c/deeplink/peko_deeplink_apple.m",
+    "c/deeplink/peko_deeplink_linux.c",
+    "c/deeplink/peko_deeplink_windows.c",
+    "c/deeplink/peko_deeplink_android.c",
+]
+include = []
+
+[native.flags]
+all = ["-O2", "-fno-strict-aliasing"]
+
+# The platform WebView frameworks, linked only into UI binaries. macOS adds
+# WebKit for the web engine and Cocoa for the AppKit window (Foundation and
+# libc++ come from the toolchain already). iOS adds WebKit for WKWebView
+# (UIKit and CoreGraphics come from the toolchain already). Linux adds the
+# WebKitGTK development libraries. Windows adds dwmapi for the transparent-
+# window system backdrop; WebView2 and user32 come from the loader and the
+# toolchain already.
+[native.link]
+linux = ["-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
+macos = ["-framework", "WebKit", "-framework", "Cocoa"]
+ios = ["-framework", "WebKit"]
+windows = ["dwmapi.lib", "comctl32.lib", "advapi32.lib"]

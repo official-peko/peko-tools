@@ -70,12 +70,17 @@ p_fn p_i32 peko_socket_local_port(p_i32 socket);
    success. */
 p_fn p_gcsafe p_i32 peko_accept_connection(p_i32 listen_socket, p_opaque handler, p_gc_opaque data);
 
-/* Accepts one WebSocket connection on listen_socket, performs the upgrade
-   handshake, and calls the message handler closure (function of (i32, cstr):
-   the client fd and the text frame) for each text frame. Returns 0 on a clean
-   close. send_text sends text as a frame on a client fd and returns the bytes
-   sent, or -1 on error. */
-p_fn p_gcsafe p_i32 peko_ws_accept_connection(p_i32 listen_socket, p_opaque message_handler, p_gc_opaque data);
+/* WebSocket server. accept returns the next client fd on listen_socket, or -1
+   on failure. serve performs the upgrade handshake on a client fd and calls the
+   handler closure (function of (i32 event, i32 fd, cstr text): event 0 open, 1
+   message, 2 close; text empty except for a message) until the connection
+   closes; run it on its own thread to serve many connections at once. Returns 0
+   on a clean close. accept_connection accepts then serves on the calling thread
+   for single-connection callers. send_text sends text as a frame on a client fd
+   and returns the bytes sent, or -1 on error. */
+p_fn p_gcsafe p_i32 peko_ws_accept(p_i32 listen_socket);
+p_fn p_gcsafe p_i32 peko_ws_serve(p_i32 client, p_opaque handler, p_gc_opaque data);
+p_fn p_gcsafe p_i32 peko_ws_accept_connection(p_i32 listen_socket, p_opaque handler, p_gc_opaque data);
 p_fn p_gcsafe p_i32 peko_ws_send_text(p_i32 socket, p_gc(p_i8) text);
 
 PEKO_END

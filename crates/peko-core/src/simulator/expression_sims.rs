@@ -2217,7 +2217,16 @@ impl PekoValueSimulator for ModuleAccessAST {
                         );
                         return simulator_context.create_error_value();
                     }
-                    return SimulatorValue::Value(types::PekoType::simple_type(enum_name));
+                    // Qualify the value's type with the module path to the enum
+                    // (`module::Enum`). A bare enum name does not resolve in the
+                    // importer, so the qualification lets it reconcile with the
+                    // bare parameter type declared in the enum's own module.
+                    let mut enum_type = types::PekoType::simple_type(enum_name);
+                    *enum_type.module_names_mut() = self.module_names[..i]
+                        .iter()
+                        .map(|module| module.value.clone())
+                        .collect();
+                    return SimulatorValue::Value(enum_type);
                 }
 
                 simulator_context

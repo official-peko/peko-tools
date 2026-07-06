@@ -40,7 +40,7 @@ use peko_core::execution::data_structures::ExecutionModule;
 use peko_core::target::PekoTarget;
 use peko_llvm::codegen::PekoValueBuilder;
 use peko_llvm::codegen::builders::prelude::GlobalBuilder;
-use peko_llvm::codegen::context::PekoCodegenContext;
+use peko_llvm::codegen::context::{BundleInfo, PekoCodegenContext};
 use peko_llvm::codegen::data_structures::CodegenModule;
 
 use crate::cli::reporting::ProgressSink;
@@ -153,9 +153,12 @@ impl ProjectFile {
         fileid_to_pathbuf(&self.file_id)
     }
 
-    /// Read the file's current bytes and md5-hash them.
+    /// Read the file's current bytes and md5-hash them. An unreadable file
+    /// (deleted between passes, a permissions or encoding problem) hashes as
+    /// empty rather than panicking, so it reads as changed and the next pass
+    /// recompiles or prunes it instead of crashing the build.
     pub fn generate_md5(&self) -> [u8; 16] {
-        md5_hash_string(&std::fs::read_to_string(self.get_path()).unwrap())
+        md5_hash_string(&std::fs::read_to_string(self.get_path()).unwrap_or_default())
     }
 }
 
@@ -332,13 +335,19 @@ impl ProjectIncrementalMap {
         false
     }
 
-    /// Check each tracked file's md5 against its saved digest, updating the
-    /// saved digest in place and returning the list of files that changed.
-    /// Identifies both source changes and stylesheet changes.
-    pub fn get_changed_files(&mut self) -> Vec<ProjectFile> {
+    /// Check each tracked file's md5 against its saved digest and return the
+    /// files that changed. Identifies both source changes and stylesheet
+    /// changes.
+    ///
+    /// Detection only: the saved digests are not advanced here. A changed
+    /// file's baseline is committed by `commit_hash` after it recompiles
+    /// cleanly, so a build that fails a recheck or a recompile leaves the
+    /// baseline untouched and the next build re-detects the change instead of
+    /// trusting a stale object that still references removed symbols.
+    pub fn get_changed_files(&self) -> Vec<ProjectFile> {
         let mut changed_files = Vec::new();
-        for (file_id, saved_hash) in self.file_hashes.clone() {
-            let Some(current_file) = self.files.iter().find(|file| file.file_id == file_id) else {
+        for (file_id, saved_hash) in &self.file_hashes {
+            let Some(current_file) = self.files.iter().find(|file| &file.file_id == file_id) else {
                 continue;
             };
             let current_hash = current_file.generate_md5();
@@ -347,40 +356,45 @@ impl ProjectIncrementalMap {
             if current_hash.as_slice() != saved_hash.as_slice() {
                 marked_changed = true;
                 changed_files.push(current_file.clone());
-                self.file_hashes.insert(file_id, current_hash.to_vec());
-                self.updated_hashmap = true;
             }
 
-            for style in &current_file.styles_to_watch.clone() {
-                // If the style file can't be read (deleted), record an
-                // empty hash and mark the file changed so the linker
-                // drops the stale state on the next pass.
+            for style in &current_file.styles_to_watch {
                 let style_source =
                     std::fs::read_to_string(fileid_to_pathbuf(style)).unwrap_or_default();
                 let current_style_hash = md5_hash_string(&style_source);
 
-                // A style with no recorded hash is newly watched: insert
-                // its hash and mark the owning file changed. Using `.get`
-                // (not indexing) avoids a panic when styles_to_watch has
-                // drifted ahead of file_hashes, which happens whenever a
-                // file gains a new style reference between builds.
+                // A style with no recorded hash is newly watched, so treat it
+                // as changed. Using `.get` (not indexing) avoids a panic when
+                // styles_to_watch has drifted ahead of file_hashes, which
+                // happens whenever a file gains a new style reference.
                 let style_differs = match self.file_hashes.get(style) {
                     Some(saved) => current_style_hash.as_slice() != saved.as_slice(),
                     None => true,
                 };
 
-                if style_differs {
-                    if !marked_changed {
-                        changed_files.push(current_file.clone());
-                        marked_changed = true;
-                    }
-                    self.file_hashes
-                        .insert(style.clone(), current_style_hash.to_vec());
-                    self.updated_hashmap = true;
+                if style_differs && !marked_changed {
+                    changed_files.push(current_file.clone());
+                    marked_changed = true;
                 }
             }
         }
         changed_files
+    }
+
+    /// Advance the saved digest for `file` (and its watched styles) to the
+    /// current on-disk content. Called only after `file` recompiles cleanly, so
+    /// the baseline always matches the object that was emitted; a file that
+    /// failed to recompile keeps its old digest and is re-detected next build.
+    pub fn commit_hash(&mut self, file: &ProjectFile) {
+        self.file_hashes
+            .insert(file.file_id.clone(), file.generate_md5().to_vec());
+        for style in &file.styles_to_watch {
+            let style_source =
+                std::fs::read_to_string(fileid_to_pathbuf(style)).unwrap_or_default();
+            self.file_hashes
+                .insert(style.clone(), md5_hash_string(&style_source).to_vec());
+        }
+        self.updated_hashmap = true;
     }
 
     /// Register a new file and its hash in the cache.
@@ -491,7 +505,13 @@ impl ProjectIncrementalMap {
         final_binary.extend([0; 8]);
 
         final_binary.extend("FILES".bytes());
-        final_binary.extend((self.files.len() as u32).to_be_bytes());
+        // The count must match the number of entries written below, which is
+        // every hash (source files and their watched styles), not just the
+        // source files. Writing self.files.len() here under-counts whenever a
+        // file has watched styles, so the reader stops early and silently drops
+        // the remaining hashes; a file whose hash is dropped is then never
+        // change-checked and its edits stop triggering a recompile.
+        final_binary.extend((self.file_hashes.len() as u32).to_be_bytes());
 
         for (file_id, file_hash) in &self.file_hashes {
             final_binary.extend((file_id.len() as u32).to_be_bytes());
@@ -762,6 +782,39 @@ impl ProjectIncrementalMap {
 // Orchestrators
 // ---------------------------------------------------------------------------
 
+/// Build the compile-time `bundle` metadata for a project. A UI project
+/// draws its identifier, version, app id, and framework from the manifest.
+/// A command-line project reports the `cli` framework with empty UI fields.
+fn bundle_info_for(project: &PekoProject, debug: bool) -> BundleInfo {
+    BundleInfo {
+        name: project.name.clone(),
+        identifier: project.identifier.clone(),
+        app_id: project.app_id.clone().unwrap_or_default(),
+        version: project.version.clone(),
+        framework: project
+            .ui_project_info
+            .as_ref()
+            .map(|ui| ui.framework.clone())
+            .unwrap_or_else(|| String::from("cli")),
+        scheme: project
+            .ui_project_info
+            .as_ref()
+            .and_then(|ui| ui.scheme.clone())
+            .unwrap_or_default(),
+        window: project
+            .ui_project_info
+            .as_ref()
+            .and_then(|ui| match (ui.width, ui.height) {
+                (Some(width), Some(height)) => {
+                    Some(format!("{}x{}", width as u32, height as u32))
+                }
+                _ => None,
+            })
+            .unwrap_or_default(),
+        debug,
+    }
+}
+
 /// First-build path: parse the entrypoint, codegen the whole project as
 /// one pass, emit object files, populate the incremental map.
 ///
@@ -775,9 +828,8 @@ fn initialize_incremental_for_target(
     target: PekoTarget,
     main_file: PathBuf,
     compilation_root: PathBuf,
-    compiled_styles_dir: Option<PathBuf>,
-    asset_debug_dir: Option<PathBuf>,
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
+    debug: bool,
     progress: &dyn ProgressSink,
 ) -> PekoResult<(PekoCodegenContext, DiagnosticList)> {
     progress.message("Compiling entrypoint");
@@ -789,11 +841,7 @@ fn initialize_incremental_for_target(
 
     let mut codegen_context =
         PekoCodegenContext::new(target, main_file.clone(), false, compilation_root.clone());
-    codegen_context.compiled_styles_folder = compiled_styles_dir.clone();
-    codegen_context.asset_debug_folder = asset_debug_dir;
-    if let Some(ui_info) = &project.ui_project_info {
-        codegen_context.application_id = Some(ui_info.bundle_id.clone());
-    }
+    codegen_context.bundle_info = Some(bundle_info_for(project, debug));
 
     if let Some(preloaded) = preloaded_modules {
         codegen_context.module_context.load_modules(preloaded);
@@ -848,11 +896,8 @@ fn initialize_incremental_for_target(
                 continue;
             }
 
-            let project_file = ProjectFile::from_top_level_module(
-                Arc::clone(&top_level_module),
-                true,
-                compiled_styles_dir.is_none(),
-            );
+            let project_file =
+                ProjectFile::from_top_level_module(Arc::clone(&top_level_module), true, true);
             if !diagnostics.has_errors() {
                 codegen_context.init_module_globals(&top_level_module);
                 top_level_module
@@ -884,8 +929,7 @@ fn initialize_incremental_for_target(
     }
 
     // Slow path: build a fresh incremental map from the codegen output.
-    let mut incremental_map =
-        ProjectIncrementalMap::new(&incremental_directory, compiled_styles_dir.is_none());
+    let mut incremental_map = ProjectIncrementalMap::new(&incremental_directory, true);
     for (modname, top_level) in &codegen_context.module_context.top_level_modules {
         if modname == "extern" {
             continue;
@@ -908,11 +952,8 @@ fn initialize_incremental_for_target(
             continue;
         }
 
-        let project_file = ProjectFile::from_top_level_module(
-            Arc::clone(&top_level_module),
-            true,
-            compiled_styles_dir.is_none(),
-        );
+        let project_file =
+            ProjectFile::from_top_level_module(Arc::clone(&top_level_module), true, true);
 
         if !diagnostics.has_errors() {
             codegen_context.init_module_globals(&top_level_module);
@@ -957,15 +998,9 @@ fn compile_component(
     component_file: ProjectFile,
     compilation_root: PathBuf,
     objects_directory: PathBuf,
-    compiled_styles_dir: Option<PathBuf>,
-    asset_debug_dir: Option<PathBuf>,
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
-    bundle_id: Option<String>,
 ) -> PekoResult<(PekoCodegenContext, DiagnosticList)> {
-    let (asts, mut diagnostics) = parse_peko_source(
-        component_file.get_path(),
-        std::fs::read_to_string(component_file.get_path()).unwrap(),
-    );
+    let (asts, mut diagnostics) = super::parse_component_source(component_file.get_path());
 
     let mut codegen_context = PekoCodegenContext::new(
         target,
@@ -973,9 +1008,6 @@ fn compile_component(
         true,
         compilation_root.clone(),
     );
-    codegen_context.application_id = bundle_id;
-    codegen_context.compiled_styles_folder = compiled_styles_dir;
-    codegen_context.asset_debug_folder = asset_debug_dir;
     if let Some(preloaded) = preloaded_modules {
         codegen_context.module_context.load_modules(preloaded);
     }
@@ -1045,21 +1077,14 @@ fn compile_component(
 /// Compile every changed component of `project` for `target`, then link
 /// the result into an executable (or shared library when `link_shared`).
 ///
-/// The returned tuple's first element is the imported-styles map for the
-/// caller's bundling phase; the second is a `Some(diagnostics)` when an
-/// error halted the build (and the caller should not proceed to link),
-/// `None` on a clean link.
+/// Returns `Some(diagnostics)` when an error halted the build (and the
+/// caller should not proceed to link), `None` on a clean link.
 ///
 /// Progress reporting: on incremental rebuilds, the function calls
 /// `progress.set_total(...)` with `recompiles + rechecks + 1 (link)` and
 /// ticks per file. On first build (no incremental info yet), no total is
 /// set (the caller should leave the bar in spinner mode for the duration
 /// of the entrypoint codegen).
-///
-/// `asset_debug_dir` is forwarded to the codegen context's
-/// [`PekoCodegenContext::asset_debug_folder`]. Pass `Some(dir)` for debug
-/// runs that serve assets from `dir` on disk, or `None` for normal builds
-/// that serve assets from the bundle.
 ///
 /// `entitlements` is forwarded to the linker. Pass `Some(path)` to embed
 /// the entitlements plist as a Mach-O section at link time (used for iOS
@@ -1074,15 +1099,13 @@ pub fn compile_project(
     binary_output: Option<PathBuf>,
     link_shared: bool,
     mut linked_files: Vec<PathBuf>,
-    compiled_styles_dir: Option<PathBuf>,
-    asset_debug_dir: Option<PathBuf>,
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
     entitlements: Option<PathBuf>,
+    debug: bool,
     progress: &dyn ProgressSink,
-) -> PekoResult<(HashMap<PathBuf, String>, Option<DiagnosticList>)> {
+) -> PekoResult<Option<DiagnosticList>> {
     let mut file_diagnostics = DiagnosticList::new();
     let project_root = project.get_root().to_path_buf();
-    let mut imported_styles = HashMap::new();
 
     let objects_directory = incremental_directory
         .join("objects")
@@ -1093,22 +1116,20 @@ pub fn compile_project(
         // First build: spinner mode (file count not yet known).
         let entry_file = project.get_entrypoint().to_path_buf();
 
-        let (context, diagnostics) = initialize_incremental_for_target(
+        let (_, diagnostics) = initialize_incremental_for_target(
             peko_root,
             project,
             incremental_directory.clone(),
             target,
             entry_file,
             project_root.clone(),
-            compiled_styles_dir,
-            asset_debug_dir,
             preloaded_modules.clone(),
+            debug,
             progress,
         )?;
-        imported_styles.extend(context.imported_styles.clone());
 
         if diagnostics.has_errors() {
-            return Ok((imported_styles, Some(diagnostics)));
+            return Ok(Some(diagnostics));
         }
         file_diagnostics.extend(diagnostics);
     } else {
@@ -1183,6 +1204,19 @@ pub fn compile_project(
             }
         }
 
+        if rechecks_failed {
+            // A dependent of a changed file no longer type-checks: the change
+            // removed or altered a symbol the dependent still uses, so its
+            // already-compiled object is stale and would reference a symbol
+            // that no longer exists. Halt before recompiling or linking and
+            // report the dependents' errors; no changed file's digest was
+            // advanced, so the next build re-detects and retries.
+            progress.message(
+                "a changed file broke a dependent (a needed symbol was removed or changed); \
+                 halting so a stale object is not linked",
+            );
+        }
+
         if !rechecks_failed {
             let mut new_files_added = false;
             while !files_to_recompile.is_empty() {
@@ -1198,15 +1232,8 @@ pub fn compile_project(
                         recompile.clone(),
                         project_root.clone(),
                         objects_directory.clone(),
-                        compiled_styles_dir.clone(),
-                        asset_debug_dir.clone(),
                         preloaded_modules.clone(),
-                        project
-                            .ui_project_info
-                            .as_ref()
-                            .map(|ui_info| ui_info.bundle_id.clone()),
                     )?;
-                    imported_styles.extend(context.imported_styles.clone());
 
                     // Walk the module's "imported_by" list to extend this
                     // file's rechecks list with any newly-discovered
@@ -1224,11 +1251,8 @@ pub fn compile_project(
                             .unwrap()
                             .imported_by
                         {
-                            let imported_file = ProjectFile::from_top_level_module(
-                                imported_by.clone(),
-                                true,
-                                compiled_styles_dir.is_none(),
-                            );
+                            let imported_file =
+                                ProjectFile::from_top_level_module(imported_by.clone(), true, true);
                             if file
                                 .rechecks
                                 .iter()
@@ -1246,7 +1270,8 @@ pub fn compile_project(
                         .unwrap()
                         .add_linked_files(target.to_triple(), context.files_to_link.clone());
 
-                    if diagnostics.has_errors() || has_warnings(&diagnostics) {
+                    let recompile_had_errors = diagnostics.has_errors();
+                    if recompile_had_errors || has_warnings(&diagnostics) {
                         file_diagnostics.extend(diagnostics);
                     }
 
@@ -1263,6 +1288,19 @@ pub fn compile_project(
                             .add_global_set_function(global_sets_id);
                     }
 
+                    // Advance the saved digest only now that the file compiled
+                    // cleanly, so the baseline always matches the emitted
+                    // object. A file that errored keeps its old digest and is
+                    // re-detected next build rather than trusting the object
+                    // this pass did not successfully produce.
+                    if !recompile_had_errors {
+                        project
+                            .incremental_info
+                            .as_mut()
+                            .unwrap()
+                            .commit_hash(&recompile);
+                    }
+
                     // Discover newly-imported modules and queue them for
                     // recompilation. Revise the bar total upward to include
                     // them.
@@ -1275,7 +1313,7 @@ pub fn compile_project(
                         let module_project_file = ProjectFile::from_top_level_module(
                             Arc::clone(top_level_module),
                             true,
-                            compiled_styles_dir.is_none(),
+                            true,
                         );
                         if !project
                             .incremental_info
@@ -1314,9 +1352,6 @@ pub fn compile_project(
             if new_files_added || removed_files {
                 let mut codegen_context =
                     PekoCodegenContext::new(target, PathBuf::new(), true, project_root.clone());
-                if let Some(ui_info) = &project.ui_project_info {
-                    codegen_context.application_id = Some(ui_info.bundle_id.clone());
-                }
                 if let Some(preloaded) = preloaded_modules {
                     codegen_context.module_context.load_modules(preloaded);
                 }
@@ -1336,7 +1371,7 @@ pub fn compile_project(
     }
 
     if file_diagnostics.has_errors() {
-        return Ok((imported_styles, Some(file_diagnostics)));
+        return Ok(Some(file_diagnostics));
     }
 
     // Gather every object file the linker needs.
@@ -1367,7 +1402,7 @@ pub fn compile_project(
                 "could not resolve toolchain for {}: {e}",
                 target.to_triple()
             );
-            return Ok((imported_styles, None));
+            return Ok(None);
         }
     };
 
@@ -1388,7 +1423,7 @@ pub fn compile_project(
         }
         Err(error) => {
             eprintln!("could not compile native sources: {error}");
-            return Ok((imported_styles, None));
+            return Ok(None);
         }
     };
 
@@ -1413,7 +1448,7 @@ pub fn compile_project(
 
     project.incremental_info.as_mut().unwrap().write_updates();
 
-    Ok((imported_styles, None))
+    Ok(None)
 }
 
 /// `DiagnosticList::has_warnings()` substitute. (The current peko_core

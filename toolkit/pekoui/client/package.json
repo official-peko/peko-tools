@@ -1,0 +1,41 @@
+{
+  "name": "@peko/client",
+  "version": "0.1.0",
+  "description": "Client SDK for the Peko native bridge: connect to the app host and call native handlers as peko.namespace.method().",
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./react": {
+      "types": "./react.d.ts",
+      "default": "./react.js"
+    },
+    "./vue": {
+      "types": "./vue.d.ts",
+      "default": "./vue.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "react.js",
+    "react.d.ts",
+    "vue.js",
+    "vue.d.ts"
+  ],
+  "license": "MIT",
+  "sideEffects": ["./index.js"],
+  "peerDependencies": {
+    "react": ">=17",
+    "vue": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "vue": { "optional": true }
+  }
+}

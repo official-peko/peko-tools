@@ -1576,78 +1576,96 @@ import runtime;
 // --- WebSocket ---
 // ---------------------------------------------------------------------------
 
-/// A WebSocket server connection. Serves multiple simultaneous clients through
-/// the threads package. A port of 0 selects a random open port when listening.
-/// Reading and writing are decoupled: the message handler runs on the receive
-/// thread while a dedicated write thread drains a buffered channel, so send
-/// backpressure does not stall the receive loop.
+/// A single active WebSocket connection. The server hands one to the message
+/// callback so a handler can reply to the exact client that sent a message, and
+/// to the open and close callbacks so a server can track its clients. Sends are
+/// serialized per connection, so a connection is safe to use from any thread.
+[public] class WsConnection {
+    [private] fd: i32
+
+    constructor(fd: i32) {
+        this.fd = fd
+    }
+
+    /// Sends a text frame to this connection. False on a write error.
+    [public] fn send(text: string) => bool {
+        c_sockets::pgc_begin_blocking()
+        let result: i32 = c_sockets::peko_ws_send_text(this.fd, text.to_raw())
+        c_sockets::pgc_end_blocking()
+        return result >= constant<i32>(0)
+    }
+
+    /// The connection's socket id, stable for its lifetime.
+    [public] fn id() => number {
+        return i32_to_number(this.fd)
+    }
+}
+
+/// A WebSocket server. Serves many simultaneous clients: each accepted
+/// connection is handled on its own thread, and the message callback replies
+/// through the WsConnection it is handed. A port of 0 selects a random open
+/// port when listening.
 [public] class WebSocket {
     [private] port: number
-    [private] callback: closure(WebSocket, Request) => void
+    [private] callback: closure(WsConnection, Request) => void
+    [private] on_open_callback: closure(WsConnection) => void
+    [private] on_close_callback: closure(WsConnection) => void
     [private] run: bool
-    [private] socket: i32
     [private] listen_socket: i32
-    [private] send_channel: threads::Channel<string>
 
     /// A websocket bound to port 0.
     constructor() {
         this.port = 0
-        this.callback = closure(ws: WebSocket, req: Request) => void {}
+        this.callback = closure(connection: WsConnection, request: Request) => void {}
+        this.on_open_callback = closure(connection: WsConnection) => void {}
+        this.on_close_callback = closure(connection: WsConnection) => void {}
         this.run = false
-        this.socket = constant<i32>(0)
         this.listen_socket = constant<i32>(0)
-        this.send_channel = new threads::Channel<string>(256)
     }
 
     /// A websocket bound to port 0 with a message callback.
-    constructor(callback: closure(WebSocket, Request) => void) {
+    constructor(callback: closure(WsConnection, Request) => void) {
         this.port = 0
         this.callback = callback
+        this.on_open_callback = closure(connection: WsConnection) => void {}
+        this.on_close_callback = closure(connection: WsConnection) => void {}
         this.run = false
-        this.socket = constant<i32>(0)
         this.listen_socket = constant<i32>(0)
-        this.send_channel = new threads::Channel<string>(256)
     }
 
     /// A websocket bound to the given port.
     constructor(port: number) {
         this.port = port
-        this.callback = closure(ws: WebSocket, req: Request) => void {}
+        this.callback = closure(connection: WsConnection, request: Request) => void {}
+        this.on_open_callback = closure(connection: WsConnection) => void {}
+        this.on_close_callback = closure(connection: WsConnection) => void {}
         this.run = false
-        this.socket = constant<i32>(0)
         this.listen_socket = constant<i32>(0)
-        this.send_channel = new threads::Channel<string>(256)
     }
 
     /// A websocket bound to the given port with a message callback.
-    constructor(port: number, callback: closure(WebSocket, Request) => void) {
+    constructor(port: number, callback: closure(WsConnection, Request) => void) {
         this.port = port
         this.callback = callback
+        this.on_open_callback = closure(connection: WsConnection) => void {}
+        this.on_close_callback = closure(connection: WsConnection) => void {}
         this.run = false
-        this.socket = constant<i32>(0)
         this.listen_socket = constant<i32>(0)
-        this.send_channel = new threads::Channel<string>(256)
     }
 
-    /// Queues text to send to the connected client. False when the channel is
-    /// full or closed.
-    [public] fn send(text: string) => bool {
-        return this.send_channel.send(text)
-    }
-
-    /// Queues text to send without blocking the caller.
-    [public] fn send_no_response(text: string) {
-        this.send_channel.try_send(text)
-    }
-
-    /// Queues text to send and returns whether it was accepted.
-    [public] fn try_send(text: string) => bool {
-        return this.send_channel.try_send(text)
-    }
-
-    /// Sets the message callback.
-    [mutates] fn set_callback(callback: closure(WebSocket, Request) => void) {
+    /// Sets the message callback, run for each text message from a client.
+    [mutates] fn set_callback(callback: closure(WsConnection, Request) => void) {
         this.callback = callback
+    }
+
+    /// Sets a callback run when a client connects.
+    [mutates] fn set_on_open(callback: closure(WsConnection) => void) {
+        this.on_open_callback = callback
+    }
+
+    /// Sets a callback run when a client disconnects.
+    [mutates] fn set_on_close(callback: closure(WsConnection) => void) {
+        this.on_close_callback = callback
     }
 
     /// Sets the port to bind to.
@@ -1660,8 +1678,9 @@ import runtime;
         return this.port
     }
 
-    /// Runs the server on the current thread and blocks. False when the listen
-    /// socket could not be created.
+    /// Runs the server on the current thread and blocks. Each accepted
+    /// connection is served on its own thread, so clients are handled
+    /// concurrently. False when the listen socket could not be created.
     [mutates] fn listen_attached() => bool {
         let p: i32 = danger_cast<i32>(this.port.to_raw())
         let socket_result: i32 = c_sockets::peko_create_listen_socket(p)
@@ -1673,53 +1692,44 @@ import runtime;
         this.port = i32_to_number(c_sockets::peko_socket_local_port(socket_result))
         this.run = true
 
-        while this.run {
-            let current_channel: threads::Channel<string> = this.send_channel
-
-            // The write thread polls for the client fd the receive side
-            // publishes, then drains queued messages to the wire.
-            threads::new_thread(closure[this, current_channel]() => void {
-                let socket_fd: i32 = constant<i32>(0)
-                let idle: i32 = constant<i32>(0)
-                while socket_fd == idle {
-                    socket_fd = this.socket
-                    if socket_fd == idle {
-                        threads::sleep_ms(1)
-                    }
-                }
-                let active: bool = true
-                while active {
-                    let msg: string? = current_channel.recv()
-                    if !msg.is_value() {
-                        active = false
-                    } else {
-                        c_sockets::pgc_begin_blocking()
-                        c_sockets::peko_ws_send_text(socket_fd, msg.unwrap().to_raw())
-                        c_sockets::pgc_end_blocking()
-                    }
-                }
-            })
-
-            // The receive side publishes the client fd and dispatches each
-            // inbound frame to the user callback.
-            let binded_callback: closure(i32, cstr) => void = closure[this](socket: i32, str: cstr) => void {
-                this.socket = socket
-                let message: string = runtime::create_managed(str)
-                if message.size() > 0 {
-                    let callback: closure(WebSocket, Request) => void = this.callback
-                    callback(this, new Request(message))
-                }
+        // One event handler shared by every connection thread. The C side calls
+        // it with an event code (0 open, 1 message, 2 close), the client fd, and
+        // the message text (empty except for a message).
+        let event_handler: closure(i32, i32, cstr) => void = closure[this](event: i32, fd: i32, text: cstr) => void {
+            let connection: WsConnection = new WsConnection(fd)
+            let open_event: i32 = constant<i32>(0)
+            let message_event: i32 = constant<i32>(1)
+            if event == open_event {
+                let handler: closure(WsConnection) => void = this.on_open_callback
+                handler(connection)
+            } else if event == message_event {
+                let message: string = runtime::create_managed(text)
+                let handler: closure(WsConnection, Request) => void = this.callback
+                handler(connection, new Request(message))
+            } else {
+                let handler: closure(WsConnection) => void = this.on_close_callback
+                handler(connection)
             }
+        }
 
-            c_sockets::peko_ws_accept_connection(
-                this.listen_socket,
-                danger_cast<opaque>(binded_callback.function),
-                binded_callback.context)
-
-            // The connection closed. Close the channel so the write thread
-            // exits, then install a fresh channel for the next connection.
-            current_channel.close()
-            this.send_channel = new threads::Channel<string>(256)
+        while this.run {
+            let client: i32 = c_sockets::peko_ws_accept(this.listen_socket)
+            if client < zero {
+                // Accept failed. Stop when the server was asked to; otherwise
+                // treat it as transient and try again.
+                if !this.run {
+                    break
+                }
+                continue
+            }
+            // Serve this connection on its own thread so the accept loop is free
+            // to take the next connection immediately.
+            threads::new_thread(closure[client, event_handler]() => void {
+                c_sockets::peko_ws_serve(
+                    client,
+                    danger_cast<opaque>(event_handler.function),
+                    event_handler.context)
+            })
         }
         return true
     }
@@ -1731,16 +1741,16 @@ import runtime;
         })
     }
 
-    /// Stops the server.
+    /// Stops the server. Open connections close as their clients disconnect.
     [mutates] fn stop() {
         this.run = false
     }
 }
 
-/// Opens a websocket on the given port with the given callback.
-[public] fn open_web_socket(port: number, callback: closure(WebSocket, Request) => void) {
+/// Opens a websocket on the given port with the given message callback.
+[public] fn open_web_socket(port: number, callback: closure(WsConnection, Request) => void) {
     threads::new_thread(closure[port, callback]() => void {
         let socket: WebSocket = new WebSocket(port, callback)
-        socket.listen()
+        socket.listen_attached()
     })
 }

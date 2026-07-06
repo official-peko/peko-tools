@@ -64,6 +64,68 @@ impl Spanned for CommentAST {
     }
 }
 
+/// The standard-library prelude injected into every non-foundational module,
+/// mirroring the type-providing imports the main source file receives. `core`
+/// and `collections` are unpacked so their types (`string`, `bool`, `number`,
+/// `Array`, and the rest) resolve without qualification, the same way they do
+/// in the main file. The foundational modules that bootstrap the standard
+/// library (`core`, `collections`, `runtime`) are excluded to avoid an import
+/// cycle; each declares its own imports explicitly.
+///
+/// `module_name` is the imported module's bare name (the last path segment).
+/// Only unpacked imports are injected because an unpacked import never
+/// conflicts with a module that also imports the same file explicitly.
+pub fn module_prelude_imports(module_name: &str) -> Vec<PekoAST> {
+    const FOUNDATIONAL: [&str; 3] = ["core", "collections", "runtime"];
+    if FOUNDATIONAL.contains(&module_name) {
+        return Vec::new();
+    }
+
+    fn path_segments(path: &str) -> Vec<data_structures::PositionedValue<String>> {
+        path.split("::")
+            .map(|segment| data_structures::PositionedValue::create_no_position(segment.to_owned()))
+            .collect()
+    }
+
+    fn unpack_import(path: &str) -> PekoAST {
+        PekoAST::ImportStatement(statements::ImportStatementAST::new(
+            PositionData::default(),
+            PositionData::default(),
+            path_segments(path),
+            None,
+            vec![data_structures::UnpackItem::All],
+            None,
+            false,
+        ))
+    }
+
+    fn aliased_import(path: &str, alias: &str) -> PekoAST {
+        PekoAST::ImportStatement(statements::ImportStatementAST::new(
+            PositionData::default(),
+            PositionData::default(),
+            path_segments(path),
+            Some(data_structures::PositionedValue::create_no_position(
+                alias.to_owned(),
+            )),
+            Vec::new(),
+            None,
+            false,
+        ))
+    }
+
+    let mut imports = vec![unpack_import("std::core"), unpack_import("std::collections")];
+
+    // bundle:: is compile-time project metadata, available in every module the
+    // same way it is in the main file. The bundle module itself is excluded so
+    // it does not import itself. Unlike core/collections it is aliased (used
+    // as `bundle::name`), so no module should also import it explicitly.
+    if module_name != "bundle" {
+        imports.push(aliased_import("std::bundle", "bundle"));
+    }
+
+    imports
+}
+
 /// The structural representation of any Pekoscript AST.
 ///
 /// Each variant wraps a concrete AST type defined in one of the four

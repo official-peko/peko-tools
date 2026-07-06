@@ -12,12 +12,21 @@
 
 #if defined(__ANDROID__)
 
+#include <android/asset_manager.h>
+
 #include "android_native_app_glue.h"
 #include "android_native_app_glue.c"
 
 /* The running activity. Read by the Android webview backend to reach the Java
  * VM and the activity object. */
 struct android_app *gapp = NULL;
+
+/* The app's AAssetManager, reached through the activity. A package that serves
+ * bundled files packed in the APK's assets/ (the pekoui asset server) reads
+ * them through it. Returns NULL before the activity is recorded. */
+AAssetManager *peko_android_asset_manager(void) {
+    return (gapp != NULL && gapp->activity != NULL) ? gapp->activity->assetManager : NULL;
+}
 
 /* The runtime entry emitted from runtime.peko. It boots the collector, attaches
  * the thread, runs the global initializers, and calls the program on_start

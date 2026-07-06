@@ -532,6 +532,52 @@ public:
     init("window.external={invoke:function(s){window.webkit.messageHandlers."
          "external.postMessage(s);}}");
 
+    // A clicked link with a custom (non-http) scheme is an in-app deep link:
+    // deliver its route to the page and refuse the navigation, which WebKit
+    // otherwise renders as a "URL can't be shown" error page.
+    g_signal_connect(
+        m_webview, "decide-policy",
+        G_CALLBACK(+[](WebKitWebView *web_view, WebKitPolicyDecision *decision,
+                       WebKitPolicyDecisionType type, gpointer) -> gboolean {
+          if (type != WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) {
+            return FALSE;
+          }
+          auto *nav = WEBKIT_NAVIGATION_POLICY_DECISION(decision);
+          WebKitNavigationAction *action =
+              webkit_navigation_policy_decision_get_navigation_action(nav);
+          WebKitURIRequest *request =
+              webkit_navigation_action_get_request(action);
+          const char *uri = webkit_uri_request_get_uri(request);
+          if (uri == nullptr ||
+              strncmp(uri, "http://", 7) == 0 ||
+              strncmp(uri, "https://", 8) == 0) {
+            return FALSE;
+          }
+
+          std::string full(uri);
+          size_t marker = full.find("://");
+          std::string route =
+              (marker != std::string::npos) ? full.substr(marker + 3) : full;
+          if (route.empty() || route[0] != '/') {
+            route = "/" + route;
+          }
+          std::string escaped;
+          for (char c : route) {
+            if (c == '\\' || c == '"') {
+              escaped += '\\';
+            }
+            escaped += c;
+          }
+          std::string js =
+              "window.__peko_deeplink && window.__peko_deeplink(\"" + escaped +
+              "\")";
+          webkit_web_view_run_javascript(web_view, js.c_str(), nullptr, nullptr,
+                                         nullptr);
+          webkit_policy_decision_ignore(decision);
+          return TRUE;
+        }),
+        this);
+
     gtk_container_add(GTK_CONTAINER(m_window), GTK_WIDGET(m_webview));
     gtk_widget_grab_focus(GTK_WIDGET(m_webview));
 
@@ -1040,6 +1086,17 @@ using browser_engine = detail::cocoa_wkwebview_engine;
 #define WIN32_LEAN_AND_MEAN
 #include <shlobj.h>
 #include <shlwapi.h>
+
+// The native menu (peko_menu_windows.c, linked into every pekoui build) builds
+// a keyboard-accelerator table for its items. The message loop calls this per
+// message so a shortcut dispatches its menu command; it returns nonzero when
+// the message was consumed, and 0 when no menu (and so no table) is installed.
+extern "C" int peko_menu_translate_accel(void *msg);
+// Key presses in the web content run in the WebView2 process, not the host
+// message loop, so the controller's AcceleratorKeyPressed event forwards the
+// pressed virtual key here to run a matching menu accelerator. Returns nonzero
+// when an accelerator ran, so the event is marked handled.
+extern "C" int peko_menu_dispatch_accel_key(unsigned int vkey);
 #include <stdlib.h>
 #include <windows.h>
 
@@ -1681,8 +1738,9 @@ class webview2_com_handler
                          ICoreWebView2CompositionController *composition)>;
 
 public:
-  webview2_com_handler(HWND hwnd, msg_cb_t msgCb, webview2_com_handler_cb_t cb)
-      : m_window(hwnd), m_msgCb(msgCb), m_cb(cb) {}
+  webview2_com_handler(HWND hwnd, msg_cb_t msgCb, webview2_com_handler_cb_t cb,
+                       bool composited)
+      : m_window(hwnd), m_msgCb(msgCb), m_cb(cb), m_composited(composited) {}
 
   virtual ~webview2_com_handler() = default;
   webview2_com_handler(const webview2_com_handler &other) = delete;
@@ -1727,15 +1785,25 @@ public:
   }
   HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, ICoreWebView2Environment *env) {
     if (SUCCEEDED(res)) {
-      // Composition hosting renders into a DirectComposition visual, which the
-      // environment exposes through ICoreWebView2Environment3. This is what
-      // lets the window present a transparent surface.
-      ICoreWebView2Environment3 *env3 = nullptr;
-      if (SUCCEEDED(env->QueryInterface(IID_ICoreWebView2Environment3,
-                                        reinterpret_cast<void **>(&env3))) &&
-          env3) {
-        res = env3->CreateCoreWebView2CompositionController(m_window, this);
-        env3->Release();
+      if (m_composited) {
+        // Composition hosting renders into a DirectComposition visual, which
+        // the environment exposes through ICoreWebView2Environment3. This is
+        // what lets the window present a transparent surface.
+        ICoreWebView2Environment3 *env3 = nullptr;
+        if (SUCCEEDED(env->QueryInterface(IID_ICoreWebView2Environment3,
+                                          reinterpret_cast<void **>(&env3))) &&
+            env3) {
+          res = env3->CreateCoreWebView2CompositionController(m_window, this);
+          env3->Release();
+          if (SUCCEEDED(res)) {
+            return S_OK;
+          }
+        }
+      } else {
+        // Windowed hosting parents the web view in the window and receives
+        // input directly, and the window keeps its redirection surface so a
+        // native menu bar paints.
+        res = env->CreateCoreWebView2Controller(m_window, this);
         if (SUCCEEDED(res)) {
           return S_OK;
         }
@@ -1869,10 +1937,67 @@ private:
   HWND m_window;
   msg_cb_t m_msgCb;
   webview2_com_handler_cb_t m_cb;
+  bool m_composited = false;
   std::atomic<ULONG> m_ref_count{1};
   std::function<HRESULT()> m_attempt_handler;
   unsigned int m_max_attempts = 5;
   unsigned int m_attempts = 0;
+};
+
+// Runs a menu keyboard accelerator pressed inside the WebView2. The web content
+// runs in a separate process, so accelerator keys never reach the host message
+// loop; the controller raises AcceleratorKeyPressed on the host instead. On a
+// key-down this forwards the virtual key to the native menu, which runs any
+// matching accelerator and reports whether it did, so the event is marked
+// handled to suppress the browser default (for example Ctrl+S save-as).
+class peko_accel_key_handler
+    : public ICoreWebView2AcceleratorKeyPressedEventHandler {
+public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+    if (!ppv) {
+      return E_POINTER;
+    }
+    if (riid == IID_IUnknown ||
+        riid == IID_ICoreWebView2AcceleratorKeyPressedEventHandler) {
+      *ppv = static_cast<ICoreWebView2AcceleratorKeyPressedEventHandler *>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return ++m_ref_count;
+  }
+  ULONG STDMETHODCALLTYPE Release() override {
+    ULONG count = --m_ref_count;
+    if (count == 0) {
+      delete this;
+    }
+    return count;
+  }
+  HRESULT STDMETHODCALLTYPE
+  Invoke(ICoreWebView2Controller *sender,
+         ICoreWebView2AcceleratorKeyPressedEventArgs *args) override {
+    (void)sender;
+    if (!args) {
+      return S_OK;
+    }
+    COREWEBVIEW2_KEY_EVENT_KIND kind;
+    UINT vkey = 0;
+    if (SUCCEEDED(args->get_KeyEventKind(&kind)) &&
+        (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN ||
+         kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) &&
+        SUCCEEDED(args->get_VirtualKey(&vkey))) {
+      if (peko_menu_dispatch_accel_key(vkey)) {
+        args->put_Handled(TRUE);
+      }
+    }
+    return S_OK;
+  }
+
+private:
+  std::atomic<ULONG> m_ref_count{1};
 };
 
 class win32_edge_engine {
@@ -2006,9 +2131,11 @@ public:
           });
       RegisterClassExW(&wc);
       // WS_EX_NOREDIRECTIONBITMAP gives the window no opaque GDI backing, so
-      // the DirectComposition content it presents can be per-pixel
-      // transparent over the desktop.
-      m_window = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, L"webview", L"",
+      // the DirectComposition content it presents can be per-pixel transparent
+      // over the desktop. It also leaves no surface for a native menu bar to
+      // paint into, so it is used only when compositing (a transparent window).
+      DWORD ex_style = m_composited ? WS_EX_NOREDIRECTIONBITMAP : 0;
+      m_window = CreateWindowExW(ex_style, L"webview", L"",
                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                                  CW_USEDEFAULT, 640, 480, nullptr, nullptr,
                                  hInstance, nullptr);
@@ -2022,8 +2149,10 @@ public:
 
     // The composition device and root visual must exist before the web view's
     // composition controller is created, since the completion handler binds the
-    // controller to the visual.
-    setup_composition();
+    // controller to the visual. Windowed hosting needs none of this.
+    if (m_composited) {
+      setup_composition();
+    }
 
     ShowWindow(m_window, SW_SHOW);
     UpdateWindow(m_window);
@@ -2082,6 +2211,10 @@ public:
     BOOL res;
     while ((res = GetMessage(&msg, nullptr, 0, 0)) != -1) {
       if (msg.hwnd) {
+        // A menu accelerator consumes the message and dispatches its command.
+        if (peko_menu_translate_accel(&msg)) {
+          continue;
+        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
         continue;
@@ -2186,6 +2319,14 @@ private:
           webview->AddRef();
           m_controller = controller;
           m_webview = webview;
+          // Forward accelerator keys pressed in the web content to the native
+          // menu, since they do not reach the host message loop.
+          {
+            auto *accel = new peko_accel_key_handler();
+            ::EventRegistrationToken accel_token;
+            controller->add_AcceleratorKeyPressed(accel, &accel_token);
+            accel->Release();
+          }
           if (composition) {
             composition->AddRef();
             m_composition_controller = composition;
@@ -2197,7 +2338,8 @@ private:
             }
           }
           flag.clear();
-        });
+        },
+        m_composited);
 
     m_com_handler->set_attempt_handler([&] {
       return m_webview2_loader.create_environment_with_options(
@@ -2363,6 +2505,12 @@ private:
   // When set, the window draws no native frame; the content fills every edge
   // and the sizing borders are provided through hit-testing.
   bool m_frameless = false;
+  // Composition hosting (DirectComposition + WS_EX_NOREDIRECTIONBITMAP) lets the
+  // window present a per-pixel transparent surface, but a window with no
+  // redirection bitmap cannot paint a native menu bar. Default to windowed
+  // hosting so a decorated window can carry a native menu; a transparent window
+  // opts back into composition.
+  bool m_composited = false;
 };
 
 } // namespace detail
@@ -2684,6 +2832,41 @@ extern "C" void peko_webview_close(webview_t w) {
   objc::msg_send<void>(window, "close"_sel);
 }
 
+extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return;
+  }
+  BOOL is_hidden = hidden ? YES : NO;
+  // The traffic-light controls are the close, miniaturize, and zoom buttons
+  // (NSWindowButton 0, 1, 2). macOS keeps them at the top left even on a
+  // frameless window; hiding them lets the web UI draw its own controls.
+  for (NSInteger which = 0; which <= 2; which++) {
+    id button =
+        objc::msg_send<id>(window, "standardWindowButton:"_sel, which);
+    if (button) {
+      objc::msg_send<void>(button, "setHidden:"_sel, is_hidden);
+    }
+  }
+}
+
+extern "C" int peko_webview_has_native_window_controls(webview_t w) {
+  id window = (id)webview_get_window(w);
+  if (!window) {
+    return 0;
+  }
+  // The window draws native controls when the close button is present and not
+  // hidden. A frameless macOS window keeps the traffic lights unless they are
+  // hidden explicitly.
+  id button =
+      objc::msg_send<id>(window, "standardWindowButton:"_sel, (NSInteger)0);
+  if (!button) {
+    return 0;
+  }
+  BOOL is_hidden = objc::msg_send<BOOL>(button, "isHidden"_sel);
+  return is_hidden ? 0 : 1;
+}
+
 #elif defined(WEBVIEW_GTK)
 
 extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
@@ -2762,6 +2945,19 @@ extern "C" void peko_webview_close(webview_t w) {
     return;
   }
   gtk_window_close(GTK_WINDOW(window));
+}
+
+extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
+  // A frameless GTK window has no native controls to hide.
+  (void)w;
+  (void)hidden;
+}
+
+extern "C" int peko_webview_has_native_window_controls(webview_t w) {
+  // A frameless GTK window draws no native controls over its content, so the
+  // web UI provides them.
+  (void)w;
+  return 0;
 }
 
 #elif defined(WEBVIEW_EDGE)
@@ -2862,6 +3058,20 @@ extern "C" void peko_webview_close(webview_t w) {
   if (hwnd) {
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
   }
+}
+
+extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
+  // A frameless Win32 window drops its non-client area, so there are no native
+  // controls to hide.
+  (void)w;
+  (void)hidden;
+}
+
+extern "C" int peko_webview_has_native_window_controls(webview_t w) {
+  // A frameless Win32 window draws no native caption buttons over its content,
+  // so the web UI provides the window controls.
+  (void)w;
+  return 0;
 }
 
 #endif

@@ -751,44 +751,55 @@ static uint8_t *ws_recv_one_frame(peko_socket_t sock, size_t *out_len)
  * Public WebSocket API
  * ====================================================================== */
 
-int peko_ws_accept_connection(peko_socket_t   listen_socket,
-                              void          (*message_handler)(void *,
-                                                               peko_socket_t,
-                                                               char *),
-                              void           *data)
-{
-    /* Keep the GC-managed closure context alive via a handle for the
-     * duration of this call. Re-resolve via pgc_handle_get before each
-     * use since GC collections during blocking recv calls may move it. */
-    pgc_handle data_handle = pgc_handle_create(data);
+/* Event codes passed to the serve handler. An empty text accompanies open and
+ * close. */
+#define PEKO_WS_EVENT_OPEN    0
+#define PEKO_WS_EVENT_MESSAGE 1
+#define PEKO_WS_EVENT_CLOSE   2
 
+/*
+ * Accept one connection on listen_socket. Returns the client fd, or -1 on
+ * failure. The thread parks during accept() so a collection can proceed while
+ * it waits.
+ */
+int peko_ws_accept(peko_socket_t listen_socket)
+{
     struct sockaddr_in client_addr;
     socklen_t          client_len = sizeof(client_addr);
     peko_socket_t      client;
 
-    /* Declare thread parked during accept() so GC collections can proceed
-     * without waiting for this thread to reach a managed-code safepoint. */
     pgc_begin_blocking();
-    client = accept(listen_socket,
-                    (struct sockaddr *)&client_addr, &client_len);
+    client = accept(listen_socket, (struct sockaddr *)&client_addr, &client_len);
     pgc_end_blocking();
-    if (client == PEKO_INVALID_SOCKET) {
-        pgc_handle_release(data_handle);
-        return 1;
-    }
 
-    /* The client fd is published to the managed WebSocket through the
-     * message handler after the handshake, using the handle-resolved
-     * context. It is not returned through an interior pointer because the
-     * WebSocket the pointer would address may move during the blocking
-     * reads. */
+    if (client == PEKO_INVALID_SOCKET)
+        return -1;
+    return (int)client;
+}
 
-    /* Register a send mutex for this connection so peko_ws_send_text
-     * (called from the write thread) and internal sends are serialized. */
+/*
+ * Serve one accepted connection: perform the WebSocket upgrade, then dispatch
+ * every inbound text message to handler until the connection closes. handler
+ * receives an event code (open, message, close), the connection fd, and the
+ * message text (empty for open and close). The caller runs this on a dedicated
+ * thread, so many connections are served at once. Returns 0 on a clean close, 1
+ * when the handshake failed.
+ */
+int peko_ws_serve(peko_socket_t   client,
+                  void          (*handler)(void *, int, peko_socket_t, char *),
+                  void           *data)
+{
+    /* Keep the GC-managed closure context alive via a handle for the duration
+     * of this call. Re-resolve via pgc_handle_get before each use since GC
+     * collections during blocking recv calls may move it. */
+    pgc_handle data_handle = pgc_handle_create(data);
+
+    /* Register a send mutex for this connection so peko_ws_send_text and the
+     * internal sends here are serialized. */
     ws_send_mutex_t *send_mu = ws_conn_register(client);
 
-    /* Suppress SIGPIPE so a broken connection returns EPIPE instead of
-     * killing the process. */
+    /* Suppress SIGPIPE so a broken connection returns EPIPE instead of killing
+     * the process. */
 #if defined(SO_NOSIGPIPE)
     int nosig = 1;
     setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
@@ -806,6 +817,7 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
         char   *buf      = (char *)malloc(capacity + 1);
 
         if (!buf) {
+            ws_conn_unregister(client);
             peko_close_socket(client);
             pgc_handle_release(data_handle);
             return 1;
@@ -817,6 +829,7 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
                 char *tmp = (char *)realloc(buf, capacity + 1);
                 if (!tmp) {
                     free(buf);
+                    ws_conn_unregister(client);
                     peko_close_socket(client);
                     pgc_handle_release(data_handle);
                     return 1;
@@ -829,6 +842,7 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
             pgc_end_blocking();
             if (n <= 0) {
                 free(buf);
+                ws_conn_unregister(client);
                 peko_close_socket(client);
                 pgc_handle_release(data_handle);
                 return 1;
@@ -853,6 +867,7 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
 
     if (ws_extract_key(raw_request, &ws_key) != 0) {
         free(raw_request);
+        ws_conn_unregister(client);
         peko_close_socket(client);
         pgc_handle_release(data_handle);
         return 1;
@@ -863,6 +878,7 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
     raw_request = NULL;
 
     if (!handshake) {
+        ws_conn_unregister(client);
         peko_close_socket(client);
         pgc_handle_release(data_handle);
         return 1;
@@ -887,13 +903,11 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
         }
     }
 
-    /* Publish the client fd to the managed WebSocket. The handler reads the
-     * current context address through the handle, so the store lands on the
-     * live object even if it moved during the handshake. An empty payload
-     * signals connection setup, not an inbound message. */
+    /* The connection is open. Signal the handler so the managed side can track
+     * it. The text is empty for a lifecycle event. */
     {
         void *live_data = pgc_handle_get(data_handle);
-        message_handler(live_data, client, "");
+        handler(live_data, PEKO_WS_EVENT_OPEN, client, "");
     }
 
     /* ------------------------------------------------------------------ */
@@ -909,7 +923,6 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
         if (!frame_data)
             break; /* connection error or closed */
 
-        /* Parse header (no unmasking yet) */
         ws_frame_header_t hdr;
         if (!ws_parse_frame_header(frame_data, frame_len, &hdr)) {
             free(frame_data);
@@ -918,20 +931,12 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
 
         uint8_t *payload = frame_data + hdr.header_len;
 
-        /* Unmask payload in place (RFC 6455 s5.3) */
         if (hdr.masked)
             ws_unmask_payload(payload, hdr.payload_len, hdr.mask);
 
-        /* Null-terminate safely (buffer has +1 extra byte) */
         payload[hdr.payload_len] = '\0';
 
-        /* ----------------------------------------------------------------
-         * Handle control frames (RFC 6455 s5.5).
-         * Control frames MUST NOT be fragmented and may appear interleaved
-         * with fragmented data frames. Process them immediately.
-         * -------------------------------------------------------------- */
         if (hdr.opcode == WS_OPCODE_PING) {
-            /* RFC 6455 s5.5.2: respond with Pong echoing the payload */
             size_t pong_len = 0;
             char  *pong     = ws_encode_pong((char *)payload,
                                               hdr.payload_len, &pong_len);
@@ -944,12 +949,10 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
             continue;
 
         } else if (hdr.opcode == WS_OPCODE_PONG) {
-            /* RFC 6455 s5.5.3: unsolicited pong - ignore */
             free(frame_data);
             continue;
 
         } else if (hdr.opcode == WS_OPCODE_CLOSE) {
-            /* RFC 6455 s5.5.1: send a Close frame in response then close */
             size_t close_len = 0;
             char  *close_frame = ws_encode_close(1000, &close_len);
             if (close_frame) {
@@ -961,21 +964,12 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
             break;
         }
 
-        /* ----------------------------------------------------------------
-         * Handle data frames with fragmentation (RFC 6455 s5.4).
-         *
-         * opcode == 0x1 (text) or 0x2 (binary): first fragment.
-         * opcode == 0x0 (continuation): subsequent fragments.
-         * FIN bit set: last fragment of this message.
-         * -------------------------------------------------------------- */
         if (hdr.opcode == WS_OPCODE_TXT || hdr.opcode == WS_OPCODE_BIN) {
             if (frag.data) {
-                /* Previous message was incomplete - discard it */
                 ws_frag_reset(&frag);
             }
             frag.opcode = hdr.opcode;
         }
-        /* opcode == 0 means continuation frame */
 
         if (!ws_frag_append(&frag, payload, hdr.payload_len)) {
             free(frame_data);
@@ -985,23 +979,44 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
         free(frame_data);
 
         if (hdr.fin) {
-            /* Complete message assembled. Dispatch to Peko handler. */
             if (frag.opcode == WS_OPCODE_TXT) {
-                /* Re-resolve before calling: GC may have moved the object
-                 * during ws_recv_one_frame's blocking recv. */
                 void *live_data = pgc_handle_get(data_handle);
-                message_handler(live_data, client, (char *)frag.data);
+                handler(live_data, PEKO_WS_EVENT_MESSAGE, client,
+                        (char *)frag.data);
             }
-            /* Binary frames: not dispatched to Peko (text only for now) */
             ws_frag_reset(&frag);
         }
     }
 
     ws_frag_reset(&frag);
+
+    /* The connection closed. Signal the handler so the managed side can drop
+     * it, then tear down. */
+    {
+        void *live_data = pgc_handle_get(data_handle);
+        handler(live_data, PEKO_WS_EVENT_CLOSE, client, "");
+    }
+
     ws_conn_unregister(client);
     peko_close_socket(client);
     pgc_handle_release(data_handle);
     return 0;
+}
+
+/*
+ * Accept and serve one connection on the calling thread. Retained for
+ * single-connection callers. Returns 0 on a clean close, 1 on accept or
+ * handshake failure.
+ */
+int peko_ws_accept_connection(peko_socket_t   listen_socket,
+                              void          (*handler)(void *, int,
+                                                       peko_socket_t, char *),
+                              void           *data)
+{
+    int client = peko_ws_accept(listen_socket);
+    if (client < 0)
+        return 1;
+    return peko_ws_serve((peko_socket_t)client, handler, data);
 }
 
 int peko_ws_send_text(peko_socket_t socket, const char *text)

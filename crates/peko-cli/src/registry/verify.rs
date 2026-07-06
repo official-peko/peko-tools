@@ -169,7 +169,9 @@ pub fn verify(bytes: &[u8]) -> PackageReport {
     // Signature-flag consistency.
     let body_end = CONTAINER_HEADER_LEN + report.meta_len + report.payload_len;
     if header.signed && report.signature_len == 0 {
-        report.error("the header marks the container signed, but no signature trailer follows the payload");
+        report.error(
+            "the header marks the container signed, but no signature trailer follows the payload",
+        );
     } else if !header.signed && bytes.len() > body_end {
         report.warning(format!(
             "{} trailing byte(s) follow the payload in an unsigned container",
@@ -181,7 +183,13 @@ pub fn verify(bytes: &[u8]) -> PackageReport {
     let lib_root = verify_manifest(container.manifest, &mut report);
 
     // Payload: the compressed source tree.
-    verify_payload(&header, container.manifest, container.payload, lib_root, &mut report);
+    verify_payload(
+        &header,
+        container.manifest,
+        container.payload,
+        lib_root,
+        &mut report,
+    );
 
     report
 }
@@ -217,7 +225,9 @@ fn verify_manifest(manifest_text: &str, report: &mut PackageReport) -> Option<St
             // Registry-quality fields: not required to be valid, but recommended
             // so the package presents well and can be trusted.
             if meta.description.as_deref().unwrap_or("").trim().is_empty() {
-                report.warning("[package].description is empty; add a short summary for the registry");
+                report.warning(
+                    "[package].description is empty; add a short summary for the registry",
+                );
             }
             if meta.license.is_none() {
                 report.warning("[package].license is missing; add an SPDX license identifier");
@@ -243,8 +253,17 @@ fn verify_manifest(manifest_text: &str, report: &mut PackageReport) -> Option<St
                 min_compiler: meta.peko.as_ref().map(ToString::to_string),
                 lib_root: Some(lib_root.clone()),
                 dependencies,
-                platforms: package.platforms.supported.iter().map(|os| os.name().to_owned()).collect(),
-                native_sources: package.native.as_ref().map(|n| n.sources.len()).unwrap_or(0),
+                platforms: package
+                    .platforms
+                    .supported
+                    .iter()
+                    .map(|os| os.name().to_owned())
+                    .collect(),
+                native_sources: package
+                    .native
+                    .as_ref()
+                    .map(|n| n.sources.len())
+                    .unwrap_or(0),
             };
             (Some(lib_root), summary)
         }
@@ -262,7 +281,12 @@ fn verify_manifest(manifest_text: &str, report: &mut PackageReport) -> Option<St
                 min_compiler: None,
                 lib_root: None,
                 dependencies,
-                platforms: app.platforms.supported.iter().map(|os| os.name().to_owned()).collect(),
+                platforms: app
+                    .platforms
+                    .supported
+                    .iter()
+                    .map(|os| os.name().to_owned())
+                    .collect(),
                 native_sources: app.native.as_ref().map(|n| n.sources.len()).unwrap_or(0),
             };
             (None, summary)
@@ -340,7 +364,9 @@ fn verify_payload(
             report.warning(format!("build artifact leaked into the package: {path}"));
         }
         if path.ends_with(".pkpkg") {
-            report.warning(format!("a packed container leaked into the package: {path}"));
+            report.warning(format!(
+                "a packed container leaked into the package: {path}"
+            ));
         }
         if path.ends_with(".peko") {
             source_files += 1;
@@ -359,7 +385,8 @@ fn verify_payload(
     // agree, or the header and source describe different packages.
     match embedded_toml_in_payload {
         Some(bytes) if bytes != manifest_text.as_bytes() => {
-            report.error("the embedded manifest does not match the peko.toml packed in the payload");
+            report
+                .error("the embedded manifest does not match the peko.toml packed in the payload");
         }
         None => report.warning("the payload does not contain a peko.toml at its root"),
         _ => {}
@@ -437,7 +464,11 @@ mod tests {
     fn accepts_a_well_formed_package() {
         let bytes = build_package(GOOD_MANIFEST, "source/lib.peko");
         let report = verify(&bytes);
-        assert!(report.is_valid(), "expected valid, findings: {:?}", report.findings);
+        assert!(
+            report.is_valid(),
+            "expected valid, findings: {:?}",
+            report.findings
+        );
         let manifest = report.manifest.expect("manifest summary");
         assert_eq!(manifest.name, "widget");
         assert_eq!(manifest.version, "1.2.3");
@@ -449,7 +480,12 @@ mod tests {
     fn rejects_bad_magic() {
         let report = verify(b"not a peko container at all");
         assert!(!report.is_valid());
-        assert!(report.findings.iter().any(|f| f.message.contains("header is invalid")));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.message.contains("header is invalid"))
+        );
     }
 
     #[test]
@@ -466,7 +502,10 @@ mod tests {
         let report = verify(&bytes);
         assert!(!report.is_valid());
         assert!(
-            report.findings.iter().any(|f| f.message.contains("entry file")),
+            report
+                .findings
+                .iter()
+                .any(|f| f.message.contains("entry file")),
             "findings: {:?}",
             report.findings
         );
@@ -478,7 +517,11 @@ mod tests {
         let bytes = build_package(sparse, "source/lib.peko");
         let report = verify(&bytes);
         assert!(report.is_valid(), "still valid: {:?}", report.findings);
-        assert!(report.warning_count() >= 3, "expected quality warnings: {:?}", report.findings);
+        assert!(
+            report.warning_count() >= 3,
+            "expected quality warnings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
@@ -496,6 +539,11 @@ mod tests {
 
         let report = verify(&bytes);
         assert!(!report.is_valid());
-        assert!(report.findings.iter().any(|f| f.message.contains("does not match")));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.message.contains("does not match"))
+        );
     }
 }

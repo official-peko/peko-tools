@@ -1,6 +1,6 @@
 //! `peko project`: create, view, and inspect Peko projects.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use eframe::egui;
@@ -79,6 +79,25 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         }
     };
 
+    // If the current directory is already a web-framework project (and not yet
+    // a Peko project), offer to set it up in place instead of scaffolding a new
+    // subdirectory. This turns a raw React/Vue/etc. project into a Peko app.
+    if let Ok(current_dir) = std::env::current_dir()
+        && !current_dir.join("peko.toml").is_file()
+        && let Some(framework) = detect_web_framework(&current_dir)
+    {
+        let adopt = confirmation_prompt(
+            &mut rl,
+            &format!(
+                "* Found an existing {framework} project here. Set up THIS directory as a Peko app (Y/n) => "
+            ),
+            true,
+        );
+        if adopt {
+            return adopt_current_directory(cli_info, reporter, &mut rl, &current_dir, &framework);
+        }
+    }
+
     let project_is_ui = confirmation_prompt(&mut rl, "* UI project (Y/n) => ", true);
 
     let project_name = match rl.readline("* Project name     => ") {
@@ -110,6 +129,24 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             reporter.error(format!("could not read project version: {e}"));
             return ExitCode::FAILURE;
         }
+    };
+
+    // A UI project is a static (SSG) web app built with a web framework, taken
+    // from `--framework <template>` when given, otherwise chosen from a menu.
+    // The value is the matching create-vite template.
+    let framework = if project_is_ui {
+        match cli_info.flags.get_flag("framework") {
+            Some(framework) => framework,
+            None => match prompt_web_framework() {
+                Some(framework) => framework,
+                None => {
+                    reporter.error("no web framework was selected");
+                    return ExitCode::FAILURE;
+                }
+            },
+        }
+    } else {
+        String::new()
     };
 
     let cwd = match std::env::current_dir() {
@@ -144,50 +181,36 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         }
     }
 
-    let mut directories = vec![project_root.join("source")];
+    // A UI (web) project is scaffolded with the web framework's own tool
+    // (create-vite), then overlaid with the Peko host. A CLI project is a
+    // plain source tree.
     if project_is_ui {
-        directories.push(project_root.join("assets"));
-        directories.push(project_root.join("source/pages/index"));
+        return scaffold_ui_project(
+            cli_info,
+            reporter,
+            &project_name,
+            &bundle_id,
+            &version,
+            &framework,
+            &project_root,
+        );
     }
-    for directory in &directories {
-        if let Err(e) = std::fs::create_dir_all(directory) {
-            reporter.error(format!("could not create {}: {e}", directory.display()));
-            return ExitCode::FAILURE;
-        }
+
+    if let Err(e) = std::fs::create_dir_all(project_root.join("source")) {
+        reporter.error(format!("could not create source directory: {e}"));
+        return ExitCode::FAILURE;
     }
 
-    let manifest = if project_is_ui {
-        UI_MANIFEST_TEMPLATE
-            .replace("{name}", &project_name)
-            .replace("{bundle}", &bundle_id)
-            .replace("{version}", &version)
-    } else {
-        CLI_MANIFEST_TEMPLATE
-            .replace("{name}", &project_name)
-            .replace("{version}", &version)
-    };
-
-    let main_peko = if project_is_ui {
-        ui_main_peko_template(&project_name)
-    } else {
-        CLI_MAIN_PEKO_TEMPLATE.to_owned()
-    };
-
-    let mut files: Vec<(PathBuf, Vec<u8>)> = vec![
+    let manifest = CLI_MANIFEST_TEMPLATE
+        .replace("{name}", &project_name)
+        .replace("{version}", &version);
+    let files: Vec<(PathBuf, Vec<u8>)> = vec![
         (project_root.join("peko.toml"), manifest.into_bytes()),
-        (project_root.join("source/main.peko"), main_peko.into_bytes()),
+        (
+            project_root.join("source/main.peko"),
+            CLI_MAIN_PEKO_TEMPLATE.as_bytes().to_vec(),
+        ),
     ];
-    if project_is_ui {
-        files.push((project_root.join("source/root_styles.scss"), Vec::new()));
-        files.push((
-            project_root.join("source/pages/index/page.peko"),
-            INDEX_PAGE_TEMPLATE.as_bytes().to_vec(),
-        ));
-        files.push((
-            project_root.join("source/pages/index/page_styles.scss"),
-            Vec::new(),
-        ));
-    }
     for (path, bytes) in &files {
         if let Err(e) = std::fs::write(path, bytes) {
             reporter.error(format!("could not write {}: {e}", path.display()));
@@ -202,10 +225,352 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Scaffold a UI (static web) project: run the web framework's own scaffolder
+/// (create-vite), then overlay the Peko host manifest, the entry, and a small
+/// Vite tweak so the build output lands in `assets/` with relative asset URLs.
+fn scaffold_ui_project(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    project_name: &str,
+    bundle_id: &str,
+    version: &str,
+    framework: &str,
+    project_root: &Path,
+) -> ExitCode {
+    // The web framework is scaffolded by its own tool, so npm must be present.
+    if !command_succeeds("npm", &["--version"]) {
+        reporter.error("npm is required to scaffold a UI (web) project, but it was not found");
+        reporter.help("install Node.js (which bundles npm) from https://nodejs.org, then re-run");
+        return ExitCode::FAILURE;
+    }
+
+    let scaffold_dir = project_root.parent().unwrap_or_else(|| Path::new("."));
+
+    reporter.status(
+        "Scaffolding",
+        format!("{framework} web app with create-vite"),
+    );
+    let create = std::process::Command::new("npm")
+        .args([
+            "create",
+            "vite@latest",
+            project_name,
+            "--",
+            "--template",
+            framework,
+        ])
+        .current_dir(scaffold_dir)
+        .stdin(std::process::Stdio::null())
+        .status();
+    match create {
+        Ok(status) if status.success() => {}
+        Ok(_) => {
+            reporter.error(format!(
+                "create-vite did not scaffold the '{framework}' template successfully"
+            ));
+            reporter.help("check that the framework name is a valid create-vite template");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            reporter.error(format!("could not run create-vite through npm: {e}"));
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if !overlay_peko_host(cli_info, reporter, project_name, bundle_id, version, project_root) {
+        return ExitCode::FAILURE;
+    }
+
+    reporter.success(format!(
+        "created new UI project {project_name} at {}",
+        project_root.display()
+    ));
+    reporter.info(format!(
+        "next: cd {project_name} && npm install, then `peko build`"
+    ));
+    ExitCode::SUCCESS
+}
+
+/// Overlay the Peko host onto a web-framework project rooted at `project_root`:
+/// the manifest that marks it a static UI project and depends on pekoui, the
+/// one-line Peko entry, the Vite output config, and the @peko/client
+/// dependency. Shared by scaffolding a new project and adopting an existing
+/// one. Returns false when a hard error was reported.
+fn overlay_peko_host(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    project_name: &str,
+    bundle_id: &str,
+    version: &str,
+    project_root: &Path,
+) -> bool {
+    // Overlay the Peko host: a manifest that marks this a static UI project and
+    // depends on the installed pekoui package, plus the one-line entry.
+    let pekoui_path = cli_info
+        .get_peko_root()
+        .join("registry/src/pekoui/pekoui-0.1.0");
+    let manifest = UI_MANIFEST_TEMPLATE
+        .replace("{name}", project_name)
+        .replace("{bundle}", bundle_id)
+        .replace("{version}", version)
+        .replace("{pekoui_path}", &pekoui_path.display().to_string());
+
+    if let Err(e) = std::fs::create_dir_all(project_root.join("source")) {
+        reporter.error(format!("could not create source directory: {e}"));
+        return false;
+    }
+    let overlay: Vec<(PathBuf, &[u8])> = vec![
+        (project_root.join("peko.toml"), manifest.as_bytes()),
+        (
+            project_root.join("source/main.peko"),
+            UI_MAIN_PEKO_TEMPLATE.as_bytes(),
+        ),
+    ];
+    for (path, bytes) in &overlay {
+        if let Err(e) = std::fs::write(path, bytes) {
+            reporter.error(format!("could not write {}: {e}", path.display()));
+            return false;
+        }
+    }
+
+    // Point Vite at `assets/` with relative URLs so the built app is served
+    // by the pekoui asset server under its /_assets/ prefix.
+    if let Err(e) = patch_vite_config(project_root) {
+        reporter.warning(format!(
+            "set up, but could not adjust the Vite config automatically: {e}. \
+             Set `base: './'` and `build.outDir: 'assets'` in vite.config manually."
+        ));
+    }
+
+    // Add the @peko/client SDK as a local dependency so the web app can import
+    // it and call native handlers. It resolves against the installed pekoui
+    // package. npm install (run by the build) picks it up.
+    if let Err(e) = add_client_dependency(project_root, &pekoui_path) {
+        reporter.warning(format!(
+            "set up, but could not add the @peko/client dependency automatically: {e}. \
+             Add \"@peko/client\": \"file:{}/client\" to package.json dependencies manually.",
+            pekoui_path.display()
+        ));
+    }
+
+    true
+}
+
+/// Detects a compatible web framework in `dir` by reading its package.json.
+/// Returns a short framework label (react, vue, svelte, solid, preact, or
+/// vite) when a known framework dependency or the Vite build tool is present.
+fn detect_web_framework(dir: &Path) -> Option<String> {
+    let source = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let package: serde_json::Value = serde_json::from_str(&source).ok()?;
+
+    let mut names: Vec<String> = Vec::new();
+    for table in ["dependencies", "devDependencies"] {
+        if let Some(map) = package.get(table).and_then(|value| value.as_object()) {
+            names.extend(map.keys().cloned());
+        }
+    }
+    let has = |name: &str| names.iter().any(|entry| entry == name);
+
+    if has("react") || has("react-dom") {
+        Some("react".to_string())
+    } else if has("vue") {
+        Some("vue".to_string())
+    } else if has("svelte") {
+        Some("svelte".to_string())
+    } else if has("solid-js") {
+        Some("solid".to_string())
+    } else if has("preact") {
+        Some("preact".to_string())
+    } else if has("vite") {
+        Some("vite".to_string())
+    } else {
+        None
+    }
+}
+
+/// Reads a top-level string field from the package.json in `dir`.
+fn package_json_field(dir: &Path, field: &str) -> Option<String> {
+    let source = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let package: serde_json::Value = serde_json::from_str(&source).ok()?;
+    package
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+/// Set up the current directory, an existing web-framework project, as a Peko
+/// app in place. Prompts for the app details, defaulting from package.json,
+/// then overlays the Peko host without scaffolding a new framework tree.
+fn adopt_current_directory(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    rl: &mut Editor<(), FileHistory>,
+    project_dir: &Path,
+    framework: &str,
+) -> ExitCode {
+    let default_name = package_json_field(project_dir, "name")
+        .map(|name| name.rsplit('/').next().unwrap_or("app").to_owned())
+        .or_else(|| {
+            project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "app".to_string());
+
+    let project_name = match rl.readline_with_initial("* Project name     => ", (&default_name, "")) {
+        Ok(value) => value.trim().to_owned(),
+        Err(e) => {
+            reporter.error(format!("could not read project name: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    if project_name.is_empty() {
+        reporter.error("project name cannot be empty");
+        return ExitCode::FAILURE;
+    }
+
+    let slug: String = project_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    let default_bundle = format!(
+        "com.example.{}",
+        if slug.is_empty() { "app" } else { &slug }
+    );
+    let bundle_id = match rl.readline_with_initial("* Bundle ID        => ", (&default_bundle, "")) {
+        Ok(value) => value.trim().to_owned(),
+        Err(e) => {
+            reporter.error(format!("could not read bundle id: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let default_version = package_json_field(project_dir, "version")
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "0.1.0".to_string());
+    let version = match rl.readline_with_initial("* Project version  => ", (&default_version, "")) {
+        Ok(value) => normalize_version(&value),
+        Err(e) => {
+            reporter.error(format!("could not read project version: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    reporter.status(
+        "Setting up",
+        format!("the existing {framework} project as a Peko app"),
+    );
+    if !overlay_peko_host(cli_info, reporter, &project_name, &bundle_id, &version, project_dir) {
+        return ExitCode::FAILURE;
+    }
+
+    reporter.success(format!(
+        "set up the existing {framework} project as a Peko app"
+    ));
+    reporter.info("next: npm install, then `peko build`".to_string());
+    ExitCode::SUCCESS
+}
+
+/// Add `@peko/client` to the scaffolded package.json as a local `file:`
+/// dependency pointing at the installed pekoui package's client directory, so
+/// `import { peko } from '@peko/client'` resolves after npm install.
+fn add_client_dependency(project_root: &Path, pekoui_path: &Path) -> std::io::Result<()> {
+    let package_path = project_root.join("package.json");
+    let source = std::fs::read_to_string(&package_path)?;
+    let mut package: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let dependency = format!("file:{}", pekoui_path.join("client").display());
+    let object = package
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "package.json is not an object"))?;
+    let dependencies = object
+        .entry("dependencies")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(dependencies) = dependencies.as_object_mut() {
+        dependencies.insert("@peko/client".to_string(), serde_json::Value::String(dependency));
+    }
+
+    let mut rendered = serde_json::to_string_pretty(&package)?;
+    rendered.push('\n');
+    std::fs::write(&package_path, rendered)
+}
+
+/// Inject `base` and `build.outDir` into the Vite config create-vite emitted,
+/// so a `vite build` writes into `assets/` with relative asset URLs.
+fn patch_vite_config(project_root: &Path) -> std::io::Result<()> {
+    let candidates = ["vite.config.js", "vite.config.ts", "vite.config.mjs"];
+    let config_path = candidates
+        .iter()
+        .map(|name| project_root.join(name))
+        .find(|path| path.is_file());
+    let Some(config_path) = config_path else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no vite.config file found",
+        ));
+    };
+
+    let source = std::fs::read_to_string(&config_path)?;
+    if source.contains("outDir") {
+        return Ok(());
+    }
+    // base and outDir put the built app where the asset server serves it. The
+    // dedupe resolves the framework runtime from the project root so a
+    // symlinked local @peko/client adapter imports the app's own copy.
+    let injected = source.replacen(
+        "defineConfig({",
+        "defineConfig({\n  base: './',\n  build: { outDir: 'assets', emptyOutDir: true },\n  resolve: { dedupe: ['react', 'react-dom', 'vue'] },",
+        1,
+    );
+    std::fs::write(&config_path, injected)
+}
+
+/// Whether running `program` with `args` exits successfully. Used to probe for
+/// an external tool (for example `npm --version`) before invoking it.
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// Normalize a typed version into bare semver, dropping a leading `v`.
 fn normalize_version(input: &str) -> String {
     let trimmed = input.trim();
     trimmed.strip_prefix('v').unwrap_or(trimmed).to_owned()
+}
+
+/// Present an arrow-key menu of web frameworks and return the selected
+/// create-vite template name, or `None` if the selection was aborted.
+fn prompt_web_framework() -> Option<String> {
+    // (menu label, create-vite template name)
+    const CHOICES: [(&str, &str); 9] = [
+        ("React", "react"),
+        ("React + TypeScript", "react-ts"),
+        ("Vue", "vue"),
+        ("Vue + TypeScript", "vue-ts"),
+        ("Svelte", "svelte"),
+        ("Svelte + TypeScript", "svelte-ts"),
+        ("Solid", "solid"),
+        ("Preact", "preact"),
+        ("Vanilla JS", "vanilla"),
+    ];
+    let labels: Vec<&str> = CHOICES.iter().map(|(label, _)| *label).collect();
+    let selection = dialoguer::Select::new()
+        .with_prompt("Web framework")
+        .items(&labels)
+        .default(0)
+        .interact_opt()
+        .ok()
+        .flatten()?;
+    Some(CHOICES[selection].1.to_owned())
 }
 
 /// Ask a yes/no question, returning `true` for affirmative answers.
@@ -225,7 +590,7 @@ fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_y
     }
 }
 
-/// The `peko.toml` scaffolded for a UI project.
+/// The `peko.toml` scaffolded for a UI (static web) project.
 const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     name = \"{name}\"\n\
                                     bundle = \"{bundle}\"\n\
@@ -233,9 +598,18 @@ const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     target_platforms = [\"android\", \"ios\", \"linux\", \"macos\", \"windows\"]\n\
                                     \n\
                                     [ui]\n\
-                                    framework = \"native\"\n\
+                                    framework = \"static\"\n\
                                     \n\
-                                    [dependencies]\n";
+                                    [dependencies]\n\
+                                    pekoui = { path = \"{pekoui_path}\" }\n";
+
+/// The `source/main.peko` scaffolded for a UI project: a one-line host that
+/// serves the built web app in a native webview.
+const UI_MAIN_PEKO_TEMPLATE: &str = "import pekoui as ui;\n\
+                                     \n\
+                                     fn on_start() {\n\
+                                     \tui::app::from_bundle().run()\n\
+                                     }\n";
 
 /// The `peko.toml` scaffolded for a CLI project.
 const CLI_MANIFEST_TEMPLATE: &str = "[project]\n\
@@ -250,36 +624,6 @@ const CLI_MAIN_PEKO_TEMPLATE: &str = "import std::io;\n\
                                       fn on_start() {\n\
                                       \tio::println(\"Hello World!\")\n\
                                       }\n";
-
-/// The starter page scaffolded for a UI project.
-const INDEX_PAGE_TEMPLATE: &str = "style page_styles;\n\
-                                   \n\
-                                   class Index from ui::Page {\n\
-                                   \tconstructor() => super() {\n\
-                                   \t\tthis.set_styling(ui::Styling(page_styles));\n\
-                                   \t}\n\
-                                   \n\
-                                   \tfn render() => ui::Element {\n\
-                                   \t\treturn <h1>Hello World</h1>;\n\
-                                   \t}\n\
-                                   }\n";
-
-/// The `source/main.peko` scaffolded for a UI project.
-fn ui_main_peko_template(project_name: &str) -> String {
-    format!(
-        "import {{ Index }} from pages::index;\n\
-         style root_styles;\n\
-         \n\
-         fn OnStart() {{\n\
-         \tapp := ui::App(\"{project_name}\", 800, 800);\n\
-         \tapp.set_root_layout(closure(content: ui::Element) => ui::Element {{\n\
-         \t\treturn content;\n\
-         \t}}, ui::Styling(root_styles));\n\
-         \tapp.add_page(\"/\", Index());\n\
-         \tapp.run();\n\
-         }}\n"
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Subcommand: add-asset

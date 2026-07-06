@@ -60,7 +60,7 @@ fn build_generic_class_template(
         module,
     );
     class.generic_typenames = typenames;
-    class.source_class = Some(source);
+    class.source_class = Some(std::sync::Arc::new(source));
     class.template_scope = Some(scope);
     class.template_filename = file;
     class
@@ -500,8 +500,8 @@ impl PekoValueSimulator for NewVariableAST {
 
 /// Simulates a function declaration.
 ///
-/// Generic functions are *tracked* (registered as a
-/// [`SimulatorFunctionGeneric`]) rather than simulated, since they
+/// Generic functions are *tracked* (registered as a [`SimulatorFunction`] whose
+/// `source_function` holds the stashed AST) rather than simulated, since they
 /// can't be type-checked without concrete type arguments. Non-generic
 /// functions:
 ///
@@ -512,6 +512,27 @@ impl PekoValueSimulator for NewVariableAST {
 ///    scope with the arguments bound, checking that all paths return
 ///    when a non-void return type was declared.
 impl PekoValueSimulator for FunctionDeclarationAST {
+    /// Header pass: register the function's signature without checking its
+    /// body, so calls that reference a function declared later in the same
+    /// module resolve. Generic functions are tracked during simulate instead.
+    ///
+    /// Diagnostics raised here are discarded and left to the body pass, which
+    /// runs the same signature checks with every declaration already in scope.
+    /// This keeps a forward reference to a type declared later in the module
+    /// from producing a spurious "not defined" error, and avoids reporting a
+    /// real signature error twice.
+    fn declare(&self, simulator_context: &mut PekoSimulatorContext) {
+        if !self.generic_types.is_empty() {
+            return;
+        }
+        let previous = simulator_context.declaring_signatures_only;
+        let saved_diagnostics = simulator_context.diagnostics.clone();
+        simulator_context.declaring_signatures_only = true;
+        self.simulate(simulator_context);
+        simulator_context.declaring_signatures_only = previous;
+        simulator_context.diagnostics = saved_diagnostics;
+    }
+
     fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
         // Build the simplified argument map used by scope tracking.
         let mut converted_arguments = IndexMap::new();
@@ -811,6 +832,19 @@ impl PekoValueSimulator for FunctionDeclarationAST {
                 .get_mut(&self.function_name.value)
                 .unwrap()
                 .push(Arc::new(RwLock::new(peko_function)));
+        }
+
+        // Header pass: the signature is now registered under its module, so a
+        // call from another function in this module resolves regardless of
+        // declaration order. Skip the body and restore context state.
+        if simulator_context.declaring_signatures_only {
+            simulator_context.scoped_variables.clear();
+            simulator_context.scoped_variables.extend(scoped_variables);
+            simulator_context.current_this = current_this;
+            simulator_context.local_scope = local_scope;
+            simulator_context.current_return_type = current_return_type;
+
+            return SimulatorValue::Value(types::PekoType::simple_type("default"));
         }
 
         // No body: nothing to simulate. Restore state and exit.
@@ -1979,7 +2013,7 @@ impl PekoValueSimulator for ClassAST {
                         let Some(template) = find_generic else {
                             break;
                         };
-                        let Some(source) = template.source_class.clone() else {
+                        let Some(source) = template.source_class.as_deref().cloned() else {
                             break;
                         };
 
@@ -2101,7 +2135,7 @@ impl PekoValueSimulator for ClassAST {
 
         let mut virtual_table_methods = IndexMap::new();
         let mut class_attributes = IndexMap::new();
-        let mut parent_class: Option<Box<SimulatorClass>> = None;
+        let mut parent_class: Option<Arc<SimulatorClass>> = None;
 
         // Reserve an opaque slot for the virtual table on classes with
         // methods or inheritance.
@@ -2122,7 +2156,7 @@ impl PekoValueSimulator for ClassAST {
             let find_parent_class = simulator_context.get_class_by_type(&self.derives_from[0]);
 
             if let Some(find_parent_class) = &find_parent_class {
-                parent_class = Some(Box::new(find_parent_class.clone()));
+                parent_class = Some(std::sync::Arc::new(find_parent_class.clone()));
 
                 for (attribute_name, attribute) in &find_parent_class.attributes {
                     if attribute_name != "<main_virtual_table>" {

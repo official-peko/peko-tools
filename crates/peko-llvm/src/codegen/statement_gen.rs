@@ -5,16 +5,15 @@
 
 use std::sync::{Arc, RwLock};
 
-use indexmap::IndexMap;
 use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
-use peko_core::asts::data_structures::{PositionData, PositionedValue, VisibilityData};
+use peko_core::asts::data_structures::VisibilityData;
 use peko_core::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
     PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
     VariableReassignmentAST, WhileLoopAST,
 };
-use peko_core::asts::{self, PekoAST};
+use peko_core::asts::PekoAST;
 use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::execution::data_structures::{ExecutionModule, ExecutionValue};
@@ -1171,6 +1170,19 @@ impl PekoValueBuilder for ImportStatementAST {
                 }
             }
 
+            // Every imported module receives the standard-library prelude so
+            // its own declarations resolve the core types without an explicit
+            // import, matching what the main source file gets. The prelude is
+            // built eagerly here, before the module's declarations, so the
+            // types are in scope when they are processed. Foundational modules
+            // are excluded by module_prelude_imports; FFI headers are excluded
+            // here (they are a raw C surface, not Peko source).
+            if !is_ffi {
+                for prelude_import in peko_core::asts::module_prelude_imports(&module_name) {
+                    prelude_import.build_value(codegen_context);
+                }
+            }
+
             // Three passes so a class body can dispatch on any other class
             // regardless of source order: declare every shell, then lay out and
             // declare every class's method signatures, then build the bodies.
@@ -1202,13 +1214,19 @@ impl PekoValueBuilder for ImportStatementAST {
         // Bind the alias in the importing module so qualified access resolves
         // per-module (mirrors the simulator).
         if !has_unpack_list {
-            codegen_context
-                .module_context
-                .current_module()
-                .write()
-                .unwrap()
+            let current_module = codegen_context.module_context.current_module();
+            let mut current_module = current_module.write().unwrap();
+            current_module
                 .module_aliases
                 .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+            // An export also registers the module as a submodule of the current
+            // module, so a package entry (lib.peko) re-exports it and callers
+            // reach it as `package::submodule` (mirrors the simulator).
+            if self.is_export {
+                current_module
+                    .modules
+                    .insert(import_as_module_name.clone(), Arc::clone(&module_to_import));
+            }
         }
 
         if !codegen_context.creating_required || codegen_context.outside_primary_module {
@@ -1336,102 +1354,36 @@ impl PekoValueBuilder for StyleStatementAST {
             return codegen_context.create_error_value();
         }
 
-        let style_name = format!("{}.css", file_path.file_stem().unwrap().to_str().unwrap());
-        codegen_context
-            .imported_styles
-            .insert(file_path.clone(), style_name.clone());
+        // The stylesheet is compiled into the binary as a string constant:
+        // parse the SCSS at codegen time and emit its compiled CSS as a
+        // `String` global.
+        let scss_stylesheet_contents = std::fs::read_to_string(&file_path).unwrap();
+        let parsed_scss = grass::from_string(scss_stylesheet_contents, &grass::Options::default());
 
-        // When `compiled_styles_folder` is set, the style is served by a
-        // local dev server: the global resolves at runtime to a fetch of
-        // the compiled stylesheet from `127.0.0.1:<debug_style_port>/<style_name>`.
-        let (variable_value, variable_type) = if codegen_context.compiled_styles_folder.is_some() {
-            let debug_style_port_access =
-                PekoAST::ModuleAccess(asts::expressions::ModuleAccessAST::new(
-                    PositionData::default(),
-                    PositionData::default(),
-                    vec![PositionedValue::create_no_position(String::from("ui"))],
-                    Box::new(PekoAST::VariableReference(
-                        asts::expressions::VariableReferenceAST::new(
-                            PositionedValue::create_no_position(String::from("debug_style_port")),
-                        ),
-                    )),
-                ));
-
-            // The `true` is the `interpolated` flag: this URL splices
-            // in the runtime value of `ui::debug_style_port`.
-            let string_value = PekoAST::String(asts::values::StringAST::new(
-                PositionData::default(),
-                PositionData::default(),
-                true,
-                vec![
-                    asts::data_structures::StringChunk::new_text(
-                        PositionData::default(),
-                        PositionData::default(),
-                        String::from("<link>http://127.0.0.1:"),
-                    ),
-                    asts::data_structures::StringChunk::new_interpolation(
-                        PositionData::default(),
-                        PositionData::default(),
-                        vec![debug_style_port_access],
-                    ),
-                    asts::data_structures::StringChunk::new_text(
-                        PositionData::default(),
-                        PositionData::default(),
-                        format!("/?style={style_name}"),
-                    ),
-                ],
-            ));
-
-            let return_string_value = PekoAST::Return(ReturnAST::new(
-                PositionData::default(),
-                PositionData::default(),
-                Some(Box::new(string_value)),
-            ));
-
-            (
-                PekoAST::Closure(asts::declarations::ClosureAST::new(
-                    PositionData::default(),
-                    PositionData::default(),
-                    IndexMap::new(),
-                    Vec::new(),
-                    Some(PekoType::from_string("string", "")),
-                    PositionedValue::create_no_position(vec![return_string_value]),
-                )),
-                PekoType::from_string("closure()=>string", ""),
-            )
-        } else {
-            // Otherwise the stylesheet is compiled into the binary as a
-            // string constant: parse the SCSS at codegen time and emit
-            // its compiled CSS as a `String` global.
-            let scss_stylesheet_contents = std::fs::read_to_string(&file_path).unwrap();
-            let parsed_scss =
-                grass::from_string(scss_stylesheet_contents, &grass::Options::default());
-
-            let mut parsed_scss = match parsed_scss {
-                Ok(css) => css,
-                Err(_) => {
-                    codegen_context.diagnostics.report_diagnostic(
-                        diagnostics::PekoDiagnostic::new(
-                            self.start.clone(),
-                            self.end.clone(),
-                            "there are diagnostics in this stylesheet".to_string(),
-                            diagnostics::DiagnosticType::Error,
-                            codegen_context.get_current_file().to_path_buf(),
-                        ),
-                    );
-                    String::new()
-                }
-            };
-
-            if parsed_scss.is_empty() {
-                parsed_scss = String::from(" ");
+        let mut parsed_scss = match parsed_scss {
+            Ok(css) => css,
+            Err(_) => {
+                codegen_context
+                    .diagnostics
+                    .report_diagnostic(diagnostics::PekoDiagnostic::new(
+                        self.start.clone(),
+                        self.end.clone(),
+                        "there are diagnostics in this stylesheet".to_string(),
+                        diagnostics::DiagnosticType::Error,
+                        codegen_context.get_current_file().to_path_buf(),
+                    ));
+                String::new()
             }
-
-            (
-                codegen_context.create_standard_string_ast(parsed_scss),
-                PekoType::simple_type("String"),
-            )
         };
+
+        if parsed_scss.is_empty() {
+            parsed_scss = String::from(" ");
+        }
+
+        let (variable_value, variable_type) = (
+            codegen_context.create_standard_string_ast(parsed_scss),
+            PekoType::simple_type("String"),
+        );
 
         // Mangle the global name with the module path.
         let global_name = {

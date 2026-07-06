@@ -230,20 +230,33 @@ void        peko_stream_abort_tls(void *handle);
  * ---------------------------------------------------------------------- */
 
 /*
- * Accepts exactly one WebSocket connection on listen_socket.
- * Performs the HTTP upgrade handshake, then calls message_handler for
- * each text frame received. Ping frames are answered automatically.
+ * Accepts one connection on listen_socket, returning the client fd or -1 on
+ * failure. The thread parks during accept so a collection can proceed. Pair
+ * with peko_ws_serve to handle each connection on its own thread.
+ */
+int peko_ws_accept(peko_socket_t listen_socket);
+
+/*
+ * Serves one accepted connection: performs the HTTP upgrade handshake, then
+ * calls handler for the connection's lifecycle. handler is called as
+ * handler(data, event, client_fd, text) where event is 0 (open), 1 (message),
+ * or 2 (close); text carries the frame for a message and is empty otherwise.
+ * Ping frames are answered automatically. The caller runs this on a dedicated
+ * thread, so many connections are served at once.
  *
- * current_client - written with the accepted client fd so the Peko side
- *                  can call peko_ws_send_text on it.
- * message_handler - called as message_handler(data, client_fd, text) for
- *                   each complete text frame.
- * data            - opaque user context forwarded to message_handler.
- *
+ * Returns 0 when the connection closes cleanly, non-zero on handshake error.
+ */
+int peko_ws_serve(peko_socket_t   client,
+                  void          (*handler)(void *, int, peko_socket_t, char *),
+                  void           *data);
+
+/*
+ * Accepts and serves one connection on the calling thread (peko_ws_accept then
+ * peko_ws_serve). Retained for single-connection callers.
  * Returns 0 when the connection closes cleanly, non-zero on error.
  */
 int peko_ws_accept_connection(peko_socket_t   listen_socket,
-                              void          (*message_handler)(void *, peko_socket_t, char *),
+                              void          (*handler)(void *, int, peko_socket_t, char *),
                               void           *data);
 
 /*

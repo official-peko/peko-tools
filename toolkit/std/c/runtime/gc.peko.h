@@ -21,4 +21,10 @@ p_fn p_gcsafe void pgc_shutdown();
 p_fn p_gcsafe void pgc_thread_attach();
 p_fn p_gcsafe void pgc_thread_detach();
 
+/* Windows socket subsystem lifecycle: WSAStartup / WSACleanup on Windows, no-ops
+   elsewhere. Driven from the program entry so every socket user (the asset
+   server, the websocket bridge) has Winsock initialized before it runs. */
+p_fn void windowsStart();
+p_fn void windowsCleanup();
+
 PEKO_END

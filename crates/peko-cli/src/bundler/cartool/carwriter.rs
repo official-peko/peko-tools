@@ -430,12 +430,30 @@ impl WriteToCar for carinfo::ValueBlock {
                 // 4 padding bytes.
                 writer.write_bytes(&[0; 4]);
             }
+
+            carinfo::ValueBlock::MultisizedImageList(entries) => {
+                // Magic "SISM" (= "MSIS" in CAR-endian).
+                writer.write_bytes(b"SISM");
+
+                // Version (1) and size-entry count.
+                writer.write_bytes(&1u32.to_le_bytes());
+                writer.write_bytes(&(entries.len() as u32).to_le_bytes());
+
+                // Each entry: point width, point height, dimension2 group.
+                for entry in entries {
+                    writer.write_bytes(&entry.width.to_le_bytes());
+                    writer.write_bytes(&entry.height.to_le_bytes());
+                    writer.write_bytes(&entry.index.to_le_bytes());
+                }
+            }
         }
 
         // Image-data blocks are embedded inline within their parent CSI's
         // block, so they don't get their own block-table entry.
         match self {
-            Self::CELMImageData(_) | Self::MultisizedImageSetData(_) => 0,
+            Self::CELMImageData(_)
+            | Self::MultisizedImageSetData(_)
+            | Self::MultisizedImageList(_) => 0,
             _ => {
                 writer.add_block(&BomBlock {
                     name: None,

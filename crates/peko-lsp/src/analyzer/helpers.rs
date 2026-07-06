@@ -80,8 +80,9 @@ macro_rules! char_is_peko_type_eligible {
 
 /// Build the `import` AST nodes the analyzer silently injects at the top of
 /// every parsed file. `std::core` and `std::collections` are unpacked (used
-/// bare); `std::runtime`, `std::xml`, and `std::json` are imported under their
-/// prefix. The same set is replayed at startup to preload the simulator.
+/// bare); `std::runtime`, `std::xml`, `std::json`, and `std::bundle` are
+/// imported under their prefix. The same set is replayed at startup to
+/// preload the simulator.
 pub(crate) fn default_preloaded_imports() -> Vec<PekoAST> {
     fn import(path: &str, alias: Option<&str>, unpack: Vec<UnpackItem>) -> PekoAST {
         PekoAST::ImportStatement(ImportStatementAST::new(
@@ -93,6 +94,7 @@ pub(crate) fn default_preloaded_imports() -> Vec<PekoAST> {
             alias.map(|name| PositionedValue::create_no_position(name.to_string())),
             unpack,
             Option::None,
+            false,
         ))
     }
 
@@ -102,7 +104,25 @@ pub(crate) fn default_preloaded_imports() -> Vec<PekoAST> {
         import("std::runtime", Some("runtime"), Vec::new()),
         import("std::xml", Some("xml"), Vec::new()),
         import("std::json", Some("json"), Vec::new()),
+        import("std::bundle", Some("bundle"), Vec::new()),
     ]
+}
+
+/// A plain `import <path>` AST (no alias, unpack, or version). Used to preload
+/// an external package and its submodules into the simulator once, so imports
+/// of them across editor requests reuse the loaded modules.
+pub(crate) fn plain_import(path: &str) -> PekoAST {
+    PekoAST::ImportStatement(ImportStatementAST::new(
+        PositionData::default(),
+        PositionData::default(),
+        path.split("::")
+            .map(|segment| PositionedValue::create_no_position(segment.to_string()))
+            .collect(),
+        None,
+        Vec::new(),
+        Option::None,
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------

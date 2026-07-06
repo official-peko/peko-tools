@@ -22,6 +22,7 @@ use document::PekoDocument;
 use helpers::create_position;
 use peko_core::{
     ExternalModuleInfo,
+    asts::PekoAST,
     asts::data_structures::PositionData,
     config::Lockfile,
     diagnostics::{DiagnosticType, PekoDiagnostic},
@@ -93,8 +94,8 @@ enum SymbolSearchResult {
     /// Cursor is inside an `import pkg::` path: offer the package's module
     /// names.
     ImportModules(Vec<String>),
-    /// Cursor is after `EnumName::`: offer the enum's variant names.
-    EnumVariants(Vec<String>),
+    /// Cursor is after `EnumName::`: the enum's name and its variant names.
+    EnumVariants(String, Vec<String>),
     /// Cursor is at a method-declaration position inside a class body that
     /// derives from traits: offer those traits' methods as override stubs.
     OverrideMethods(Vec<ScopeMethodSignature>),
@@ -215,24 +216,27 @@ impl PekoAnalyzer {
     }
 
     /// Walk upward from `project_folder` looking for a directory that
-    /// contains a `.peko` subdirectory. That directory is the project root,
-    /// matching the CLI compilation root, which is the parent of `.peko/`.
-    /// The search climbs up to five parents.
+    /// contains a `peko.toml` manifest. That directory is the project root,
+    /// the same directory the CLI compiles from. The manifest exists as soon
+    /// as a project is scaffolded, so dependency resolution works before the
+    /// first build creates the `.peko` cache. The search climbs up to five
+    /// parents.
     pub fn set_project_folder(&mut self, mut project_folder: PathBuf) {
         let mut search_limit = 5;
         while search_limit > 0
-            && !project_folder.join(".peko").is_dir()
+            && !project_folder.join("peko.toml").is_file()
             && let Some(parent) = project_folder.parent()
         {
             project_folder = parent.to_path_buf();
             search_limit -= 1;
         }
 
-        self.project_root = if project_folder.join(".peko").is_dir() {
+        self.project_root = if project_folder.join("peko.toml").is_file() {
             Some(project_folder)
         } else {
             None
         };
+
     }
 
     /// Look up a tracked document by path. Used as the early-exit guard in
@@ -241,11 +245,13 @@ impl PekoAnalyzer {
         self.tracked_files.get(path)
     }
 
-    /// Preload the default modules (`runtime`, `standard`, `console`,
-    /// `pekoui`) once at startup, into `preloaded_modules`, so every
-    /// per-request simulator context can copy them in cheaply.
+    /// Preload the standard library and the project's external packages once,
+    /// into `preloaded_modules`, so every per-request simulator context copies
+    /// them in cheaply instead of re-simulating them. Rebuilt whenever the
+    /// project folder is set, since the external packages depend on it.
     fn load_required_packages(&mut self, target: PekoTarget) {
-        let asts = helpers::default_preloaded_imports();
+        let mut asts = helpers::default_preloaded_imports();
+        asts.extend(self.external_package_imports());
 
         let mut simulator_context = PekoSimulatorContext::new(
             target,
@@ -267,8 +273,47 @@ impl PekoAnalyzer {
             .top_level_modules
             .shift_remove("main");
 
-        self.preloaded_modules
-            .extend(simulator_context.module_context.top_level_modules);
+        // Replace the preloaded set. The standard library and external packages
+        // are simulated together in one context, so they share module
+        // identities and a single extern module, matching what a request
+        // builds.
+        self.preloaded_modules = simulator_context
+            .module_context
+            .top_level_modules
+            .into_iter()
+            .collect();
+
+        // The per-document memo was produced against the previous preloaded
+        // base, so drop it.
+        if let Ok(mut cache) = self.simulation_cache.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Plain imports that preload every package the project resolves against
+    /// (each package entry and each of its submodules), so imports of them
+    /// across requests reuse the loaded modules. This includes std, whose
+    /// submodules beyond the default preloaded set (io, fs, crypto, and the
+    /// rest) would otherwise re-simulate on every request. The default imports
+    /// still handle the per-file unpacking of core and collections; these just
+    /// load the module files. A submodule already loaded by the default set is
+    /// simply reused.
+    fn external_package_imports(&self) -> Vec<PekoAST> {
+        // Without a project there are no external packages to memoize, and the
+        // default imports already cover the standard library essentials. This
+        // keeps startup (before the project folder is known) light; the full
+        // preload runs once when the project folder is set.
+        if self.project_root.is_none() {
+            return Vec::new();
+        }
+        let mut imports = Vec::new();
+        for package_name in self.external_modules().keys() {
+            imports.push(helpers::plain_import(package_name));
+            for module in self.package_module_names(package_name) {
+                imports.push(helpers::plain_import(&format!("{package_name}::{module}")));
+            }
+        }
+        imports
     }
 
     /// Build the lock-scoped external-module map for the active project.
@@ -293,13 +338,40 @@ impl PekoAnalyzer {
             modules.insert(info.module_name.clone(), info);
         }
 
-        if let Some(project_root) = self.project_root.as_ref()
-            && let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root)
-        {
-            modules.extend(
-                PekoPackageIndex::from_lockfile(&self.peko_root, project_root, &lockfile)
-                    .get_external_modules(),
-            );
+        if let Some(project_root) = self.project_root.as_ref() {
+            // Resolve the manifest's direct path dependencies from their source
+            // directory. A freshly scaffolded project has no lockfile yet, so
+            // this is the only way pekoui and other path packages resolve
+            // before the first build. Mirrors the compiler, which resolves a
+            // path dependency from its directory rather than the source cache.
+            if let Ok(loaded) =
+                peko_core::config::Manifest::load(project_root.join("peko.toml"))
+            {
+                for dependency in loaded.manifest.dependencies().values() {
+                    let peko_core::config::Dependency::Path { path } = dependency else {
+                        continue;
+                    };
+                    let dependency_manifest = project_root.join(path).join("peko.toml");
+                    if let Ok(dependency_loaded) =
+                        peko_core::config::Manifest::load(dependency_manifest)
+                    {
+                        let info = dependency_loaded
+                            .manifest
+                            .to_external_module(&dependency_loaded.root);
+                        modules.insert(info.module_name.clone(), info);
+                    }
+                }
+            }
+
+            // The lockfile pins exact versions, including transitive
+            // dependencies, once the project has been resolved. It refines and
+            // overrides the manifest pass above.
+            if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {
+                modules.extend(
+                    PekoPackageIndex::from_lockfile(&self.peko_root, project_root, &lockfile)
+                        .get_external_modules(),
+                );
+            }
         }
 
         modules
@@ -440,6 +512,13 @@ impl PekoAnalyzer {
         let mut simulator_context =
             self.create_simulator_context(document_path.to_path_buf(), end_position);
         simulator_context.minified_import_errors = true;
+
+        // Header pass: register every top-level signature before checking any
+        // body, so a declaration can reference another regardless of source
+        // order (mirrors the compiler's build path).
+        for ast in &parsed_asts {
+            ast.declare(&mut simulator_context);
+        }
 
         for ast in &parsed_asts {
             ast.simulate(&mut simulator_context);
@@ -763,25 +842,37 @@ impl PekoAnalyzer {
                 .get_available_symbols_from_position(peko_position.clone())
         };
 
-        // An `EnumName::` access lists the enum's variants. When module
-        // resolution found nothing for a single-segment name, check whether
-        // that name is an enum in scope and surface its variant names.
-        if !module_full_name.is_empty()
-            && !module_full_name.contains("::")
-            && available_symbols.is_empty()
-        {
-            let in_scope = simulation_result
-                .context
-                .get_available_symbols_from_position(peko_position.clone());
-            if let Some(variants) = in_scope
+        // An `EnumName::` or `module::EnumName::` access lists the enum's
+        // variants. When module resolution found nothing, check whether the
+        // name resolves to an enum and surface its variant names. A bare name
+        // resolves against the in-scope symbols; a qualified name resolves its
+        // parent module path (aliases included) and finds the enum among that
+        // module's own declarations.
+        if !module_full_name.is_empty() && available_symbols.is_empty() {
+            let (enum_name, candidates) = if let Some((parent, name)) =
+                module_full_name.rsplit_once("::")
+            {
+                (
+                    name.to_owned(),
+                    simulation_result
+                        .context
+                        .get_available_symbols_from_module(parent.to_owned(), peko_position.clone()),
+                )
+            } else {
+                (
+                    module_full_name.clone(),
+                    simulation_result
+                        .context
+                        .get_available_symbols_from_position(peko_position.clone()),
+                )
+            };
+            if let Some(variants) = candidates
                 .iter()
-                .find(|symbol| {
-                    symbol.get_kind() == "enum" && symbol.get_name() == module_full_name
-                })
+                .find(|symbol| symbol.get_kind() == "enum" && symbol.get_name() == enum_name)
                 .and_then(|symbol| symbol.as_enum())
                 .map(|scope_enum| scope_enum.variants)
             {
-                return SymbolSearchResult::EnumVariants(variants);
+                return SymbolSearchResult::EnumVariants(enum_name, variants);
             }
         }
 
@@ -873,6 +964,10 @@ impl PekoAnalyzer {
 impl AnalysisEngine for PekoAnalyzer {
     fn update_project_root(&mut self, path: &Path) {
         self.set_project_folder(path.to_path_buf());
+    }
+
+    fn preload_packages(&mut self) {
+        self.load_required_packages(self.target);
     }
 
     fn update_file(&mut self, path: &Path, text: &str) {
@@ -978,13 +1073,28 @@ impl AnalysisEngine for PekoAnalyzer {
             return None;
         }
 
-        let available_symbols = match self.get_symbols_at(path, position) {
+        let search = self.get_symbols_at(path, position);
+
+        // Hovering an enum variant (`Enum::Variant`, or a qualified
+        // `mod::Enum::Variant`) resolves to the enum's variant list, not a
+        // symbol. Render it as the qualified variant.
+        if let SymbolSearchResult::EnumVariants(enum_name, variants) = &search {
+            if variants.iter().any(|variant| variant == &current_identifier) {
+                return Some(HoverInfo {
+                    contents: format!("```pekoscript\nenum {enum_name}::{current_identifier}\n```"),
+                    range: None,
+                });
+            }
+            return None;
+        }
+
+        let available_symbols = match search {
             SymbolSearchResult::Access(symbols, _)
             | SymbolSearchResult::Symbols(symbols)
             | SymbolSearchResult::Types(symbols) => symbols,
             SymbolSearchResult::Visibilities
             | SymbolSearchResult::ImportModules(_)
-            | SymbolSearchResult::EnumVariants(_)
+            | SymbolSearchResult::EnumVariants(..)
             | SymbolSearchResult::OverrideMethods(_)
             | SymbolSearchResult::None => Vec::new(),
         };
@@ -1074,6 +1184,16 @@ impl AnalysisEngine for PekoAnalyzer {
                     symbol_markdown.push_str(": ");
                     symbol_markdown.push_str(&symbol_variable.value_type.to_string());
                 }
+            }
+
+            "enum" => {
+                symbol_markdown.push_str("enum ");
+                symbol_markdown.push_str(&symbol.get_name());
+            }
+
+            "trait" => {
+                symbol_markdown.push_str("trait ");
+                symbol_markdown.push_str(&symbol.get_name());
             }
 
             _ => {
@@ -1182,7 +1302,7 @@ impl AnalysisEngine for PekoAnalyzer {
 
         // An `EnumName::` access offers the enum's variants as plain
         // completions.
-        if let SymbolSearchResult::EnumVariants(variants) = search {
+        if let SymbolSearchResult::EnumVariants(_, variants) = search {
             return variants
                 .into_iter()
                 .map(|variant| CompletionItem {
@@ -1213,7 +1333,7 @@ impl AnalysisEngine for PekoAnalyzer {
             SymbolSearchResult::Types(symbols) => (symbols, true, false, false, None),
             SymbolSearchResult::Visibilities => (Vec::new(), false, true, false, None),
             SymbolSearchResult::ImportModules(_)
-            | SymbolSearchResult::EnumVariants(_)
+            | SymbolSearchResult::EnumVariants(..)
             | SymbolSearchResult::OverrideMethods(_)
             | SymbolSearchResult::None => (Vec::new(), false, false, false, None),
         };
@@ -1654,7 +1774,7 @@ impl AnalysisEngine for PekoAnalyzer {
             | SymbolSearchResult::Types(symbols) => symbols,
             SymbolSearchResult::Visibilities
             | SymbolSearchResult::ImportModules(_)
-            | SymbolSearchResult::EnumVariants(_)
+            | SymbolSearchResult::EnumVariants(..)
             | SymbolSearchResult::OverrideMethods(_)
             | SymbolSearchResult::None => Vec::new(),
         };
@@ -2028,6 +2148,238 @@ mod generic_bound_tests {
         analyzer.update_file(&path, &clean);
         let items = analyzer.completions(&path, &Position { line, character });
         Some(items.into_iter().map(|item| item.label).collect())
+    }
+
+    /// The project's external packages are preloaded once when the project
+    /// folder is set, so imports of them across requests reuse the loaded
+    /// modules instead of re-simulating the whole package on every keystroke.
+    /// Gated on an installed pekoui, which supplies a real multi-module package
+    /// with FFI to preload; skips when it is not present.
+    #[test]
+    fn external_packages_are_memoized() {
+        if std::env::var("PEKO_ROOT_PATH").is_err() {
+            let home = std::env::var("HOME").unwrap();
+            unsafe {
+                std::env::set_var("PEKO_ROOT_PATH", format!("{home}/.Peko"));
+            }
+        }
+        let peko_root = PathBuf::from(std::env::var("PEKO_ROOT_PATH").unwrap());
+        let pekoui = peko_root.join("registry/src/pekoui/pekoui-0.1.0");
+        if !pekoui.join("lib.peko").exists() {
+            eprintln!("MEMO: pekoui not installed at {pekoui:?}, skipping");
+            return;
+        }
+
+        // A minimal project that path-depends on the installed pekoui.
+        let project = std::env::temp_dir().join("peko_lsp_memo_test");
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("source")).unwrap();
+        std::fs::write(
+            project.join("peko.toml"),
+            format!(
+                "[project]\nname = \"memotest\"\nbundle = \"com.test.memo\"\nversion = \"0.1.0\"\n\n\
+                 [ui]\nframework = \"static\"\n\n\
+                 [dependencies]\npekoui = {{ path = \"{}\" }}\n",
+                pekoui.display()
+            ),
+        )
+        .unwrap();
+        let main_source = "import pekoui as ui;\n\nfn on_start() {\n    ui::app::from_bundle().run()\n}\n";
+        let main = project.join("source/main.peko");
+        std::fs::write(&main, main_source).unwrap();
+
+        let mut analyzer = PekoAnalyzer::new().unwrap();
+
+        // At startup only the standard library is preloaded, not pekoui.
+        assert!(
+            !analyzer.preloaded_modules.contains_key("pekoui"),
+            "pekoui should not be preloaded before the project folder is set"
+        );
+
+        analyzer.set_project_folder(project.clone());
+        analyzer.preload_packages();
+
+        // The package entry and its submodules are now preloaded.
+        let preloaded: Vec<String> = analyzer.preloaded_modules.keys().cloned().collect();
+        for name in ["pekoui", "app", "menu", "webview", "storage"] {
+            assert!(
+                preloaded.iter().any(|module| module == name),
+                "expected `{name}` in the preloaded set after set_project_folder; got {preloaded:?}"
+            );
+        }
+
+        // Correctness: a file importing pekoui resolves clean using the
+        // preloaded modules.
+        analyzer.update_file(&main, main_source);
+        let diagnostics: Vec<String> = analyzer
+            .diagnostics(&main)
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert!(
+            diagnostics.is_empty(),
+            "`import pekoui as ui` should resolve clean; got {diagnostics:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// Completing `ui::` where `ui` aliases an imported package lists the
+    /// package's exported submodules. Gated on an installed pekoui; skips
+    /// otherwise.
+    #[test]
+    fn module_alias_completion_lists_exports() {
+        if std::env::var("PEKO_ROOT_PATH").is_err() {
+            let home = std::env::var("HOME").unwrap();
+            unsafe {
+                std::env::set_var("PEKO_ROOT_PATH", format!("{home}/.Peko"));
+            }
+        }
+        let peko_root = PathBuf::from(std::env::var("PEKO_ROOT_PATH").unwrap());
+        let pekoui = peko_root.join("registry/src/pekoui/pekoui-0.1.0");
+        if !pekoui.join("lib.peko").exists() {
+            eprintln!("ALIAS: pekoui not installed, skipping");
+            return;
+        }
+
+        let project = std::env::temp_dir().join("peko_lsp_alias_test");
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("source")).unwrap();
+        std::fs::write(
+            project.join("peko.toml"),
+            format!(
+                "[project]\nname = \"aliastest\"\nbundle = \"com.test.alias\"\nversion = \"0.1.0\"\n\n\
+                 [ui]\nframework = \"static\"\n\n\
+                 [dependencies]\npekoui = {{ path = \"{}\" }}\n",
+                pekoui.display()
+            ),
+        )
+        .unwrap();
+        // The cursor sits right after `ui::` on line 3.
+        let main_source = "import pekoui as ui;\n\nfn on_start() {\n    ui::\n}\n";
+        let main = project.join("source/main.peko");
+        std::fs::write(&main, main_source).unwrap();
+
+        let mut analyzer = PekoAnalyzer::new().unwrap();
+        analyzer.set_project_folder(project.clone());
+        analyzer.preload_packages();
+        analyzer.update_file(&main, main_source);
+
+        let labels: Vec<String> = analyzer
+            .completions(&main, &Position { line: 3, character: 8 })
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        for name in ["app", "menu", "webview", "storage"] {
+            assert!(
+                labels.iter().any(|label| label == name),
+                "expected exported submodule `{name}` after `ui::`; got {labels:?}"
+            );
+        }
+
+        // Descending through the alias: `ui::app::` lists the app submodule's
+        // members.
+        let deeper = "import pekoui as ui;\n\nfn on_start() {\n    ui::app::\n}\n";
+        analyzer.update_file(&main, deeper);
+        let deep_labels: Vec<String> = analyzer
+            .completions(&main, &Position { line: 3, character: 13 })
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            deep_labels.iter().any(|label| label == "from_bundle"),
+            "expected `from_bundle` after `ui::app::`; got {deep_labels:?}"
+        );
+
+        // The alias itself is an in-scope symbol, so it appears in the bare
+        // completion list. A reused (memoized) package must still bind its
+        // name into the importing scope.
+        let bare = "import pekoui as ui;\n\nfn on_start() {\n    \n}\n";
+        analyzer.update_file(&main, bare);
+        let bare_labels: Vec<String> = analyzer
+            .completions(&main, &Position { line: 3, character: 4 })
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            bare_labels.iter().any(|label| label == "ui"),
+            "expected the alias `ui` in the bare completion list; got {bare_labels:?}"
+        );
+
+        // Resolving a class through the alias: `new ui::menu::Menu()` (and the
+        // `ui::menu::Menu` type annotation) must not report "cannot find class".
+        let construct =
+            "import pekoui as ui;\n\nfn on_start() {\n    let bar: ui::menu::Menu = new ui::menu::Menu()\n}\n";
+        analyzer.update_file(&main, construct);
+        let construct_diagnostics: Vec<String> = analyzer
+            .diagnostics(&main)
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert!(
+            !construct_diagnostics
+                .iter()
+                .any(|message| message.contains("cannot find class")),
+            "`new ui::menu::Menu()` should resolve through the alias; got {construct_diagnostics:?}"
+        );
+
+        // Passing a module-qualified enum value through the alias to a
+        // parameter typed by the bare enum must match the overload. The enum
+        // argument arrives as `ui::menu::MenuRole` and the `item_role`
+        // parameter is a bare `MenuRole` declared inside the menu module.
+        let overload = "import pekoui as ui;\n\nfn on_start() {\n    let bar: ui::menu::Menu = new ui::menu::Menu()\n    let file: ui::menu::Submenu = bar.submenu(\"File\")\n    file.item_role(\"Quit\", ui::menu::MenuRole::Quit)\n}\n";
+        analyzer.update_file(&main, overload);
+        let overload_diagnostics: Vec<String> = analyzer
+            .diagnostics(&main)
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert!(
+            !overload_diagnostics
+                .iter()
+                .any(|message| message.contains("no overload")),
+            "`item_role(..., ui::menu::MenuRole::Quit)` should match through the alias; got {overload_diagnostics:?}"
+        );
+
+        // Completing `ui::menu::MenuRole::` lists the enum's variants.
+        let variants = "import pekoui as ui;\n\nfn on_start() {\n    ui::menu::MenuRole::\n}\n";
+        analyzer.update_file(&main, variants);
+        let variant_labels: Vec<String> = analyzer
+            .completions(&main, &Position { line: 3, character: 24 })
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        for name in ["Quit", "Copy", "Close"] {
+            assert!(
+                variant_labels.iter().any(|label| label == name),
+                "expected variant `{name}` after `ui::menu::MenuRole::`; got {variant_labels:?}"
+            );
+        }
+
+        // Hover: an enum type reports as `enum`, not `module`, and an enum
+        // variant reference hovers as the qualified variant.
+        let hover_source = "import pekoui as ui;\n\nfn on_start() {\n    let r: ui::menu::MenuRole = ui::menu::MenuRole::Close\n}\n";
+        analyzer.update_file(&main, hover_source);
+        // `MenuRole` in the `ui::menu::MenuRole` type annotation (column 21).
+        let type_hover = analyzer
+            .hover(&main, &Position { line: 3, character: 21 })
+            .map(|h| h.contents)
+            .unwrap_or_default();
+        assert!(
+            type_hover.contains("enum MenuRole") && !type_hover.contains("module MenuRole"),
+            "hovering the enum type should say `enum MenuRole`, not `module`; got {type_hover:?}"
+        );
+        // The `Close` variant in `ui::menu::MenuRole::Close` (column 52).
+        let variant_hover = analyzer
+            .hover(&main, &Position { line: 3, character: 52 })
+            .map(|h| h.contents)
+            .unwrap_or_default();
+        assert!(
+            variant_hover.contains("MenuRole::Close"),
+            "hovering an enum variant should show `MenuRole::Close`; got {variant_hover:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]

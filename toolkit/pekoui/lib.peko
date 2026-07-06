@@ -1,0 +1,15 @@
+//! The PekoUI framework entry.
+//!
+//! Submodules resolve as sibling files: pekoui::webview is webview.peko. A
+//! submodule can be imported directly (`import pekoui::webview`), or the whole
+//! package can be imported under one alias (`import pekoui as ui`) and its
+//! modules reached through it (`ui::app::from_bundle()`, `ui::menu::Menu`).
+//! pekoui is a standalone package and is not auto-imported.
+
+export app;
+export webview;
+export assets;
+export storage;
+export keychain;
+export menu;
+export bridge;

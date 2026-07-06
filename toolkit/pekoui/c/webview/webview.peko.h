@@ -55,6 +55,16 @@ p_fn void peko_webview_minimize(p_opaque w);
 p_fn void peko_webview_maximize(p_opaque w);
 p_fn void peko_webview_close(p_opaque w);
 
+/* macOS native window controls. set_window_buttons_hidden shows or hides the
+   traffic-light close, miniaturize, and zoom buttons, so a frameless window can
+   draw its own controls instead. has_native_window_controls reports whether the
+   OS still draws them: 1 on macOS while the buttons are shown, 0 once hidden.
+   On Windows and Linux a frameless window has no native controls, so hidden is
+   a no-op and has_native_window_controls returns 0. No-ops on iOS and Android,
+   which have no window controls. */
+p_fn void peko_webview_set_window_buttons_hidden(p_opaque w, p_i32 hidden);
+p_fn p_i32 peko_webview_has_native_window_controls(p_opaque w);
+
 /* The GC parks the calling thread across the blocking event loop. */
 p_fn p_gcsafe void pgc_begin_blocking();
 p_fn void pgc_end_blocking();

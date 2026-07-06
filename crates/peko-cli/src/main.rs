@@ -100,6 +100,16 @@ async fn main() -> ExitCode {
         return run_help(&cli_info, &reporter);
     }
 
+    // ---- `peko lsp`: the language server --------------------------------
+    //
+    // The server speaks LSP over stdio, so stdout must carry only the JSON-RPC
+    // stream. Dispatch here, before the root checkup or any reporter output,
+    // so nothing else writes to stdout. Logs go to stderr.
+    if subcommand_name == "lsp" {
+        peko_lsp::serve().await;
+        return ExitCode::SUCCESS;
+    }
+
     // ---- Verify the Peko root looks healthy ------------------------------
     //
     // Skip this check for `check` (which exists to report on it) and
@@ -113,6 +123,16 @@ async fn main() -> ExitCode {
             cli_info.executable
         ));
         return ExitCode::FAILURE;
+    }
+
+    // ---- `peko run --devtools`: main-thread window ----------------------
+    //
+    // The devtools window's event loop must run on the process main thread
+    // (winit requires it), so this path takes a synchronous entry instead of
+    // the async dispatch below. No `.await` has run yet on this code path, so
+    // control is still on the main thread here.
+    if subcommand_name == "run" && cli_info.flags.has_flag("devtools") {
+        return commands::run::execute_with_devtools(&cli_info, &reporter);
     }
 
     // ---- Look up and dispatch the subcommand -----------------------------

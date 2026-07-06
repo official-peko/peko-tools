@@ -57,9 +57,11 @@ pub struct CELMImageData {
     pub kcbc_chunks: Vec<KCBCChunk>,
 }
 
-/// Maximum pixel-rows-per-chunk used when splitting a full image into
-/// per-chunk compression buffers.
-const CHUNK_ROW_COUNT: usize = 341;
+/// Number of full-height slices a rendition is split into before the
+/// remainder. CoreUI's icon bitmap expander tiles a rendition into this
+/// many slices and rejects a slice taller than the tile height it computes,
+/// so the chunker matches that tiling.
+const CHUNK_SLICE_COUNT: usize = 3;
 
 /// Bytes per pixel in the CAR's BGRA8 storage format.
 const PIXEL_BYTE_WIDTH: usize = 4;
@@ -87,32 +89,25 @@ impl CELMImageData {
             image_bytes
         };
 
-        // Chunk the image into vertical strips of `CHUNK_ROW_COUNT` rows
-        // each. The final strip may be shorter than that (its height is
-        // computed from whatever bytes remain).
+        // Slice the image into strips of `height / CHUNK_SLICE_COUNT` rows
+        // each, matching the tile height CoreUI computes for the rendition.
+        // Greedy filling leaves a shorter final strip for the remainder rows.
         let mut chunk_data: Vec<Vec<u8>> = Vec::new();
         let mut chunk_heights: Vec<usize> = Vec::new();
-        let mut chunk_height = CHUNK_ROW_COUNT;
+        let bytes_per_row = image_width * PIXEL_BYTE_WIDTH;
+        let total_rows = bgra_image_bytes.len() / bytes_per_row;
+        let slice_rows = (total_rows / CHUNK_SLICE_COUNT).max(1);
 
         while !bgra_image_bytes.is_empty() {
-            chunk_heights.push(chunk_height);
-
-            let current_chunk_byte_count = image_width * chunk_height * PIXEL_BYTE_WIDTH;
+            let remaining_rows = bgra_image_bytes.len() / bytes_per_row;
+            let chunk_height = remaining_rows.min(slice_rows);
+            let current_chunk_byte_count = chunk_height * bytes_per_row;
 
             // Split off the current chunk from the front of the buffer.
             let image_split = bgra_image_bytes.split_off(current_chunk_byte_count);
-            let mut current_chunk_data = Vec::new();
-            current_chunk_data.extend(bgra_image_bytes);
+            chunk_heights.push(chunk_height);
+            chunk_data.push(bgra_image_bytes);
             bgra_image_bytes = image_split;
-
-            chunk_data.push(current_chunk_data);
-
-            // If the next chunk-byte target would exceed what's left,
-            // shrink `chunk_height` to consume exactly the remainder.
-            let next_chunk_byte_count = image_width * chunk_height * PIXEL_BYTE_WIDTH;
-            if next_chunk_byte_count >= bgra_image_bytes.len() {
-                chunk_height = (bgra_image_bytes.len() / image_width) / PIXEL_BYTE_WIDTH;
-            }
         }
 
         // Encode each chunk with lzfse and trim trailing zero padding.
@@ -147,6 +142,16 @@ pub struct MSISData {
     pub reference_index: u32,
 }
 
+/// One logical size entry in a multi-sized image list. `width` and `height`
+/// are point sizes; `index` is the dimension2 group the matching per-size
+/// renditions carry.
+#[derive(Clone)]
+pub struct MSISSizeEntry {
+    pub width: u32,
+    pub height: u32,
+    pub index: u32,
+}
+
 /// One value-block entry in the CAR's value table. The variant determines
 /// both the on-disk encoding and the byte length [`get_byte_length`]
 /// reports.
@@ -168,6 +173,9 @@ pub enum ValueBlock {
     CELMImageData(CELMImageData),
     /// Multi-sized image set reference.
     MultisizedImageSetData(MSISData),
+    /// Multi-sized image list: an inline table of logical sizes, each
+    /// naming the dimension2 group its per-size renditions belong to.
+    MultisizedImageList(Vec<MSISSizeEntry>),
 }
 
 impl ValueBlock {
@@ -196,6 +204,8 @@ impl ValueBlock {
                         .sum::<usize>()
             }
             Self::MultisizedImageSetData(_) => 28,
+            // Magic + version + count, then 12 bytes per size entry.
+            Self::MultisizedImageList(entries) => 12 + 12 * entries.len(),
         };
         len as u32
     }
@@ -294,6 +304,34 @@ impl CarBinary {
             renditions,
             facet_keys,
             appearance_keys,
+        }
+    }
+}
+
+#[cfg(test)]
+mod celm_tests {
+    use super::*;
+
+    /// The CELM chunker slices every image into `height / 3` row strips.
+    /// CoreUI's icon bitmap expander tiles a rendition into thirds and aborts
+    /// on a slice taller than that tile, so no chunk may exceed the slice
+    /// height, and the chunk heights must sum to the full image.
+    #[test]
+    fn chunks_match_the_third_height_tiling() {
+        for size in [16usize, 32, 64, 128, 256, 512, 1024] {
+            let pixels = vec![0u8; size * size * PIXEL_BYTE_WIDTH];
+            let celm = CELMImageData::new(pixels, false, size);
+
+            let slice_rows = (size / CHUNK_SLICE_COUNT).max(1);
+            let total: u32 = celm.kcbc_chunks.iter().map(|chunk| chunk.pixel_height).sum();
+            assert_eq!(total as usize, size, "chunk heights must cover {size} rows");
+            for chunk in &celm.kcbc_chunks {
+                assert!(
+                    chunk.pixel_height as usize <= slice_rows,
+                    "size {size}: chunk height {} exceeds slice height {slice_rows}",
+                    chunk.pixel_height
+                );
+            }
         }
     }
 }

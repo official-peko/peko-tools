@@ -7,9 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Language Server Protocol implementation for Pekoscript"
 
-[[bin]]
-name = "peko-ls"
-path = "src/main.rs"
+[lib]
+name = "peko_lsp"
+path = "src/lib.rs"
 
 [dependencies]
 peko-core          = { workspace = true }

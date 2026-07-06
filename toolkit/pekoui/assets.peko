@@ -1,0 +1,47 @@
+//! pekoui::assets: bundle assets served over a loopback HTTP socket.
+//!
+//! Assets are served at runtime over a local HTTP server that streams bytes
+//! from the platform bundle, or from a directory on disk when a development
+//! directory is given. Call get_asset_url for a URL usable in an HTML tag or
+//! as a webview navigation target. Used through the pekoui::assets prefix.
+
+import c::assets::assets as c_assets;
+
+// The loopback port the asset server is bound to, or 0 when it is not running.
+[private] let server_port: i32 = constant<i32>(0)
+
+/// Start the asset server serving from a directory on disk. An empty directory
+/// serves from the platform bundle instead. A call while the server is already
+/// running returns the live port. Returns the bound port, or 0 on failure.
+[public] fn start_from(directory: string) => number {
+    if server_port == constant<i32>(0) {
+        server_port = c_assets::peko_asset_server_start(directory.to_raw())
+    }
+    return new number(danger_cast<f64>(server_port))
+}
+
+/// Start the asset server serving from the platform bundle, if it is not
+/// already running. Returns the bound port.
+[public] fn start() => number {
+    return start_from("")
+}
+
+/// The URL for a bundled asset, usable directly in HTML. Starts the server on
+/// first use in bundle mode. Names are hierarchical, so "app/index.html"
+/// keeps its subdirectory.
+[public] fn get_asset_url(name: string) => string {
+    if server_port == constant<i32>(0) {
+        start()
+    }
+    let port: number = new number(danger_cast<f64>(server_port))
+    return `http://127.0.0.1:${port}/_assets/${name}`
+}
+
+/// Stop the asset server and release its resources. Asset URLs become invalid.
+[public] fn stop() {
+    if server_port == constant<i32>(0) {
+        return
+    }
+    c_assets::peko_asset_server_stop()
+    server_port = constant<i32>(0)
+}

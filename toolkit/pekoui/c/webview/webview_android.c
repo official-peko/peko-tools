@@ -21,7 +21,7 @@
 #include <unistd.h>
 
 /* The application glue owns the running activity. */
-#include "../runtime/android_native_app_glue.h"
+#include "android_native_app_glue.h"
 extern struct android_app *gapp;
 
 /* The GC runtime. The Java UI thread runs the bind callbacks, so it attaches
@@ -235,7 +235,12 @@ void webview_run(webview_t w) {
         int events;
         struct android_poll_source *source = NULL;
         int timeout = (gapp && gapp->destroyRequested) ? 0 : -1;
-        int ident = ALooper_pollAll(timeout, NULL, &events, (void **)&source);
+        // ALooper_pollOnce, not the deprecated ALooper_pollAll: pollAll can
+        // report a source ready after having already drained its fd event, so
+        // the command source's blocking read() then hangs, deadlocking the main
+        // thread that waits on the window-setup handshake. pollOnce dispatches
+        // exactly one event, so the read always has its command.
+        int ident = ALooper_pollOnce(timeout, NULL, &events, (void **)&source);
         if (source != NULL) {
             source->process(gapp, source);
         }
@@ -384,6 +389,17 @@ void peko_webview_maximize(webview_t w) {
 
 void peko_webview_close(webview_t w) {
     (void)w;
+}
+
+/* A view fills the screen on Android with no native window controls. */
+void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
+    (void)w;
+    (void)hidden;
+}
+
+int peko_webview_has_native_window_controls(webview_t w) {
+    (void)w;
+    return 0;
 }
 
 /* ------------------------------------------------------------------------- */

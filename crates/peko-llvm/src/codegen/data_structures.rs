@@ -413,7 +413,10 @@ impl ExecutionClassVirtualTable<CodegenFunction> for CodegenVirtualTable {
 pub struct CodegenClass {
     pub class_type: PekoType,
 
-    pub parent_class: Option<Box<CodegenClass>>,
+    /// Parent class (via `from`), if any. Held behind an [`Arc`] so cloning a
+    /// class shares the parent chain instead of deep-copying it (the class is
+    /// cloned on every type-to-class lookup).
+    pub parent_class: Option<Arc<CodegenClass>>,
 
     pub attributes: IndexMap<String, CodegenClassAttribute>,
     pub main_virtual_table: CodegenVirtualTable,
@@ -433,9 +436,10 @@ pub struct CodegenClass {
     pub generic_typenames: Vec<PositionedValue<String>>,
 
     /// The source AST, present only on a generic template awaiting
-    /// instantiation.
+    /// instantiation. Held behind an [`Arc`] so cloning the class shares the
+    /// AST instead of deep-copying every method body.
     #[new(default)]
-    pub source_class: Option<ClassAST>,
+    pub source_class: Option<Arc<ClassAST>>,
 
     /// Source-file path a generic template was declared in.
     #[new(default)]
@@ -490,7 +494,7 @@ impl ExecutionClass<CodegenClass, CodegenVirtualTable, CodegenClassAttribute, Co
         self.parent_class.as_deref()
     }
 
-    fn get_parent_class_mut(&mut self) -> &mut Option<Box<CodegenClass>> {
+    fn get_parent_class_mut(&mut self) -> &mut Option<Arc<CodegenClass>> {
         &mut self.parent_class
     }
 
@@ -503,10 +507,10 @@ impl ExecutionClass<CodegenClass, CodegenVirtualTable, CodegenClassAttribute, Co
     }
 
     fn get_source_class(&self) -> Option<&ClassAST> {
-        self.source_class.as_ref()
+        self.source_class.as_deref()
     }
 
-    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST> {
+    fn get_source_class_mut(&mut self) -> &mut Option<Arc<ClassAST>> {
         &mut self.source_class
     }
 
@@ -1289,6 +1293,10 @@ impl
 
     fn get_modules(&self) -> &IndexMap<String, Arc<RwLock<CodegenModule>>> {
         &self.modules
+    }
+
+    fn get_module_aliases(&self) -> &IndexMap<String, Arc<RwLock<CodegenModule>>> {
+        &self.module_aliases
     }
 
     fn get_variables(&self) -> &IndexMap<String, Arc<RwLock<CodegenVariable>>> {

@@ -168,7 +168,7 @@ pub fn bundle(
     // passed in as an extra linker input.
     progress.tick("Windows: compiling x86_64 binary");
     let windows_target = PekoTarget::new(OperatingSystem::Windows, Architecture::X86_64, false);
-    let (_, diagnostics) = execution::incremental::compile_project(
+    let diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
         windows_target,
@@ -178,8 +178,7 @@ pub fn bundle(
         vec![resource_output.clone()],
         None,
         None,
-        None,
-        None,
+        !cli_info.flags.has_flag("release"),
         progress,
     )?;
     if let Some(diagnostics) = diagnostics {

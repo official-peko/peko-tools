@@ -123,8 +123,10 @@ pub trait ExecutionArgument {
     fn has_default_value(&self) -> bool;
 }
 
-/// A declared function (not a generic function, see
-/// [`ExecutionFunctionGeneric`] for those).
+/// A declared function. One type represents both generic and non-generic
+/// functions: a generic template carries its type-parameter names in
+/// `get_generic_typenames` and its stashed source AST in `get_source_function`,
+/// while a plain function leaves both empty.
 pub trait ExecutionFunction<ArgumentType, ModuleType> {
     /// Visibility modifiers from the function header.
     fn get_visibility(&self) -> &VisibilityData;
@@ -232,7 +234,7 @@ pub trait ExecutionClass<ClassType, ClassVirtualTableType, ClassAttributeType, M
     fn get_parent_class(&self) -> Option<&ClassType>;
 
     /// Mutable view of the parent class.
-    fn get_parent_class_mut(&mut self) -> &mut Option<Box<ClassType>>;
+    fn get_parent_class_mut(&mut self) -> &mut Option<Arc<ClassType>>;
 
     /// Attribute-name -> attribute-data map, preserving declaration order.
     fn get_attributes(&self) -> &IndexMap<String, ClassAttributeType>;
@@ -262,7 +264,7 @@ pub trait ExecutionClass<ClassType, ClassVirtualTableType, ClassAttributeType, M
     fn get_source_class(&self) -> Option<&ClassAST>;
 
     /// Mutable view of the stashed source AST.
-    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST>;
+    fn get_source_class_mut(&mut self) -> &mut Option<Arc<ClassAST>>;
 
     /// Names of the traits this class implements, from its `impl` clause. Used
     /// to accept a class argument where a trait it implements is expected
@@ -328,6 +330,11 @@ pub trait ExecutionModule<
 
     /// Mutable view of the sub-module map.
     fn get_modules_mut(&mut self) -> &mut IndexMap<String, Arc<RwLock<ModuleType>>>;
+
+    /// Per-import module aliases (local name -> module) bound in this module by
+    /// `import x as y`. Distinct from sub-modules: an alias resolves a qualified
+    /// path's first segment to the imported module.
+    fn get_module_aliases(&self) -> &IndexMap<String, Arc<RwLock<ModuleType>>>;
 
     /// Function map (name -> overload list), preserving declaration order.
     /// Each overload is held behind a lock shared by all modules

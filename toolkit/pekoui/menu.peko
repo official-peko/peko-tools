@@ -1,0 +1,128 @@
+//! pekoui::menu: a native desktop menu bar.
+//!
+//! A Menu is a bar of submenus; each submenu holds clickable items, separators,
+//! and standard role items. Install it with App.set_menu. Clicking a plain item
+//! pushes a menu event {"id": <action id>} that the app handles with
+//! peko.on("menu", ...). Standard roles (MenuRole::Quit, MenuRole::Copy, ...)
+//! are handled natively. Desktop only; a no-op on iOS and Android.
+
+/// A standard menu role, mapped to the native platform action.
+[public] enum MenuRole {
+    Quit,
+    About,
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    Undo,
+    Redo,
+    Minimize,
+    Close,
+    Fullscreen,
+    Hide,
+}
+
+/// The integer code for a role, matching the native menu layer.
+[public] fn role_code(role: MenuRole) => number {
+    let code: number = 0
+    switch role {
+        MenuRole::Quit => { code = 1 }
+        MenuRole::About => { code = 2 }
+        MenuRole::Copy => { code = 3 }
+        MenuRole::Cut => { code = 4 }
+        MenuRole::Paste => { code = 5 }
+        MenuRole::SelectAll => { code = 6 }
+        MenuRole::Undo => { code = 7 }
+        MenuRole::Redo => { code = 8 }
+        MenuRole::Minimize => { code = 9 }
+        MenuRole::Close => { code = 10 }
+        MenuRole::Fullscreen => { code = 11 }
+        MenuRole::Hide => { code = 12 }
+    }
+    return code
+}
+
+/// The kind of a submenu entry.
+[public] enum MenuEntryKind {
+    Item,
+    Separator,
+    Role,
+}
+
+/// One entry in a submenu: a clickable item, a separator, or a standard role
+/// item, distinguished by its kind.
+[public] class MenuEntry {
+    [public] kind: MenuEntryKind
+    [public] label: string
+    [public] action_id: string
+    [public] accelerator: string
+    [public] role: MenuRole
+
+    constructor(kind: MenuEntryKind, label: string, action_id: string, accelerator: string, role: MenuRole) {
+        this.kind = kind
+        this.label = label
+        this.action_id = action_id
+        this.accelerator = accelerator
+        this.role = role
+    }
+}
+
+/// A top-level submenu holding entries.
+[public] class Submenu {
+    [public] label: string
+    [public] entries: Array<MenuEntry>
+
+    constructor(label: string) {
+        this.label = label
+        this.entries = new Array<MenuEntry>()
+    }
+
+    /// Adds a clickable item that pushes action_id as a menu event when chosen.
+    /// accelerator is a shortcut like "CmdOrCtrl+S", or empty for none.
+    [mutates] fn item(label: string, action_id: string, accelerator: string) => Submenu {
+        this.entries.push(new MenuEntry(MenuEntryKind::Item, label, action_id, accelerator, MenuRole::Quit))
+        return this
+    }
+
+    /// Adds a separator line.
+    [mutates] fn separator() => Submenu {
+        this.entries.push(new MenuEntry(MenuEntryKind::Separator, "", "", "", MenuRole::Quit))
+        return this
+    }
+
+    /// Adds a standard role item handled natively (MenuRole::Quit, ...).
+    [mutates] fn item_role(label: string, role: MenuRole) => Submenu {
+        this.entries.push(new MenuEntry(MenuEntryKind::Role, label, "", "", role))
+        return this
+    }
+}
+
+/// A menu bar: a list of top-level submenus. Build one, add submenus and their
+/// entries, then pass it to App.set_menu. The standard application menu is
+/// created automatically, so the first submenu added here is a normal top-level
+/// menu, not the app menu.
+[public] class Menu {
+    [public] submenus: Array<Submenu>
+    [public] app_extras: Submenu
+
+    constructor() {
+        this.submenus = new Array<Submenu>()
+        this.app_extras = new Submenu("")
+    }
+
+    /// Adds a top-level submenu with the given title and returns it so items can
+    /// be added.
+    [mutates] fn submenu(label: string) => Submenu {
+        let sub: Submenu = new Submenu(label)
+        this.submenus.push(sub)
+        return sub
+    }
+
+    /// The standard application menu (the bold one under the app name on
+    /// macOS). It is created automatically with About, Hide, and Quit; entries
+    /// added through this handle are appended to it. Platforms without an
+    /// application menu ignore these entries.
+    [public] fn app() => Submenu {
+        return this.app_extras
+    }
+}

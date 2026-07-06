@@ -463,7 +463,7 @@ import c::core::conversions as conversions;
 /// The boxed string value type. A GC-managed byte buffer with a length. The
 /// content hash and concatenation bodies arrive with the byte-iteration
 /// helpers; for now a string hashes by length.
-[public] class string impl Hash, Equals<string>, NotEquals<string>, Index<number, char>, Serialize, Deserialize {
+[public] class string impl Hash, Equals<string>, NotEquals<string>, Index<number, char>, Plus<string>, Serialize, Deserialize {
     data: pointer<i8>
     length: i64
 
@@ -545,6 +545,31 @@ import c::core::conversions as conversions;
         let terminator: i8 = constant<i8>(0)
         buffer[count] = terminator
         return new string(buffer, count)
+    }
+
+    /// Concatenation. `left + right` routes here and returns a new string
+    /// holding the bytes of `this` followed by the bytes of `other`.
+    [public] fn plus(other: string) => string {
+        let zero: i64 = constant<i64>(0)
+        let one: i64 = constant<i64>(1)
+        let this_length: i64 = this.length
+        let other_length: i64 = other.length
+        let total: i64 = this_length + other_length
+
+        let buffer: pointer<i8> = __rt_peko_alloc<i8>(danger_cast<i32>(total + one))
+        let i: i64 = zero
+        while i < this_length {
+            buffer[i] = this.data[i]
+            i = i + one
+        }
+        let j: i64 = zero
+        while j < other_length {
+            buffer[this_length + j] = other.data[j]
+            j = j + one
+        }
+        let terminator: i8 = constant<i8>(0)
+        buffer[total] = terminator
+        return new string(buffer, total)
     }
 
     /// The byte index of the first occurrence of `needle`, or -1 when `needle`

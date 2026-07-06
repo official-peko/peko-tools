@@ -1,0 +1,214 @@
+//! pekoui::bridge: the native<->app WebSocket RPC channel.
+//!
+//! The webview loads its UI over loopback HTTP; interop runs over a separate
+//! loopback WebSocket. The Bridge binds an ephemeral port and authenticates
+//! each client with a per-run token. JavaScript in the webview connects, sends
+//! the token, then issues call messages. Each call routes to a handler
+//! registered under a namespace.method name, and the Bridge replies to that
+//! client with the handler's JSON result. The Bridge can also push unsolicited
+//! event messages to every connected client. Multiple clients are served at
+//! once, each on its own connection.
+//!
+//! Message protocol (JSON text frames):
+//!   app    -> native: {"t":"auth","token":"..."}
+//!   app    -> native: {"t":"call","id":7,"method":"ns.method","params":{...}}
+//!   native -> app:    {"t":"ready"}
+//!   native -> app:    {"t":"reply","id":7,"ok":true,"result":{...}}
+//!   native -> app:    {"t":"reply","id":7,"ok":false,"error":{"code":"...","message":"..."}}
+//!   native -> app:    {"t":"event","name":"...","data":{...}}
+
+import std::sockets;
+import std::json;
+import std::threads;
+
+/// The loopback WebSocket RPC server for native<->app interop. Handlers take
+/// the call params as a JSON string and return the result as a JSON string.
+[public] class Bridge {
+    [private] socket: sockets::WebSocket
+    [private] handlers: Map<string, closure(string) => string>
+    [private] token: string
+    [private] clients: threads::Mutex<Map<number, sockets::WsConnection>>
+    [private] port: number
+    // Whether to mirror call, reply, and event traffic to clients as
+    // devtools:trace events, for the devtools bridge inspector. Off by default.
+    [private] trace: bool
+
+    /// A bridge that authenticates clients with the given per-run token.
+    constructor(token: string) {
+        this.token = token
+        this.port = 0
+        this.trace = false
+        this.handlers = new Map<string, closure(string) => string>()
+        this.clients = new threads::Mutex<Map<number, sockets::WsConnection>>(
+            new Map<number, sockets::WsConnection>())
+        this.socket = new sockets::WebSocket()
+        this.socket.set_callback(closure[this](connection: sockets::WsConnection, request: sockets::Request) => void {
+            this.dispatch(connection, request.get_request())
+        })
+        this.socket.set_on_close(closure[this](connection: sockets::WsConnection) => void {
+            this.drop_client(connection)
+        })
+    }
+
+    /// Registers a handler under a namespace.method name.
+    [mutates] fn on(method: string, handler: closure(string) => string) {
+        this.handlers.set(method, handler)
+    }
+
+    /// Turns bridge tracing on or off. When on, each non-devtools call, reply,
+    /// and event is mirrored to clients as a devtools:trace event, so the
+    /// devtools window can show live bridge traffic.
+    [mutates] fn set_trace(on: bool) {
+        this.trace = on
+    }
+
+    /// Whether a method or event name belongs to the devtools machinery, which
+    /// is excluded from tracing to avoid noise and self-recursion.
+    [private] fn is_devtools_name(name: string) => bool {
+        return name.index_of("devtools") == 0
+    }
+
+    /// Mirrors one piece of bridge traffic to clients as a devtools:trace event.
+    /// dir is call, reply, or event; label is the method or event name; data is
+    /// the raw JSON payload.
+    [private] fn trace_emit(dir: string, label: string, data: string) {
+        let label_json: string = new json::JsonString(label).to_string()
+        this.emit("devtools:trace", `{"dir":"${dir}","label":${label_json},"data":${data}}`)
+    }
+
+    /// Starts the server on a background thread and returns the bound port.
+    /// Returns 0 when the listen socket could not be created.
+    [mutates] fn start() => number {
+        this.socket.listen()
+        let bound: number = this.socket.get_port()
+        let zero: number = 0
+        let waited: number = 0
+        let limit: number = 2000
+        while bound == zero && waited < limit {
+            threads::sleep_ms(1)
+            bound = this.socket.get_port()
+            waited = waited + 1
+        }
+        this.port = bound
+        return bound
+    }
+
+    /// The bound port. 0 before start.
+    [public] fn get_port() => number {
+        return this.port
+    }
+
+    /// Pushes an unsolicited event to every authenticated client. data is a
+    /// JSON string.
+    [public] fn emit(name: string, data: string) {
+        let message: string = `{"t":"event","name":"${name}","data":${data}}`
+        let map: Map<number, sockets::WsConnection> = this.clients.lock()
+        let ids: Array<number> = map.key_list()
+        let count: number = ids.size()
+        let index: number = 0
+        let one: number = 1
+        while index < count {
+            map.get(ids[index]).unwrap().send(message)
+            index = index + one
+        }
+        this.clients.release()
+
+        // Mirror app-initiated events to the inspector. The devtools:trace event
+        // is itself excluded, so this does not recurse.
+        if this.trace && !this.is_devtools_name(name) {
+            this.trace_emit("event", name, data)
+        }
+    }
+
+    /// Routes one inbound message from a client.
+    [mutates] fn dispatch(connection: sockets::WsConnection, raw: string) {
+        let value: json::JsonValue = json::parse(raw)
+        if value.kind() != "object" {
+            return
+        }
+        let message: json::JsonObject = danger_cast<json::JsonObject>(value)
+        let kind: string = this.field_string(message, "t")
+
+        if kind == "auth" {
+            let supplied: string = this.field_string(message, "token")
+            if supplied == this.token {
+                let map: Map<number, sockets::WsConnection> = this.clients.lock()
+                map.set(connection.id(), connection)
+                this.clients.release()
+                connection.send(`{"t":"ready"}`)
+            } else {
+                connection.send(`{"t":"error","error":"bad_token"}`)
+            }
+            return
+        }
+
+        if !this.is_authed(connection) {
+            connection.send(`{"t":"error","error":"unauthorized"}`)
+            return
+        }
+
+        if kind == "call" {
+            this.handle_call(connection, message)
+        }
+    }
+
+    /// Runs one call message and replies to the client with the result or an
+    /// error.
+    [mutates] fn handle_call(connection: sockets::WsConnection, message: json::JsonObject) {
+        let id: string = this.field_raw(message, "id")
+        let method: string = this.field_string(message, "method")
+        let params: string = this.field_raw(message, "params")
+
+        if this.handlers.contains(method) {
+            let should_trace: bool = this.trace && !this.is_devtools_name(method)
+            if should_trace {
+                this.trace_emit("call", method, params)
+            }
+            let handler: closure(string) => string = this.handlers.get(method).unwrap()
+            let result: string = handler(params)
+            connection.send(`{"t":"reply","id":${id},"ok":true,"result":${result}}`)
+            if should_trace {
+                this.trace_emit("reply", method, result)
+            }
+        } else {
+            connection.send(`{"t":"reply","id":${id},"ok":false,"error":{"code":"method_not_found","message":"no handler for this method"}}`)
+        }
+    }
+
+    /// Whether the connection has authenticated.
+    [private] fn is_authed(connection: sockets::WsConnection) => bool {
+        let map: Map<number, sockets::WsConnection> = this.clients.lock()
+        let present: bool = map.contains(connection.id())
+        this.clients.release()
+        return present
+    }
+
+    /// Drops a disconnected client from the set.
+    [mutates] fn drop_client(connection: sockets::WsConnection) {
+        let map: Map<number, sockets::WsConnection> = this.clients.lock()
+        map.remove(connection.id())
+        this.clients.release()
+    }
+
+    /// The string value of a field, or empty when absent or not a string.
+    [private] fn field_string(message: json::JsonObject, key: string) => string {
+        let found: json::JsonValue? = message.get(key)
+        if !found.is_value() {
+            return ""
+        }
+        let value: json::JsonValue = found.unwrap()
+        if value.kind() != "string" {
+            return ""
+        }
+        return danger_cast<json::JsonString>(value).get()
+    }
+
+    /// The raw JSON text of a field, or the literal null when absent.
+    [private] fn field_raw(message: json::JsonObject, key: string) => string {
+        let found: json::JsonValue? = message.get(key)
+        if !found.is_value() {
+            return `null`
+        }
+        return found.unwrap().to_string()
+    }
+}

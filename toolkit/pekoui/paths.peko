@@ -1,0 +1,14 @@
+//! pekoui::paths: filesystem locations for the running app.
+//!
+//! app_data_dir is the writable directory where the storage and keychain
+//! capabilities keep their files, one directory per app keyed by the bundle
+//! identifier.
+
+import c::appdir::appdir as c_appdir;
+import std::runtime;
+
+/// The writable per-app data directory, created if missing. The directory is
+/// <home>/.peko/<bundle identifier>.
+[public] fn app_data_dir() => string {
+    return runtime::create_managed(c_appdir::peko_app_data_dir(bundle::identifier.to_raw()))
+}

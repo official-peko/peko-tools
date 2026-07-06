@@ -7,8 +7,11 @@
 //! There are two layers here:
 //!
 //! 1. **Execution types** (`SimulatorArg`, `SimulatorFunction`,
-//!    `SimulatorVariable`, `SimulatorClass`, `SimulatorModule`, and the
-//!    two generic variants). These plug into the
+//!    `SimulatorVariable`, `SimulatorClass`, `SimulatorModule`). A single
+//!    function type and a single class type each represent both the generic
+//!    and non-generic case, with generic templates carrying their
+//!    type-parameter names and stashed source AST in their own fields. These
+//!    plug into the
 //!    [`ExecutionContextAlgorithms`](crate::execution::ExecutionContextAlgorithms)
 //!    machinery and carry the bulk of type-checking state.
 //!
@@ -282,9 +285,11 @@ pub struct SimulatorClass {
     /// The class's own Pekoscript type.
     pub class_type: types::PekoType,
 
-    /// Parent class (via `from`), if any. Boxed because [`SimulatorClass`]
-    /// would otherwise be infinitely recursive.
-    pub parent_class: Option<Box<SimulatorClass>>,
+    /// Parent class (via `from`), if any. Held behind an [`Arc`] because
+    /// [`SimulatorClass`] would otherwise be infinitely recursive, and so
+    /// cloning a class shares the parent chain instead of deep-copying it (the
+    /// class value is cloned on every type-to-class lookup).
+    pub parent_class: Option<Arc<SimulatorClass>>,
 
     /// Attribute map, preserving source declaration order.
     pub attributes: IndexMap<String, SimulatorClassAttribute>,
@@ -304,9 +309,10 @@ pub struct SimulatorClass {
     pub generic_typenames: Vec<PositionedValue<String>>,
 
     /// The source AST, present only on a generic template awaiting
-    /// instantiation.
+    /// instantiation. Held behind an [`Arc`] so cloning the class shares the
+    /// AST instead of deep-copying every method body.
     #[new(default)]
-    pub source_class: Option<ClassAST>,
+    pub source_class: Option<Arc<ClassAST>>,
 
     /// The scope a generic template was declared in, so its body re-processes
     /// with the same surrounding names. None on a non-template class.
@@ -339,10 +345,10 @@ impl
     }
 
     fn get_source_class(&self) -> Option<&ClassAST> {
-        self.source_class.as_ref()
+        self.source_class.as_deref()
     }
 
-    fn get_source_class_mut(&mut self) -> &mut Option<ClassAST> {
+    fn get_source_class_mut(&mut self) -> &mut Option<Arc<ClassAST>> {
         &mut self.source_class
     }
 
@@ -362,7 +368,7 @@ impl
         self.parent_class.as_deref()
     }
 
-    fn get_parent_class_mut(&mut self) -> &mut Option<Box<SimulatorClass>> {
+    fn get_parent_class_mut(&mut self) -> &mut Option<Arc<SimulatorClass>> {
         &mut self.parent_class
     }
 
@@ -517,6 +523,10 @@ impl
 
     fn get_modules(&self) -> &IndexMap<String, Arc<RwLock<SimulatorModule>>> {
         &self.modules
+    }
+
+    fn get_module_aliases(&self) -> &IndexMap<String, Arc<RwLock<SimulatorModule>>> {
+        &self.module_aliases
     }
 
     fn get_variables(&self) -> &IndexMap<String, Arc<RwLock<SimulatorVariable>>> {

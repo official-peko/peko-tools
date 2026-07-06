@@ -884,7 +884,17 @@ pub trait ExecutionContextAlgorithms<
             return None;
         }
         let mut names = module_names.to_vec();
-        let mut contained_in = if let Some(module) = self.find_module_in_current(&names[0]) {
+        let aliased = self
+            .get_module_context()
+            .current_module()
+            .read()
+            .unwrap()
+            .get_module_aliases()
+            .get(&names[0])
+            .cloned();
+        let mut contained_in = if let Some(aliased) = aliased {
+            aliased
+        } else if let Some(module) = self.find_module_in_current(&names[0]) {
             module
         } else if self
             .get_module_context()
@@ -1019,6 +1029,49 @@ pub trait ExecutionContextAlgorithms<
         }
     }
 
+    /// The module a class named `class_name` is declared in, found by walking up
+    /// the current module tree. Returns only the parent-module handle, reading
+    /// it through the class without cloning the class. Used on the hot type
+    /// resolution path, where the full class value is not needed.
+    fn find_class_parent_module_in_current(
+        &self,
+        class_name: impl ToString,
+    ) -> Option<Arc<RwLock<ModuleType>>> {
+        let mut current = self.get_module_context().current_module();
+        let target = class_name.to_string();
+
+        loop {
+            if let Some(class) = current.read().unwrap().get_classes().get(&target) {
+                return Some(class.read().unwrap().get_parent_module());
+            }
+
+            let parent = current.read().unwrap().get_parent()?.clone();
+            current = parent;
+        }
+    }
+
+    /// The module a generic-class template named `generic_name` is declared in.
+    /// Mirrors `find_class_generic_in_current` but returns only the parent
+    /// module handle, avoiding a full class clone on the type resolution path.
+    fn find_class_generic_parent_module_in_current(
+        &self,
+        generic_name: impl ToString,
+    ) -> Option<Arc<RwLock<ModuleType>>> {
+        let mut current = self.get_module_context().current_module();
+        let target = generic_name.to_string();
+
+        loop {
+            if let Some(class) = current.read().unwrap().get_classes().get(&target)
+                && class.read().unwrap().get_source_class().is_some()
+            {
+                return Some(class.read().unwrap().get_parent_module());
+            }
+
+            let parent = current.read().unwrap().get_parent()?.clone();
+            current = parent;
+        }
+    }
+
     /// Walks up the module tree looking for a function overload set named
     /// `function_name`.
     fn find_function_in_current(&self, function_name: impl ToString) -> Option<Vec<FunctionType>> {
@@ -1094,6 +1147,17 @@ pub trait ExecutionContextAlgorithms<
     /// Returns `None` if any inner type can't be resolved.
     fn expand_type(&mut self, type1: &PekoType) -> Option<PekoType> {
         let mut type1 = type1.clone();
+
+        // A type that already carries a full expansion needs no re-resolution.
+        // Expansion qualifies every module path to its absolute form and
+        // recursively expands generic arguments, so the result is
+        // context-independent. The flag is set only by a completed expansion,
+        // so a set flag means every module walk and generic instantiation for
+        // this type already ran. Reusing it skips the whole resolution below,
+        // which is the hottest path in both the simulator and codegen.
+        if type1.fully_expanded {
+            return Some(type1);
+        }
 
         // Error types cannot be expanded.
         if type1.is_error_type() {
@@ -1230,6 +1294,7 @@ pub trait ExecutionContextAlgorithms<
         }
 
         if type1.is_base_type() || type1.name() == "pointer" {
+            type1.fully_expanded = true;
             return Some(type1);
         }
 
@@ -1241,14 +1306,29 @@ pub trait ExecutionContextAlgorithms<
         let class_name_base = class_name_base.to_string();
 
         let mut class_parent = if !module_names.is_empty() {
-            let mut contained_in = if self.find_module_in_current(&module_names[0]).is_some() {
-                self.find_module_in_current(&module_names[0]).unwrap()
-            } else if self
+            // The first segment may be a per-file alias (`import pekoui as ui`)
+            // bound in the current module, a sub-module reachable up the current
+            // tree, or a top-level module by name. A memoized/reused package
+            // stays in top_level_modules under its own name while the alias
+            // lives only in module_aliases, so the alias is resolved first.
+            let aliased = self
+                .get_module_context()
+                .current_module()
+                .read()
+                .unwrap()
+                .get_module_aliases()
+                .get(&module_names[0])
+                .cloned();
+            let mut contained_in = if let Some(aliased) = aliased {
+                aliased
+            } else if let Some(found) = self.find_module_in_current(&module_names[0]) {
+                found
+            } else if let Some(top) = self
                 .get_module_context()
                 .top_level_modules
-                .contains_key(&module_names[0])
+                .get(&module_names[0])
             {
-                self.get_module_context().top_level_modules[&module_names[0]].clone()
+                top.clone()
             } else {
                 return None;
             };
@@ -1291,26 +1371,12 @@ pub trait ExecutionContextAlgorithms<
             } else {
                 return None;
             }
-        } else if self.find_class_in_current(type1.name()).is_some() {
-            self.find_class_in_current(type1.name())
-                .as_ref()
-                .unwrap()
-                .get_parent_module()
-        } else if self.find_class_generic_in_current(&class_name).is_some() {
-            self.find_class_generic_in_current(&class_name)
-                .as_ref()
-                .unwrap()
-                .get_parent_module()
-        } else if self
-            .find_class_generic_in_current(&class_name_base)
-            .is_some()
-        {
-            self.find_class_generic_in_current(&class_name_base)
-                .as_ref()
-                .unwrap()
-                .get_parent_module()
+        } else if let Some(parent) = self.find_class_parent_module_in_current(type1.name()) {
+            parent
+        } else if let Some(parent) = self.find_class_generic_parent_module_in_current(&class_name) {
+            parent
         } else {
-            return None;
+            self.find_class_generic_parent_module_in_current(&class_name_base)?
         };
 
         if !class_parent
@@ -1345,6 +1411,7 @@ pub trait ExecutionContextAlgorithms<
             class_parent = parent;
         }
 
+        type1.fully_expanded = true;
         Some(type1)
     }
 
@@ -1467,8 +1534,26 @@ pub trait ExecutionContextAlgorithms<
         let class_name = type_expanded.declutter().to_string();
 
         // Find the module the class is defined in, based on the expanded
-        // type's module path.
-        let (mut next_module, starting_point) = if !type_expanded.module_names().is_empty()
+        // type's module path. The first segment may be a per-file alias
+        // (`import pekoui as ui`), a top-level module by name, or the current
+        // module. A memoized/reused package stays in top_level_modules under
+        // its own name while the alias lives only in the importing module's
+        // module_aliases, so the alias is resolved first.
+        let aliased_first = if !type_expanded.module_names().is_empty() {
+            self.get_module_context()
+                .current_module()
+                .read()
+                .unwrap()
+                .get_module_aliases()
+                .get(&type_expanded.module_names()[0])
+                .cloned()
+        } else {
+            None
+        };
+
+        let (mut next_module, starting_point) = if let Some(aliased) = aliased_first {
+            (aliased, 1)
+        } else if !type_expanded.module_names().is_empty()
             && self
                 .get_module_context()
                 .top_level_modules
@@ -1907,8 +1992,8 @@ pub trait ExecutionContextAlgorithms<
             }
 
             // Score keyword-supplied arguments first.
-            if provided_arguments.is_some() {
-                for (argument_name, argument_type) in provided_arguments.clone().unwrap().iter() {
+            if let Some(provided_argument_map) = provided_arguments.as_ref() {
+                for (argument_name, argument_type) in provided_argument_map.iter() {
                     if function.get_arguments().contains_key(argument_name)
                         && function.get_arguments()[argument_name].has_default_value()
                     {

@@ -834,12 +834,12 @@ fn test_import_parsing() {
          import module1 as module2 \
          import module1@\"v0.1.0\"",
     );
-    let import1 = parser.parse_import();
-    let import2 = parser.parse_import();
-    let import3 = parser.parse_import();
-    let import4 = parser.parse_import();
-    let import5 = parser.parse_import();
-    let import6 = parser.parse_import();
+    let import1 = parser.parse_import(false);
+    let import2 = parser.parse_import(false);
+    let import3 = parser.parse_import(false);
+    let import4 = parser.parse_import(false);
+    let import5 = parser.parse_import(false);
+    let import6 = parser.parse_import(false);
     assert_eq!(parser.get_diagnostics().get_error_count(), 0);
 
     // Module paths are stored as a list of identifier segments.
@@ -875,6 +875,29 @@ fn test_import_parsing() {
     assert_eq!(import4.symbols_to_unpack.len(), 2);
     assert_eq!(import5.symbols_to_unpack.len(), 0);
     assert_eq!(import6.symbols_to_unpack.len(), 0);
+
+    // A plain import is not an export.
+    assert!(!import1.is_export);
+    assert!(!import5.is_export);
+}
+
+#[test]
+fn test_export_parsing() {
+    let mut parser = create_parser_with_source(
+        "export app \
+         export webview as view",
+    );
+    let export1 = parser.parse_import(true);
+    let export2 = parser.parse_import(true);
+    assert_eq!(parser.get_diagnostics().get_error_count(), 0);
+
+    assert!(export1.is_export);
+    assert_eq!(export1.module_path[0].value, "app");
+    assert!(export1.import_as.is_none());
+
+    assert!(export2.is_export);
+    assert_eq!(export2.module_path[0].value, "webview");
+    assert_eq!(export2.import_as.unwrap().value, "view");
 }
 
 #[test]

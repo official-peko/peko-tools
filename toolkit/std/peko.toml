@@ -18,7 +18,6 @@ keywords = [
     "networking",
     "threads",
     "concurrency",
-    "webview",
     "random",
     "hashing",
     "standard-library",
@@ -58,10 +57,6 @@ sources = [
     "c/sockets/peko_sockets.c",
     "c/sockets/peko_sockets_tls.c",
     "c/sockets/peko_websocket.c",
-    "c/webview/webview.cc",
-    "c/webview/webview_bridge.c",
-    "c/webview/webview_ios.m",
-    "c/webview/webview_android.c",
 ]
 include = ["c/runtime/include", "c/io", "c/random", "c/fs", "c/crypto/vendor", "c/threads", "c/sockets", "c/sockets/inc"]
 
@@ -81,13 +76,9 @@ ios-x86_64 = ["c/crypto/vendor/ios/x86_64/libsodium.a", "c/sockets/vendor/ios/x8
 android = ["c/crypto/vendor/android/libsodium.a", "c/sockets/vendor/android/libbearssl.a"]
 windows = ["c/crypto/vendor/windows/libsodium.lib", "c/sockets/vendor/windows/bearssl.lib"]
 
-# The desktop webview links the platform WebView frameworks at the final link.
-# macOS adds Cocoa for the AppKit window (WebKit, Foundation, and libc++ come
-# from the toolchain already). Linux adds the WebKitGTK development libraries.
-# Windows adds dwmapi for the transparent-window system backdrop; WebView2 and
-# user32 come from the loader and the toolchain already.
+# System libraries the runtime and standard library link on each platform.
+# The desktop WebView frameworks are not here: they moved to the pekoui
+# package, so only a UI binary links them.
 [native.link]
-linux = ["-lpthread", "-lm", "-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
+linux = ["-lpthread", "-lm"]
 android = ["-llog"]
-macos = ["-framework", "Cocoa"]
-windows = ["dwmapi.lib"]
