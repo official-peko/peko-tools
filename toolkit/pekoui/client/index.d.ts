@@ -65,6 +65,46 @@ export interface PekoMenuOptions {
   mount?: string | Element;
 }
 
+/** Options for opening a pop-up window. */
+export interface PekoWindowOptions {
+  /** Header title text. */
+  title?: string;
+  /** Desktop width in pixels or a CSS size. Default 640. Ignored on mobile. */
+  width?: number | string;
+  /** Desktop height in pixels or a CSS size. Default 480. Ignored on mobile. */
+  height?: number | string;
+  /** When true, a backdrop click does not dismiss the pop-up. */
+  modal?: boolean;
+  /** Native desktop window only: draw no native titlebar, so the pop-up route
+   *  renders its own chrome. Omit to inherit the app's default. */
+  frameless?: boolean;
+  /** Native desktop window only: make the window and web view transparent, so
+   *  CSS colors composite over what is behind it. Pair with a transparent HTML
+   *  root. Omit to inherit the app's default. */
+  transparent?: boolean;
+  /** Called when the pop-up closes, with the result passed to close(). */
+  onClose?: (result?: unknown) => void;
+}
+
+/** A handle to an open pop-up window. */
+export interface PekoWindowHandle {
+  /** The pop-up id, or null when no document was available to host it. */
+  readonly id: string | null;
+  /** Close the pop-up, optionally passing a result to its onClose. */
+  close(result?: unknown): void;
+}
+
+/** Opens app routes as pop-up windows: draggable dialogs on desktop, full
+ *  sheets on mobile. Each pop-up hosts the app at a route in a same-origin
+ *  iframe that shares the opener's bridge. */
+export interface PekoWindowManager {
+  /** Open a route as a pop-up window. */
+  open(route: string, options?: PekoWindowOptions): PekoWindowHandle;
+  /** Close a pop-up by id. Called with no id (null or omitted) from inside a
+   *  pop-up, it dismisses that pop-up itself. */
+  close(id?: string | null, result?: unknown): void;
+}
+
 export interface PekoClient {
   /** Resolves when the bridge connection is authenticated and ready. */
   readonly ready: Promise<void>;
@@ -90,6 +130,8 @@ export interface PekoClient {
   control<T extends Element>(element: T, kind: 'minimize' | 'maximize' | 'close'): T;
   /** Programmatic window controls. */
   readonly window: PekoWindow;
+  /** Open and close pop-up windows. */
+  readonly windows: PekoWindowManager;
   /** Any other property is a handler namespace. */
   [namespace: string]: PekoNamespace | unknown;
 }
@@ -107,6 +149,10 @@ declare global {
       nativeControls?: boolean;
       htmlMenu?: boolean;
       devtools?: boolean;
+      /** True when this document is a native pop-up window child. */
+      popup?: boolean;
+      /** The pop-up id, so it can report itself closed to the opener. */
+      popupId?: string;
     };
     peko?: PekoClient;
     __peko_deeplink?: (path: string) => void;

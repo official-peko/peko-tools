@@ -367,6 +367,25 @@ impl PekoCodegenContext {
             );
         }
 
+        // A Peko-defined function participates in GC: it needs the statepoint
+        // strategy so RewriteStatepointsForGC records its safepoints. A generic
+        // function is a template with no up-front declaration, so this on-demand
+        // path is where it is first materialized; without setting the strategy
+        // and the frame pointer here it would be emitted with neither, and the
+        // collector's frame-pointer stack walk would skip its frame. This
+        // mirrors create_function_raw, which declares non-generic functions.
+        unsafe {
+            if !external {
+                let gc_strategy = cstr("statepoint-example");
+                core::LLVMSetGC(new_function_value.llvm_value, gc_strategy.as_ptr());
+            }
+            // Every managed frame must keep a standard frame record so the
+            // collector can read the saved frame pointer and return address.
+            crate::codegen::builders::functions::set_frame_pointer_all(
+                new_function_value.llvm_value,
+            );
+        }
+
         // The allocation entrypoints always collect and so are never gc-leaf;
         // every other external function is leaf unless declared gcsafe. This
         // mirrors the marking applied where the function is first declared.

@@ -3829,6 +3829,24 @@ impl PekoValueSimulator for CastAST {
             return simulator_context.create_error_value();
         }
 
+        // Casting between two classes on the same inheritance chain. An upcast
+        // (a derived value to one of its base classes) is always safe. A
+        // downcast (a base value to one of its derived classes) is the intended
+        // use of `as`: it reinterprets the object as the more specific type, the
+        // way JSON code narrows a `JsonValue` to a `JsonObject` after checking
+        // its kind. `classes_connect` is directional, so test both orders.
+        let value_class = simulator_context.get_class_by_type(&value_type);
+        let target_class = simulator_context.get_class_by_type(&self.cast_to);
+        if let (Some(from_class), Some(to_class)) = (&value_class, &target_class)
+            && (simulator_context.classes_connect(from_class, to_class)
+                || simulator_context.classes_connect(to_class, from_class))
+        {
+            let expanded = simulator_context
+                .expand_type(&self.cast_to)
+                .unwrap_or_else(|| self.cast_to.clone());
+            return SimulatorValue::Value(expanded);
+        }
+
         let box_value = simulator_context.box_value_to_type(&self.cast_to, &value);
 
         let Some(boxed) = box_value else {

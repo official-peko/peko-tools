@@ -29,6 +29,13 @@ import std::threads;
     [private] token: string
     [private] clients: threads::Mutex<Map<number, sockets::WsConnection>>
     [private] port: number
+    // Serializes handler dispatch. Each accepted connection runs on its own
+    // thread; without this, two connections can dispatch concurrently and race
+    // the collector while reading shared managed state (the handler map), which
+    // faults. Holding it means at most one thread runs managed dispatch at a
+    // time, so a collection one dispatch triggers finds every other connection
+    // thread parked.
+    [private] dispatch_lock: threads::Mutex<bool>
     // Whether to mirror call, reply, and event traffic to clients as
     // devtools:trace events, for the devtools bridge inspector. Off by default.
     [private] trace: bool
@@ -41,6 +48,7 @@ import std::threads;
         this.handlers = new Map<string, closure(string) => string>()
         this.clients = new threads::Mutex<Map<number, sockets::WsConnection>>(
             new Map<number, sockets::WsConnection>())
+        this.dispatch_lock = new threads::Mutex<bool>(true)
         this.socket = new sockets::WebSocket()
         this.socket.set_callback(closure[this](connection: sockets::WsConnection, request: sockets::Request) => void {
             this.dispatch(connection, request.get_request())
@@ -148,7 +156,10 @@ import std::threads;
         }
 
         if kind == "call" {
+            // Serialize dispatch across connection threads (see dispatch_lock).
+            this.dispatch_lock.lock()
             this.handle_call(connection, message)
+            this.dispatch_lock.release()
         }
     }
 

@@ -51,8 +51,17 @@ notify = "6"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 apple-codesign = "0.29.0"
+# Matches apple-codesign's own x509-certificate; names the certificate type its
+# PKCS#12 parser returns, used by signing-key verification.
+x509-certificate = "0.24.0"
+# Decode a key file the IDE streams in as base64 over stdin (a dropped file's
+# bytes; keeps binary fidelity by decoding in Rust rather than the webview).
+base64 = "0.22"
 keyring-core = "1.0.0"
 app-store-connect = "0.7.0"
+# Project-wide search/replace for the IDE: regex matching over a recursive walk.
+regex = "1"
+walkdir = "2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }

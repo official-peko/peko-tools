@@ -114,16 +114,50 @@ pub fn bundle(
         return Err(BundleError::CompileDiagnostics(diagnostics));
     }
 
-    // App icon.
+    // App icon. The flat masked icon in res/mipmap covers launchers before
+    // API 26 (adaptive icons).
+    let ui = project.ui_project_info.as_ref().unwrap();
     let mipmap_directory = app_directory.join("res/mipmap");
     io_at(&mipmap_directory, fs::create_dir_all(&mipmap_directory))?;
     let icon_path = mipmap_directory.join("icon.png");
-    project
-        .ui_project_info
-        .as_ref()
-        .unwrap()
-        .icon
+    ui.icon_for(OperatingSystem::Android)
+        .shaped_for(OperatingSystem::Android)
         .to_png(&mut io_at(&icon_path, File::create(&icon_path))?);
+
+    // Adaptive icon (API 26+): a foreground layer over a background layer the
+    // launcher masks to its own shape. Emitted only when the icon builder saved
+    // a foreground/background split; otherwise the flat icon above is used.
+    if let Some((foreground, background)) = ui.android_adaptive() {
+        // Layers are 108dp and the inner 72dp is the safe zone the launcher
+        // shows. The foreground is inset to that safe zone so no mask clips it.
+        // Layers are written at xxxhdpi (432px) with no density scaling.
+        let layer_px = 432;
+        let safe_inset = (108.0 - 72.0) / 2.0 / 108.0;
+
+        let drawable_directory = app_directory.join("res/drawable-nodpi");
+        io_at(&drawable_directory, fs::create_dir_all(&drawable_directory))?;
+
+        let background_path = drawable_directory.join("icon_background.png");
+        background
+            .resize(layer_px, layer_px)
+            .to_png(&mut io_at(&background_path, File::create(&background_path))?);
+
+        let foreground_path = drawable_directory.join("icon_foreground.png");
+        foreground
+            .shaped(crate::project::IconShape::Square, safe_inset)
+            .resize(layer_px, layer_px)
+            .to_png(&mut io_at(&foreground_path, File::create(&foreground_path))?);
+
+        let anydpi_directory = app_directory.join("res/mipmap-anydpi-v26");
+        io_at(&anydpi_directory, fs::create_dir_all(&anydpi_directory))?;
+        let adaptive_xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\">\n\
+    <background android:drawable=\"@drawable/icon_background\"/>\n\
+    <foreground android:drawable=\"@drawable/icon_foreground\"/>\n\
+</adaptive-icon>\n";
+        let adaptive_path = anydpi_directory.join("icon.xml");
+        io_at(&adaptive_path, fs::write(&adaptive_path, adaptive_xml))?;
+    }
 
     // strings.xml + AndroidManifest.xml: copy the project's configfile
     // templates into the build tree.

@@ -184,8 +184,26 @@ void pgc_collect(void)
      * walks (index build, mark clear, forwarding, update, move) see a dense,
      * well-formed base..top layout. Fillers are unmarked and thus reclaimed. */
     pgc_fill_all_tlab_gaps();
+
+    /* Debug: structural heap audit before mark, gated by PEKO_GC_AUDIT. */
+    static int s_audit_env = -1;
+    static int s_verify_env = -1;
+    static unsigned long s_generation = 0;
+    if (s_audit_env < 0)
+        s_audit_env = getenv("PEKO_GC_AUDIT") != NULL ? 1 : 0;
+    if (s_verify_env < 0)
+        s_verify_env = getenv("PEKO_GC_VERIFY") != NULL ? 1 : 0;
+    s_generation++;
+    if (s_audit_env)
+        pgc_audit();
+
     /* 2. Mark from all roots (global, handle, and precise stack roots). */
     pgc_mark_all();
+
+    /* Debug: conservative mark-completeness cross-check, gated by
+     * PEKO_GC_VERIFY. Runs after mark, before any object moves. */
+    if (s_verify_env)
+        pgc_verify_mark(s_generation);
 
     /* 3-5. Sliding compaction: compute new addresses, rewrite all references
      * to them, then move the objects. Order matters: references must be

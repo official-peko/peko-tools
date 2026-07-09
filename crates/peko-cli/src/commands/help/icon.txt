@@ -1,0 +1,24 @@
+peko icon <SUBCOMMAND> [OPTIONS]
+
+Generates the per-platform app icon set and inspects the icon configuration.
+
+The icon source is a single square PNG that gets reworked into every
+platform's required sizes. It is resolved from [icon].source, or [ui].icon
+when there is no [icon] table. The IDE icon builder saves its master PNG and
+an editable layered document ([icon].project, a .pekoicon) so the icon can be
+reopened and re-edited.
+
+SUBCOMMANDS
+    generate    render the source into each platform's icon sizes
+    show        print the resolved icon source and target platforms
+
+OPTIONS
+    --platform=<OS>   generate only this platform (macos, ios, android,
+                      windows, linux); default is the project's targets
+    --out=<DIR>       output directory; default build/icons
+
+EXAMPLES
+    peko icon show
+    peko icon generate
+    peko icon generate --platform=ios
+    peko icon generate --out=dist/icons

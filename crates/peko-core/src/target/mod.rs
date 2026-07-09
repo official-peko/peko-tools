@@ -15,7 +15,7 @@ use std::str::FromStr;
 use crate::error::{PekoError, PekoResult};
 
 /// Operating system families that Pekoscript can target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OperatingSystem {
     MacOS,
     Windows,

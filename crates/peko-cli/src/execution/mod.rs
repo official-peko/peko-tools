@@ -149,6 +149,16 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
         modules.insert(info.module_name.clone(), info);
     }
 
+    // Packages installed with `peko add --global` live in a shared manifest under
+    // the Peko root and are importable from every project, ahead of project deps.
+    let global_root = peko_root.join("global");
+    if let Ok(Some(lockfile)) = peko_core::config::Lockfile::load_from_root(&global_root) {
+        modules.extend(
+            peko_core::packages::PekoPackageIndex::from_lockfile(peko_root, &global_root, &lockfile)
+                .get_external_modules(),
+        );
+    }
+
     if let Some(project_root) = compilation_root
         && let Ok(Some(lockfile)) =
             peko_core::config::Lockfile::load_from_root(project_root.as_ref())

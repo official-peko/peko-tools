@@ -1592,6 +1592,19 @@ impl PekoValueBuilder for CastAST {
             return codegen_context.typecast_number_value(&value, &self.cast_to);
         }
 
+        // A cast between two classes on the same inheritance chain (validated by
+        // the simulator) reinterprets the object pointer as the target type. An
+        // instance is a single heap pointer, so an up- or downcast is a retype
+        // with no runtime conversion.
+        let value_class = codegen_context.get_class_by_type(&value.value_type);
+        let target_class = codegen_context.get_class_by_type(&self.cast_to);
+        if let (Some(from_class), Some(to_class)) = (&value_class, &target_class)
+            && (codegen_context.classes_connect(from_class, to_class)
+                || codegen_context.classes_connect(to_class, from_class))
+        {
+            return CodegenValue::new(value.llvm_value, self.cast_to.clone());
+        }
+
         let boxed_value = codegen_context.box_value_to_type(&self.cast_to, &value);
 
         match boxed_value {
@@ -2442,7 +2455,22 @@ impl PekoValueBuilder for FunctionCallAST {
                 // one address-space-1 pointer: stride is the pointer size and the
                 // managed field is at offset 0. An unmanaged element (int, char,
                 // other builtin) is stored inline at its ABI size with no tracing.
-                let element_is_managed = codegen_context.is_managed(&element_type);
+                // Resolve a bare generic parameter to its generic-context
+                // carrier before deciding whether the element is managed. In an
+                // erased generic body the element type arrives as a plain named
+                // type (for example `T`) whose kind is not `Generic`, so
+                // is_managed alone treats it as unmanaged and emits a no-scan
+                // element descriptor -- leaving the buffer's managed element
+                // pointers untraced and reclaimable by the collector. Under
+                // erasure every generic element is a managed object pointer, so a
+                // name that resolves to a generic carrier is managed.
+                let element_is_generic = codegen_context
+                    .get_generic_types()
+                    .get(element_type.name())
+                    .map(|carrier| carrier.is_generic_param())
+                    .unwrap_or(false);
+                let element_is_managed =
+                    element_is_generic || codegen_context.is_managed(&element_type);
                 let stride = if element_is_managed {
                     codegen_context.get_type_size(&element_type, false)
                 } else {

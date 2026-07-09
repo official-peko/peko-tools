@@ -83,8 +83,13 @@ pub fn bundle(
     // catalog (Assets.car) named by CFBundleIconName. A bare .icns is treated
     // as legacy and drawn shrunken on a light rounded tile, so the icon is
     // written as an asset catalog, with a plain .icns alongside it.
-    let icon = &project.ui_project_info.as_ref().unwrap().icon;
-    compile_app_icon(icon, &resources_dir)?;
+    let icon = project
+        .ui_project_info
+        .as_ref()
+        .unwrap()
+        .icon_for(OperatingSystem::MacOS)
+        .shaped_for(OperatingSystem::MacOS);
+    compile_app_icon(&icon, &resources_dir)?;
 
     // Project assets into Contents/Resources with subdirectories
     // preserved. The assets package's Apple native layer resolves

@@ -16,6 +16,7 @@ import menu;
 import env;
 import std::fs;
 import std::io;
+import std::process;
 import c::menu::menu as c_menu;
 import c::deeplink::deeplink as c_deeplink;
 import std::runtime;
@@ -52,6 +53,10 @@ import std::json;
     // true, set_menu installs nothing native and the client SDK renders the HTML
     // menu on every platform.
     [private] html_menu: bool
+    // Whether a second launch starts its own process and window rather than
+    // forwarding to the running instance. False keeps the single-instance
+    // behavior; an app that wants multiple windows opts in.
+    [private] allow_multiple: bool
 
     /// Create an App with a titled window of the given size. A per-run bridge
     /// token is minted and the built-in capabilities are registered.
@@ -61,7 +66,15 @@ import std::json;
         this.channel = new bridge::Bridge(this.token)
         this.routes = new RouteState()
         this.html_menu = false
+        this.allow_multiple = false
         this.register_builtins()
+    }
+
+    /// Allow more than one instance of the app to run at once. Each launch
+    /// starts its own process and window instead of forwarding to and raising
+    /// the already-running instance. Call before run.
+    [mutates] fn allow_multiple_instances() {
+        this.allow_multiple = true
     }
 
     /// Registers the built-in native capabilities: sys.ping (a health echo),
@@ -296,6 +309,14 @@ import std::json;
     /// hot reload drives the UI, and PEKO_INITIAL_ROUTE restores the route the
     /// last build was on.
     [public] fn run() {
+        // A pop-up child runs the same app binary pointed at a route and sharing
+        // the opener's bridge. PEKO_POPUP carries the pop-up id; its presence
+        // selects the pop-up path, which skips the bridge, asset server, and
+        // single-instance setup the opener already owns.
+        if this.run_popup_child() {
+            return
+        }
+
         // The dev loop sets PEKO_DEV_SERVER to the framework dev-server URL.
         let dev_server: string = env::get("PEKO_DEV_SERVER")
         let is_dev: bool = dev_server.size() > 0
@@ -304,7 +325,7 @@ import std::json;
         // launch forwards its URL to this one and exits before anything else
         // starts, so the running window is reused. The dev loop relaunches the
         // app on every rebuild, so it stays multi-instance.
-        if !is_dev {
+        if !is_dev && !this.allow_multiple {
             c_deeplink::peko_deeplink_single_instance(bundle::scheme.to_raw())
         }
 
@@ -315,6 +336,21 @@ import std::json;
         }
         let ws_port: number = this.channel.start()
         let token: string = this.token
+
+        // Desktop opens a pop-up route as a second native window: a child
+        // process running this same binary, pointed at the route and sharing
+        // this bridge. Register the window handlers with the bridge URL and the
+        // origin the child loads from. Mobile has no child processes and the
+        // client SDK falls back to an HTML modal, so this is desktop only.
+        let host_os: string = env::os()
+        let desktop: bool = host_os == "macos" || host_os == "windows" || host_os == "linux"
+        if desktop {
+            let origin: string = dev_server
+            if !is_dev {
+                origin = origin_of(assets::get_asset_url("index.html"))
+            }
+            this.register_window_handlers(`ws://127.0.0.1:${ws_port}/`, origin)
+        }
 
         // The launch route. In dev PEKO_INITIAL_ROUTE restores the route the
         // last build was on; otherwise it is the deep-link URL the OS opened the
@@ -380,7 +416,150 @@ import std::json;
             url = assets::get_asset_url("index.html")
         }
         this.view.navigate(url)
+        this.view.activate()
         this.view.run()
+    }
+
+    /// Runs this instance as a pop-up child when PEKO_POPUP is set, and reports
+    /// whether it did. A pop-up child points its window at the route and bridge
+    /// the opener passed through the environment, shares that bridge instead of
+    /// starting its own, and drives its own window loop. Returns false for a
+    /// normal launch so run continues.
+    [mutates] fn run_popup_child() => bool {
+        let popup_id: string = env::get("PEKO_POPUP")
+        if popup_id.size() == 0 {
+            return false
+        }
+
+        let title: string = env::get("PEKO_POPUP_TITLE")
+        if title.size() > 0 {
+            this.view.set_title(title)
+        }
+        let width: string = env::get("PEKO_POPUP_W")
+        let height: string = env::get("PEKO_POPUP_H")
+        if width.size() > 0 {
+            if height.size() > 0 {
+                this.view.set_size(width.to_number(), height.to_number())
+            }
+        }
+
+        // Window chrome overrides. An empty value inherits the chrome the app's
+        // own setup left on the window; "true" or "false" set it for this
+        // pop-up. Applied before the frameless value is read into the boot
+        // config, so the client SDK draws a custom titlebar when frameless.
+        let want_frameless: string = env::get("PEKO_POPUP_FRAMELESS")
+        if want_frameless == "true" {
+            this.view.set_decorations(false)
+        }
+        if want_frameless == "false" {
+            this.view.set_decorations(true)
+        }
+        let want_transparent: string = env::get("PEKO_POPUP_TRANSPARENT")
+        if want_transparent == "true" {
+            this.view.set_transparent(true)
+        }
+        if want_transparent == "false" {
+            this.view.set_transparent(false)
+        }
+
+        let bridge_url: string = env::get("PEKO_POPUP_URL")
+        let bridge_token: string = env::get("PEKO_POPUP_TOKEN")
+        let origin: string = env::get("PEKO_POPUP_ORIGIN")
+        let route: string = env::get("PEKO_POPUP_ROUTE")
+
+        let frameless: string = "false"
+        if !this.view.is_decorated() {
+            frameless = "true"
+        }
+        let native_controls: string = "false"
+        if this.view.has_native_controls() {
+            native_controls = "true"
+        }
+
+        let url_json: string = new json::JsonString(bridge_url).to_string()
+        let token_json: string = new json::JsonString(bridge_token).to_string()
+        let route_json: string = new json::JsonString(route).to_string()
+        let id_json: string = new json::JsonString(popup_id).to_string()
+        let boot: string = `window.__PEKO__ = { url: ${url_json}, token: ${token_json}, initialRoute: ${route_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: false, devtools: false, popup: true, popupId: ${id_json} };`
+        this.view.init(boot)
+
+        let target: string = origin
+        if route.size() > 0 {
+            target = join_route(origin, route)
+        }
+        this.view.navigate(target)
+        this.view.activate()
+        this.view.run()
+        return true
+    }
+
+    /// Registers the pop-up window handlers on the bridge. windows.open spawns a
+    /// child process running this binary at a route and sharing this bridge, and
+    /// returns its id. windows.close terminates a child by id. windows.notify_closed
+    /// lets a child report that it closed itself. Both emit peko:window-closed so
+    /// the opener's onClose runs. Desktop only.
+    [mutates] fn register_window_handlers(bridge_url: string, origin: string) {
+        let exe: string = env::self_exe()
+        if exe.size() == 0 {
+            return
+        }
+        let token: string = this.token
+        let relay: bridge::Bridge = this.channel
+        let popups: Map<string, process::Process> = new Map<string, process::Process>()
+
+        this.channel.on("windows.open", closure[exe, bridge_url, origin, token, popups](params: string) => string {
+            let object: json::JsonObject = as_object(params)
+            let route: string = string_field(object, "route")
+            let title: string = string_field(object, "title")
+            let width: string = int_field(object, "width", "640")
+            let height: string = int_field(object, "height", "480")
+            let frameless: string = bool_field(object, "frameless")
+            let transparent: string = bool_field(object, "transparent")
+            let id: string = crypto::random_hex(8)
+
+            env::set("PEKO_POPUP", id)
+            env::set("PEKO_POPUP_ROUTE", route)
+            env::set("PEKO_POPUP_URL", bridge_url)
+            env::set("PEKO_POPUP_TOKEN", token)
+            env::set("PEKO_POPUP_ORIGIN", origin)
+            env::set("PEKO_POPUP_TITLE", title)
+            env::set("PEKO_POPUP_W", width)
+            env::set("PEKO_POPUP_H", height)
+            env::set("PEKO_POPUP_FRAMELESS", frameless)
+            env::set("PEKO_POPUP_TRANSPARENT", transparent)
+
+            let started: process::Process? = process::spawn(exe, new Array<string>())
+            if started.is_value() {
+                popups.set(id, started.unwrap())
+            }
+            return `{"id":${new json::JsonString(id).to_string()}}`
+        })
+
+        this.channel.on("windows.close", closure[popups, relay](params: string) => string {
+            let id: string = string_field(as_object(params), "id")
+            let found: process::Process? = popups.get(id)
+            if found.is_value() {
+                let child: process::Process = found.unwrap()
+                child.kill()
+                child.free()
+                popups.remove(id)
+            }
+            relay.emit("peko:window-closed", `{"id":${new json::JsonString(id).to_string()},"result":null}`)
+            return `{}`
+        })
+
+        this.channel.on("windows.notify_closed", closure[popups, relay](params: string) => string {
+            let object: json::JsonObject = as_object(params)
+            let id: string = string_field(object, "id")
+            let result: string = raw_field(object, "result")
+            let found: process::Process? = popups.get(id)
+            if found.is_value() {
+                found.unwrap().free()
+                popups.remove(id)
+            }
+            relay.emit("peko:window-closed", `{"id":${new json::JsonString(id).to_string()},"result":${result}}`)
+            return `{}`
+        })
     }
 }
 
@@ -439,4 +618,74 @@ import std::json;
         return `null`
     }
     return found.unwrap().to_string()
+}
+
+/// The text of a numeric field, or fallback when absent or not a number. The
+/// window handlers pass sizes to the child through the environment as text.
+[private] fn int_field(object: json::JsonObject, key: string, fallback: string) => string {
+    let found: json::JsonValue? = object.get(key)
+    if !found.is_value() {
+        return fallback
+    }
+    let value: json::JsonValue = found.unwrap()
+    if value.kind() != "number" {
+        return fallback
+    }
+    return value.to_string()
+}
+
+/// A boolean field as "true" or "false", or empty when absent or not a boolean.
+/// The window handlers pass chrome toggles to the child through the environment,
+/// where empty means inherit the child's default.
+[private] fn bool_field(object: json::JsonObject, key: string) => string {
+    let found: json::JsonValue? = object.get(key)
+    if !found.is_value() {
+        return ""
+    }
+    let text: string = found.unwrap().to_string()
+    if text == "true" {
+        return "true"
+    }
+    if text == "false" {
+        return "false"
+    }
+    return ""
+}
+
+/// The scheme-and-host origin of a URL: everything up to the path. Returns the
+/// whole string when it has no path. Handles both a dev-server origin (no path)
+/// and a loopback asset URL (http://127.0.0.1:PORT/index.html).
+[private] fn origin_of(url: string) => string {
+    if !url.contains("://") {
+        return url
+    }
+    let three: number = 3
+    let scheme: number = url.index_of("://")
+    let rest_start: number = scheme + three
+    let host: string = url.substring(rest_start, url.size())
+    if !host.contains("/") {
+        return url
+    }
+    let slash: number = host.index_of("/")
+    return url.substring(0, rest_start + slash)
+}
+
+/// Joins an origin and a route path into a URL, collapsing a doubled slash and
+/// inserting one when the route does not start with a slash.
+[private] fn join_route(origin: string, route: string) => string {
+    let zero: number = 0
+    let one: number = 1
+    let base: string = origin
+    let size: number = base.size()
+    if size > zero {
+        let last: string = base.substring(size - one, size)
+        if last == "/" {
+            base = base.substring(zero, size - one)
+        }
+    }
+    let head: string = route.substring(zero, one)
+    if head == "/" {
+        return base + route
+    }
+    return base + "/" + route
 }

@@ -86,7 +86,12 @@ pub fn bundle(
     // generated from the original. Project assets go in the .app root on
     // iOS. Subdirectories are preserved so resource lookups resolve the
     // hierarchical names.
-    let icon = &project.ui_project_info.as_ref().unwrap().icon;
+    let icon = project
+        .ui_project_info
+        .as_ref()
+        .unwrap()
+        .icon_for(OperatingSystem::IOS)
+        .shaped_for(OperatingSystem::IOS);
     for app_dir in app_dirs.iter().copied() {
         io_at(&plist_src, fs::copy(&plist_src, app_dir.join("Info.plist")))?;
         io_at(

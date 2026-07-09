@@ -53,7 +53,9 @@ const ready = new Promise((resolve, reject) => {
 // Resolve the bridge endpoint: the injected config in a native webview, or a
 // same-origin socket for a server-rendered page in a plain browser.
 function endpoint() {
-  const injected = (typeof window !== 'undefined') ? window.__PEKO__ : null;
+  // injectedConfig also returns the opener's config for a pop-up iframe, so the
+  // pop-up connects to the same bridge as the window that opened it.
+  const injected = injectedConfig();
   if (injected && injected.url) {
     return { url: injected.url, token: injected.token || null };
   }
@@ -279,9 +281,31 @@ const windowControls = {
 // draw a custom titlebar only on a frameless desktop window, and fall back to
 // an HTML menu where there is no native menu bar. The OS is read from the user
 // agent; whether the window is frameless is injected by the native host.
+// The native host injects window.__PEKO__ into the main frame. A pop-up window
+// is a same-origin iframe of the app at another route; it has no injection of
+// its own, so it inherits the opener's config (bridge endpoint, platform) from
+// the parent frame.
+function injectedConfig() {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  if (window.__PEKO__) {
+    return window.__PEKO__;
+  }
+  if (window.parent && window.parent !== window) {
+    try {
+      if (window.parent.__PEKO__) {
+        return window.parent.__PEKO__;
+      }
+    } catch (error) {
+      // Cross-origin parent: no access. Fall through.
+    }
+  }
+  return {};
+}
+
 const platform = (function () {
-  const injected =
-    typeof window !== 'undefined' && window.__PEKO__ ? window.__PEKO__ : {};
+  const injected = injectedConfig();
   const ua =
     typeof navigator !== 'undefined' && navigator.userAgent
       ? navigator.userAgent
@@ -697,19 +721,213 @@ function enhanceToolbars() {
   }
 }
 
-// Render a console argument as a string for forwarding to the devtools window.
+// Render a console argument as a readable string for the devtools console.
+// A top-level string prints as-is; everything else is formatted by
+// formatConsoleValue, which handles DOM nodes (JSON.stringify renders those as
+// {}), functions, errors, Map/Set, circular references, and nests with
+// indentation so the panel can pretty-print and highlight it.
 function stringifyConsoleArg(arg) {
   if (typeof arg === 'string') {
     return arg;
   }
-  if (arg instanceof Error) {
-    return arg.stack || arg.message || String(arg);
-  }
   try {
-    return JSON.stringify(arg);
+    return formatConsoleValue(arg, '', new (typeof WeakSet !== 'undefined' ? WeakSet : Array)());
   } catch (error) {
     return String(arg);
   }
+}
+
+// A short one-line summary of a DOM element: its opening tag with id and class.
+function describeElement(el) {
+  var tag = (el.tagName || 'node').toLowerCase();
+  var id = el.id ? '#' + el.id : '';
+  var cls = el.className && typeof el.className === 'string' ? '.' + el.className.trim().replace(/\s+/g, '.') : '';
+  return '<' + tag + id + cls + '>';
+}
+
+// Format one value for the console. `indent` is the current line prefix; `seen`
+// guards against circular references.
+function formatConsoleValue(value, indent, seen) {
+  var type = typeof value;
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (type === 'string') return JSON.stringify(value);
+  if (type === 'number' || type === 'boolean' || type === 'bigint') return String(value);
+  if (type === 'symbol') return value.toString();
+  if (type === 'function') {
+    var kind = String(value).indexOf('class') === 0 ? 'class' : 'Function';
+    return '[' + kind + ': ' + (value.name || 'anonymous') + ']';
+  }
+  if (value instanceof Error) return value.stack || value.name + ': ' + value.message;
+
+  // DOM nodes: JSON.stringify collapses these to {}, so render them usefully.
+  if (typeof Node !== 'undefined' && value instanceof Node) {
+    if (value.nodeType === 1) {
+      var html = value.outerHTML || describeElement(value);
+      return html.length > 5000 ? html.slice(0, 5000) + '\n... (truncated)' : html;
+    }
+    if (value.nodeType === 3) return '#text ' + JSON.stringify(value.textContent);
+    if (value.nodeType === 9) return '#document';
+    return '#' + (value.nodeName || 'node').toLowerCase();
+  }
+
+  if (seen.has && seen.has(value)) return '[Circular]';
+  if (seen.add) seen.add(value);
+
+  var next = indent + '  ';
+  var out;
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      out = '[]';
+    } else {
+      var items = value.map(function (item) {
+        return next + formatConsoleValue(item, next, seen);
+      });
+      out = '[\n' + items.join(',\n') + '\n' + indent + ']';
+    }
+  } else if (typeof Map !== 'undefined' && value instanceof Map) {
+    var mapEntries = [];
+    value.forEach(function (v, k) {
+      mapEntries.push(next + formatConsoleValue(k, next, seen) + ' => ' + formatConsoleValue(v, next, seen));
+    });
+    out = 'Map(' + value.size + ') {' + (mapEntries.length ? '\n' + mapEntries.join(',\n') + '\n' + indent : '') + '}';
+  } else if (typeof Set !== 'undefined' && value instanceof Set) {
+    var setEntries = [];
+    value.forEach(function (v) {
+      setEntries.push(next + formatConsoleValue(v, next, seen));
+    });
+    out = 'Set(' + value.size + ') {' + (setEntries.length ? '\n' + setEntries.join(',\n') + '\n' + indent : '') + '}';
+  } else {
+    var keys = Object.keys(value);
+    var ctor = value.constructor && value.constructor.name;
+    var prefix = ctor && ctor !== 'Object' ? ctor + ' ' : '';
+    if (keys.length === 0) {
+      out = prefix + '{}';
+    } else {
+      var parts = keys.map(function (key) {
+        return next + JSON.stringify(key) + ': ' + formatConsoleValue(value[key], next, seen);
+      });
+      out = prefix + '{\n' + parts.join(',\n') + '\n' + indent + '}';
+    }
+  }
+
+  if (seen.delete) seen.delete(value);
+  return out;
+}
+
+// The property names available on a base expression, including inherited ones,
+// for console completion. An empty base returns the global scope's names. The
+// list is sorted and de-duplicated.
+function completionNames(base) {
+  var obj;
+  if (!base) {
+    obj =
+      typeof window !== 'undefined'
+        ? window
+        : typeof globalThis !== 'undefined'
+          ? globalThis
+          : {};
+  } else {
+    obj = (0, eval)('(' + base + ')');
+  }
+  if (obj === null || obj === undefined) {
+    return [];
+  }
+  var current = typeof obj === 'object' || typeof obj === 'function' ? obj : Object(obj);
+  var seen = Object.create(null);
+  var out = [];
+  var depth = 0;
+  while (current !== null && current !== undefined && depth < 30) {
+    var names = Object.getOwnPropertyNames(current);
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      if (!seen[name]) {
+        seen[name] = true;
+        out.push(name);
+      }
+    }
+    current = Object.getPrototypeOf(current);
+    depth += 1;
+  }
+  out.sort();
+  return out;
+}
+
+// Classify a resource URL into a source-panel group.
+function resourceType(url, initiator) {
+  var clean = url.split('?')[0].toLowerCase();
+  if (initiator === 'css' || clean.endsWith('.css') || clean.endsWith('.scss')) return 'style';
+  if (initiator === 'script' || clean.endsWith('.js') || clean.endsWith('.mjs') || clean.endsWith('.jsx') || clean.endsWith('.ts') || clean.endsWith('.tsx')) return 'script';
+  if (initiator === 'img' || /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/.test(clean)) return 'image';
+  if (clean.endsWith('.json')) return 'json';
+  if (/\.(woff2?|ttf|otf|eot)$/.test(clean)) return 'font';
+  return 'other';
+}
+
+// The resources the page has loaded (scripts, styles, images, ...), from the
+// Performance API, plus the document itself.
+function pageResources() {
+  var out = [];
+  var seen = Object.create(null);
+  if (typeof document !== 'undefined' && location) {
+    out.push({ url: location.href, type: 'document' });
+    seen[location.href] = true;
+  }
+  try {
+    var entries = performance.getEntriesByType('resource');
+    for (var i = 0; i < entries.length && out.length < 400; i++) {
+      var url = entries[i].name;
+      if (seen[url]) continue;
+      seen[url] = true;
+      out.push({ url: url, type: resourceType(url, entries[i].initiatorType) });
+    }
+  } catch (e) {
+    // Performance API unavailable; the document entry still stands.
+  }
+  return out;
+}
+
+// A snapshot of the running page for the devtools page inspector: route, url,
+// title, load state, viewport metrics, current document source, and resources.
+function pageSnapshot() {
+  var loc = typeof location !== 'undefined' ? location : {};
+  var doc = typeof document !== 'undefined' ? document : {};
+  var html = doc.documentElement ? doc.documentElement.outerHTML : '';
+  return {
+    route: (loc.pathname || '') + (loc.search || '') + (loc.hash || ''),
+    url: loc.href || '',
+    origin: loc.origin || '',
+    title: doc.title || '',
+    referrer: doc.referrer || '',
+    readyState: doc.readyState || '',
+    width: typeof window !== 'undefined' ? window.innerWidth : 0,
+    height: typeof window !== 'undefined' ? window.innerHeight : 0,
+    scrollX: typeof window !== 'undefined' ? Math.round(window.scrollX) : 0,
+    scrollY: typeof window !== 'undefined' ? Math.round(window.scrollY) : 0,
+    elements: doc.getElementsByTagName ? doc.getElementsByTagName('*').length : 0,
+    html: html.length > 200000 ? html.slice(0, 200000) + '\n<!-- truncated -->' : html,
+    resources: pageResources(),
+  };
+}
+
+// Fetch one same-origin (or CORS-permitting) text resource for the source
+// viewer, returning {url, mime, text}. The page must fetch it because the IDE
+// webview is a different origin and cannot read the response body.
+function fetchResource(url) {
+  return fetch(url)
+    .then(function (response) {
+      var mime = response.headers.get('content-type') || '';
+      return response.text().then(function (text) {
+        return {
+          url: url,
+          mime: mime,
+          text: text.length > 400000 ? text.slice(0, 400000) + '\n/* truncated */' : text,
+        };
+      });
+    })
+    .catch(function (error) {
+      return { url: url, mime: '', text: '', error: String(error) };
+    });
 }
 
 // When the devtools window is attached (peko run --devtools), forward the web
@@ -760,12 +978,33 @@ function installDevtoolsConsole() {
     const kind = request.kind;
     let ok = true;
     let result = '';
+    // Resource fetch is async: fetch the body, then reply, and skip the sync
+    // reply below.
+    if (kind === 'resource') {
+      fetchResource(request.code)
+        .then(function (payload) {
+          invoke('devtools.result', { id: id, kind: 'resource', ok: !payload.error, result: JSON.stringify(payload) }).catch(function () {});
+        })
+        .catch(function (error) {
+          invoke('devtools.result', { id: id, kind: 'resource', ok: false, result: JSON.stringify({ url: request.code, error: String(error) }) }).catch(function () {});
+        });
+      return;
+    }
     try {
       if (kind === 'source') {
         result =
           typeof document !== 'undefined' && document.documentElement
             ? document.documentElement.outerHTML
             : '';
+      } else if (kind === 'complete') {
+        // List the property names on the base expression, walking the prototype
+        // chain, so a console can complete `expr.` An empty base lists globals.
+        result = JSON.stringify({
+          base: request.code || '',
+          names: completionNames(request.code),
+        });
+      } else if (kind === 'page') {
+        result = JSON.stringify(pageSnapshot());
       } else {
         // Indirect eval runs in global scope. Show the value, not [object].
         const value = (0, eval)(request.code);
@@ -773,7 +1012,10 @@ function installDevtoolsConsole() {
       }
     } catch (error) {
       ok = false;
-      result = error && error.stack ? error.stack : String(error);
+      // Report the error's name and message. WebKit's error.stack omits the
+      // message and lists only the SDK's own frames, which reads as noise in
+      // the console.
+      result = String(error);
     }
     invoke('devtools.result', {
       id: id,
@@ -824,6 +1066,299 @@ function ensureViewportFit() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pop-up windows
+//
+// peko.windows.open(route, options) shows another route of the same app as a
+// pop-up. In a native desktop app it is a real OS window: a child process of
+// the same app pointed at the route and sharing this window's bridge, opened
+// through the windows.open native handler. In a browser or on mobile it is an
+// in-page surface: a draggable dialog on a desktop browser, a full-height sheet
+// on mobile, hosting the route in a same-origin iframe that inherits this
+// window's bridge. peko.windows.close(id) closes a pop-up; from inside a pop-up,
+// peko.windows.close() dismisses itself.
+// ---------------------------------------------------------------------------
+
+let popupSeq = 0;
+const openPopups = new Map();
+let popupStylesInjected = false;
+
+// onClose callbacks for native pop-up windows, keyed by the id the windows.open
+// handler returned. The opener fires them when it receives peko:window-closed.
+const nativeOnClose = new Map();
+let nativeCloseWired = false;
+
+// True when a native windows.open handler is present: a native desktop app that
+// is not itself a pop-up child. A browser (no injected bridge) and mobile use
+// the in-page surface instead.
+function nativeWindowsAvailable() {
+  const injected = injectedConfig();
+  return !!(injected && injected.url && !injected.popup && platform.desktop);
+}
+
+// Subscribe once to the opener-side close event, so a pop-up that closes (by
+// request, by self-report, or by its window closing) fires the stored onClose.
+function wireNativeClose() {
+  if (nativeCloseWired) {
+    return;
+  }
+  nativeCloseWired = true;
+  on('peko:window-closed', function (data) {
+    if (!data || data.id == null) {
+      return;
+    }
+    const callback = nativeOnClose.get(data.id);
+    if (callback) {
+      nativeOnClose.delete(data.id);
+      try {
+        callback(data.result);
+      } catch (error) {
+        // A close handler throwing must not break dispatch.
+      }
+    }
+  });
+}
+
+// Open a route as a real OS window through the native handler. The id is known
+// only once the async call resolves, so the returned handle defers close and
+// onClose registration until then.
+function openNativeWindow(route, options) {
+  wireNativeClose();
+  let realId = null;
+  let closedEarly = false;
+  const opened = invoke('windows.open', {
+    route: route,
+    title: options.title || '',
+    width: options.width || 640,
+    height: options.height || 480,
+    frameless: options.frameless,
+    transparent: options.transparent,
+  }).then(function (result) {
+    realId = result && result.id;
+    if (!realId) {
+      return;
+    }
+    if (closedEarly) {
+      invoke('windows.close', { id: realId }).catch(function () {});
+      return;
+    }
+    if (typeof options.onClose === 'function') {
+      nativeOnClose.set(realId, options.onClose);
+    }
+  }).catch(function () {});
+  return {
+    id: null,
+    close: function (result) {
+      closedEarly = true;
+      opened.then(function () {
+        if (realId) {
+          invoke('windows.close', { id: realId, result: result }).catch(function () {});
+        }
+      });
+    },
+  };
+}
+
+function injectPopupStyles() {
+  if (popupStylesInjected || typeof document === 'undefined') {
+    return;
+  }
+  popupStylesInjected = true;
+  const style = document.createElement('style');
+  style.textContent = [
+    '.peko-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:2147483000;display:flex;align-items:center;justify-content:center;}',
+    '.peko-modal{background:#fff;color:#111;border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.35);display:flex;flex-direction:column;overflow:hidden;max-width:96vw;max-height:92vh;position:relative;}',
+    '.peko-modal-header{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:move;user-select:none;border-bottom:1px solid rgba(0,0,0,.1);font:600 13px system-ui,-apple-system,sans-serif;}',
+    '.peko-modal-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.peko-modal-close{border:none;background:transparent;font-size:18px;line-height:1;cursor:pointer;color:#666;padding:2px 8px;border-radius:6px;}',
+    '.peko-modal-close:hover{background:rgba(0,0,0,.08);}',
+    '.peko-modal-body{flex:1;min-height:0;}',
+    '.peko-modal-body iframe{width:100%;height:100%;border:none;display:block;}',
+    '.peko-mobile .peko-modal{width:100vw;height:92vh;max-width:100vw;border-radius:16px 16px 0 0;align-self:flex-end;}',
+    '.peko-mobile .peko-modal-header{cursor:default;}',
+  ].join('');
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function makePopupDraggable(modal, handle) {
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let originX = 0;
+  let originY = 0;
+  handle.addEventListener('mousedown', function (event) {
+    if (event.target && String(event.target.className).indexOf('peko-modal-close') !== -1) {
+      return;
+    }
+    dragging = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    const match = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(modal.style.transform || '');
+    originX = match ? parseFloat(match[1]) : 0;
+    originY = match ? parseFloat(match[2]) : 0;
+    event.preventDefault();
+  });
+  document.addEventListener('mousemove', function (event) {
+    if (!dragging) {
+      return;
+    }
+    modal.style.transform =
+      'translate(' + (originX + event.clientX - startX) + 'px,' + (originY + event.clientY - startY) + 'px)';
+  });
+  document.addEventListener('mouseup', function () {
+    dragging = false;
+  });
+}
+
+function openWindow(route, options) {
+  options = options || {};
+  const path = String(route == null ? '/' : route);
+  // A native desktop app opens a real OS window; a browser or mobile falls
+  // through to the in-page surface below.
+  if (nativeWindowsAvailable()) {
+    return openNativeWindow(path, options);
+  }
+  if (typeof document === 'undefined' || !document.body) {
+    return { id: null, close: function () {} };
+  }
+  injectPopupStyles();
+  const id = 'pw' + ++popupSeq;
+  const origin = typeof location !== 'undefined' ? location.origin : '';
+  const url = origin + (path.charAt(0) === '/' ? path : '/' + path);
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'peko-modal-backdrop';
+  backdrop.setAttribute('data-peko-window', id);
+
+  const modal = document.createElement('div');
+  modal.className = 'peko-modal';
+  if (!platform.mobile) {
+    const width = options.width || 640;
+    const height = options.height || 480;
+    modal.style.width = typeof width === 'number' ? width + 'px' : width;
+    modal.style.height = typeof height === 'number' ? height + 'px' : height;
+  }
+
+  const header = document.createElement('div');
+  header.className = 'peko-modal-header';
+  const title = document.createElement('span');
+  title.className = 'peko-modal-title';
+  title.textContent = options.title || '';
+  const close = document.createElement('button');
+  close.className = 'peko-modal-close';
+  close.textContent = '×';
+  close.addEventListener('click', function () {
+    closeWindow(id);
+  });
+  header.appendChild(title);
+  header.appendChild(close);
+
+  const body = document.createElement('div');
+  body.className = 'peko-modal-body';
+  const iframe = document.createElement('iframe');
+  iframe.src = url;
+  iframe.setAttribute('data-peko-window', id);
+  body.appendChild(iframe);
+
+  modal.appendChild(header);
+  modal.appendChild(body);
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+
+  // A click on the dimmed backdrop closes the pop-up unless it is modal.
+  if (!options.modal) {
+    backdrop.addEventListener('mousedown', function (event) {
+      if (event.target === backdrop) {
+        closeWindow(id);
+      }
+    });
+  }
+  if (!platform.mobile) {
+    makePopupDraggable(modal, header);
+  }
+
+  openPopups.set(id, { backdrop: backdrop, iframe: iframe, onClose: options.onClose });
+  return {
+    id: id,
+    close: function (result) {
+      closeWindow(id, result);
+    },
+  };
+}
+
+function closeWindow(id, result) {
+  const injected = injectedConfig();
+
+  // No id from inside a native pop-up window: report the result to the opener
+  // over the bridge, then close this OS window.
+  if (!id && injected && injected.popup && injected.popupId) {
+    invoke('windows.notify_closed', { id: injected.popupId, result: result }).catch(function () {});
+    if (typeof window !== 'undefined' && typeof window.__peko_close === 'function') {
+      window.__peko_close();
+    }
+    return;
+  }
+
+  // No id from inside an iframe pop-up: ask the opener (the parent frame).
+  if (!id && typeof window !== 'undefined' && window.parent && window.parent !== window) {
+    try {
+      window.parent.postMessage({ __peko_window: 'close', result: result }, '*');
+    } catch (error) {
+      // Cross-origin parent: cannot post. Nothing to do.
+    }
+    return;
+  }
+
+  // An id that is not an in-page pop-up is a native window: close it by id.
+  if (id && !openPopups.has(id)) {
+    invoke('windows.close', { id: id, result: result }).catch(function () {});
+    return;
+  }
+
+  const popup = openPopups.get(id);
+  if (!popup) {
+    return;
+  }
+  openPopups.delete(id);
+  if (popup.backdrop && popup.backdrop.parentNode) {
+    popup.backdrop.parentNode.removeChild(popup.backdrop);
+  }
+  if (typeof popup.onClose === 'function') {
+    try {
+      popup.onClose(result);
+    } catch (error) {
+      // A close handler throwing must not break teardown.
+    }
+  }
+}
+
+// A pop-up dismisses itself by posting to its opener; match the message to the
+// pop-up whose iframe sent it.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('message', function (event) {
+    const data = event.data;
+    if (!data || data.__peko_window !== 'close') {
+      return;
+    }
+    openPopups.forEach(function (popup, id) {
+      if (popup.iframe && popup.iframe.contentWindow === event.source) {
+        closeWindow(id, data.result);
+      }
+    });
+  });
+
+  // A native pop-up window that closes by the OS titlebar reports it, so the
+  // opener's onClose runs with no explicit result.
+  const bootConfig = injectedConfig();
+  if (bootConfig && bootConfig.popup && bootConfig.popupId) {
+    window.addEventListener('pagehide', function () {
+      invoke('windows.notify_closed', { id: bootConfig.popupId, result: null }).catch(function () {});
+    });
+  }
+}
+
+const windowManager = { open: openWindow, close: closeWindow };
+
 const core = {
   invoke: invoke,
   on: on,
@@ -837,6 +1372,7 @@ const core = {
   noDrag: noDrag,
   control: control,
   window: windowControls,
+  windows: windowManager,
 };
 
 // A namespace proxy: peko.storage.get(params) calls invoke("storage.get", params).

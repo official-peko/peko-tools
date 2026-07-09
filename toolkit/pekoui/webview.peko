@@ -99,12 +99,18 @@ import std::runtime;
     /// layer behind the window. Desktop only, and a no-op on iOS and Android.
     /// Pair it with a transparent HTML root, for example
     /// `html, body { background: transparent }`, and CSS rgba panels.
-    fn set_transparent(transparent: bool) {
+    [public] fn set_transparent(transparent: bool) {
         if transparent {
             c_webview::peko_webview_set_transparent(this.handle, constant<i32>(1))
         } else {
             c_webview::peko_webview_set_transparent(this.handle, constant<i32>(0))
         }
+    }
+
+    /// Grows the macOS titlebar to the given height so the OS traffic-light
+    /// buttons center vertically in a custom titlebar. No-op on other platforms.
+    [public] fn set_titlebar_height(height: number) {
+        c_webview::peko_webview_set_titlebar_height(this.handle, height.to_raw())
     }
 
     /// Sets whether the native titlebar is shown. Passing false hides it and
@@ -217,6 +223,13 @@ import std::runtime;
     /// Closes the window. Desktop only, and a no-op on iOS and Android.
     fn close() {
         c_webview::peko_webview_close(this.handle)
+    }
+
+    /// Brings the app in front of other apps and raises this window, so a newly
+    /// spawned instance opens frontmost. Desktop only, and a no-op on iOS and
+    /// Android.
+    fn activate() {
+        c_webview::peko_webview_activate(this.handle)
     }
 
     /// Navigates to `url`.

@@ -21,7 +21,7 @@ per-platform native toolchains, both under [`toolkit/`](#standard-library-and-to
 | [`peko_core`](peko_core/README.md) | Lexer, parser, AST, type system, static analysis, and the simple package registry. |
 | [`peko_llvm`](peko_llvm/README.md) | LLVM IR code generation and linking, built on top of `peko_core`. Links libLLVM through llvm-sys and inkwell. |
 | [`peko_cli`](peko_cli/README.md) | The user facing command line tool: compiling, bundling, project management, and package management. |
-| [`peko_lsp`](peko_lsp/README.md) | A language server that exposes the `peko_core` analysis engine to editors. |
+| [`peko_lsp`](peko_lsp/README.md) | A language server library exposing the `peko_core` analysis engine to editors. Built into the CLI and run as `peko lsp`. |
 
 Each crate documents its own internals in its own README. This file covers the
 workspace as a whole.

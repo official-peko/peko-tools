@@ -1,0 +1,16 @@
+//! pekoui::dialog: native file dialogs.
+//!
+//! pick_folder opens the OS folder chooser and returns the selected absolute
+//! path. It is wired for macOS; other platforms return the empty string until a
+//! chooser is added, so callers offer a typed path as a fallback. Used through
+//! the pekoui::dialog prefix.
+
+import c::dialog::dialog as c_dialog;
+import std::runtime;
+
+/// Opens a native folder chooser titled `title` and returns the selected
+/// absolute path, or the empty string when the user cancels or no chooser is
+/// wired for the platform. Blocks while the dialog is open. Desktop only.
+[public] fn pick_folder(title: string) => string {
+    return runtime::create_managed(c_dialog::peko_dialog_pick_folder(title.to_raw()))
+}

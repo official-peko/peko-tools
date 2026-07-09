@@ -67,6 +67,12 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
 
 /// `peko project new`: scaffold a fresh project, prompting for its details.
 fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    // A --name flag drives non-interactive scaffolding, so the IDE and scripts
+    // create projects through flags instead of prompts.
+    if cli_info.flags.has_flag("name") {
+        return execute_new_noninteractive(cli_info, reporter);
+    }
+
     println!("---------------------");
     println!(">> Create a project <<");
     println!("---------------------");
@@ -156,7 +162,104 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let project_root = cwd.join(&project_name);
+
+    finish_new_project(
+        cli_info,
+        reporter,
+        project_is_ui,
+        &project_name,
+        &bundle_id,
+        &version,
+        &framework,
+        &cwd,
+    )
+}
+
+/// `peko project new --name <name> [flags]`: scaffold without prompts. UI is the
+/// default (opt out with --no-ui); --bundle, --version, --framework, and --dir
+/// fill the remaining details, with the same defaults the prompts offer.
+fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    let project_name = cli_info
+        .flags
+        .get_flag("name")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if project_name.is_empty() {
+        reporter.error("project name cannot be empty");
+        return ExitCode::FAILURE;
+    }
+
+    let project_is_ui = !cli_info.flags.has_flag("no-ui");
+
+    let bundle_id = if project_is_ui {
+        cli_info.flags.get_flag("bundle").unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let version = cli_info
+        .flags
+        .get_flag("version")
+        .map(|value| normalize_version(&value))
+        .unwrap_or_else(|| "0.1.0".to_owned());
+
+    // A UI project needs a web-framework template. Default to React with
+    // TypeScript, matching the first typed choice the menu offers.
+    let framework = if project_is_ui {
+        cli_info
+            .flags
+            .get_flag("framework")
+            .unwrap_or_else(|| "react-ts".to_owned())
+    } else {
+        String::new()
+    };
+
+    let base_dir = match cli_info.flags.get_flag("dir") {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                reporter.error(format!("cannot read current directory: {e}"));
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    if !base_dir.is_dir() {
+        reporter.error(format!(
+            "target directory does not exist: {}",
+            base_dir.display()
+        ));
+        return ExitCode::FAILURE;
+    }
+
+    finish_new_project(
+        cli_info,
+        reporter,
+        project_is_ui,
+        &project_name,
+        &bundle_id,
+        &version,
+        &framework,
+        &base_dir,
+    )
+}
+
+/// Resolve the project root under base_dir, handle an existing folder (removed
+/// only with --force), and scaffold either a UI (web) tree or a plain CLI tree.
+/// Shared by the interactive and non-interactive `project new` paths.
+#[allow(clippy::too_many_arguments)]
+fn finish_new_project(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    project_is_ui: bool,
+    project_name: &str,
+    bundle_id: &str,
+    version: &str,
+    framework: &str,
+    base_dir: &Path,
+) -> ExitCode {
+    let project_root = base_dir.join(project_name);
 
     if project_root.exists() {
         if !cli_info.flags.has_flag("force") {
@@ -188,10 +291,10 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return scaffold_ui_project(
             cli_info,
             reporter,
-            &project_name,
-            &bundle_id,
-            &version,
-            &framework,
+            project_name,
+            bundle_id,
+            version,
+            framework,
             &project_root,
         );
     }
@@ -202,8 +305,8 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 
     let manifest = CLI_MANIFEST_TEMPLATE
-        .replace("{name}", &project_name)
-        .replace("{version}", &version);
+        .replace("{name}", project_name)
+        .replace("{version}", version);
     let files: Vec<(PathBuf, Vec<u8>)> = vec![
         (project_root.join("peko.toml"), manifest.into_bytes()),
         (

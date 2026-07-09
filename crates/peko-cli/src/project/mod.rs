@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use derive_new::new;
 use image::{DynamicImage, EncodableLayout};
-use peko_core::config::{ConfigError, LoadedManifest, Manifest, Project, Ui};
+use peko_core::config::{ConfigError, Icon, LoadedManifest, Manifest, Project, Ui};
+use peko_core::target::OperatingSystem;
 use thiserror::Error;
 
 use crate::bundler::cartool::{carinfo, carwriter};
@@ -48,6 +49,62 @@ const DEFAULT_ICON_BIN: &str = "Compiler/bundling/defaulticon.bin";
 
 /// The pixel width and height of the default app icon.
 const DEFAULT_ICON_SIZE: u32 = 1024;
+
+/// The mask shape an app icon is trimmed to for a platform.
+#[derive(Debug, Clone, Copy)]
+pub enum IconShape {
+    /// Full square, no mask.
+    Square,
+    /// A rounded rectangle.
+    RoundedSquare,
+    /// A full circle.
+    Circle,
+    /// An Apple-style squircle (superellipse).
+    Squircle,
+}
+
+/// Whether a point (in content-box coordinates, each axis in [-1, 1]) is inside
+/// `shape`.
+fn shape_contains(shape: IconShape, x: f32, y: f32) -> bool {
+    match shape {
+        IconShape::Square => x.abs() <= 1.0 && y.abs() <= 1.0,
+        IconShape::Circle => x * x + y * y <= 1.0,
+        // The Apple icon shape is a rounded rectangle with continuous (squircle)
+        // corners: flat sides that meet the canvas edges, joined by superellipse
+        // corners. A pure superellipse pinches the sides inward and reads as too
+        // round. `radius` is the corner size as a fraction of the half-side and
+        // matches Apple's icon-grid corner (about 0.2237 of the full side). The
+        // corner uses exponent 5 for the continuous curvature.
+        IconShape::Squircle => {
+            // Apple's icon corner radius is 0.2237 of the full side, which is
+            // 0.4474 of the half-side used for these normalized coordinates.
+            let radius = 0.4474f32;
+            let ax = x.abs();
+            let ay = y.abs();
+            if ax > 1.0 || ay > 1.0 {
+                false
+            } else if ax <= 1.0 - radius || ay <= 1.0 - radius {
+                true
+            } else {
+                let dx = (ax - (1.0 - radius)) / radius;
+                let dy = (ay - (1.0 - radius)) / radius;
+                dx.powf(5.0) + dy.powf(5.0) <= 1.0
+            }
+        }
+        IconShape::RoundedSquare => {
+            let radius = 0.45f32;
+            let ax = x.abs();
+            let ay = y.abs();
+            if ax <= 1.0 - radius || ay <= 1.0 - radius {
+                ax <= 1.0 && ay <= 1.0
+            } else {
+                let dx = ax - (1.0 - radius);
+                let dy = ay - (1.0 - radius);
+                dx * dx + dy * dy <= radius * radius
+            }
+        }
+    }
+}
 
 /// App icon stored as RGBA pixel data plus the originating image width.
 ///
@@ -158,6 +215,71 @@ impl ProjectIcon {
     /// Returns the icon's pixel data in RGBA order.
     pub fn get_rgba_pixels(&self) -> Vec<u8> {
         self.icon_pixel_data.clone()
+    }
+
+    /// A copy shaped to `shape`, the way a platform displays its app icon. The
+    /// content is inset by `inset` (a fraction of the side) on a transparent
+    /// canvas, and everything outside the shape is made transparent with
+    /// anti-aliased edges (2x2 supersampled). A square with no inset is a no-op.
+    pub fn shaped(&self, shape: IconShape, inset: f32) -> ProjectIcon {
+        if matches!(shape, IconShape::Square) && inset <= 0.0 {
+            return self.clone();
+        }
+        let size = self.width;
+        let content = (((size as f32) * (1.0 - 2.0 * inset)).round() as u32).max(1);
+        let offset = ((size - content) / 2) as usize;
+        let n = size as usize;
+        let c = content as usize;
+
+        // Draw the (optionally inset) source onto a transparent canvas.
+        let source = if content == size {
+            self.clone()
+        } else {
+            self.resize(content, content)
+        };
+        let mut canvas = vec![0u8; n * n * 4];
+        for row in 0..c {
+            let src = row * c * 4;
+            let dst = ((row + offset) * n + offset) * 4;
+            canvas[dst..dst + c * 4].copy_from_slice(&source.icon_pixel_data[src..src + c * 4]);
+        }
+
+        // Multiply each alpha by the shape's coverage over the content box.
+        let half = content as f32 / 2.0;
+        let center = size as f32 / 2.0;
+        for y in 0..size {
+            for x in 0..size {
+                let mut inside = 0u32;
+                for (sx, sy) in [(0.25f32, 0.25f32), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    let px = (x as f32 + sx - center) / half;
+                    let py = (y as f32 + sy - center) / half;
+                    if shape_contains(shape, px, py) {
+                        inside += 1;
+                    }
+                }
+                if inside < 4 {
+                    let alpha_index = (y as usize * n + x as usize) * 4 + 3;
+                    canvas[alpha_index] = (canvas[alpha_index] as u32 * inside / 4) as u8;
+                }
+            }
+        }
+        ProjectIcon::new(canvas, size)
+    }
+
+    /// A copy shaped the way `os` displays its app icon: a squircle for Apple
+    /// platforms (macOS with padding), a circle for Android, and square for the
+    /// rest.
+    pub fn shaped_for(&self, os: OperatingSystem) -> ProjectIcon {
+        match os {
+            // macOS shows the app icon as provided. macOS 26 no longer masks a
+            // flat bitmap into the squircle, so the shape is baked in. The icon
+            // is a full-bleed squircle: the flat sides meet the canvas edges and
+            // only the corners are trimmed, matching Apple's icon shape.
+            OperatingSystem::MacOS => self.shaped(IconShape::Squircle, 0.0),
+            OperatingSystem::IOS => self.shaped(IconShape::Squircle, 0.0),
+            OperatingSystem::Android => self.shaped(IconShape::Circle, 0.0),
+            _ => self.clone(),
+        }
     }
 
     /// Returns the icon's pixel data in BGRA order, the channel order the CAR
@@ -665,7 +787,11 @@ pub struct UIProjectInfo {
     /// The UI framework identifier: `native`, `static`, or `server`.
     pub framework: String,
     pub platforms: Vec<peko_core::target::OperatingSystem>,
+    /// The base app icon, reworked for platforms without an explicit override.
     pub icon: ProjectIcon,
+    /// Per-platform icon overrides from `[icon].<platform>`, replacing the base
+    /// icon for that platform.
+    pub icon_overrides: BTreeMap<peko_core::target::OperatingSystem, ProjectIcon>,
     /// The custom URL scheme the app registers for deep links, absent when it
     /// registers none.
     pub scheme: Option<String>,
@@ -675,6 +801,28 @@ pub struct UIProjectInfo {
     /// The initial window height in pixels from the manifest, absent for the
     /// default.
     pub height: Option<f64>,
+    /// The Android adaptive-icon foreground layer, present when the icon builder
+    /// saved a foreground/background split. Absent icons fall back to the flat
+    /// masked icon on Android.
+    pub android_foreground: Option<ProjectIcon>,
+    /// The Android adaptive-icon background layer.
+    pub android_background: Option<ProjectIcon>,
+}
+
+impl UIProjectInfo {
+    /// The icon to bundle for a platform: its explicit override, else the base.
+    pub fn icon_for(&self, os: peko_core::target::OperatingSystem) -> &ProjectIcon {
+        self.icon_overrides.get(&os).unwrap_or(&self.icon)
+    }
+
+    /// The Android adaptive-icon foreground and background layers, present only
+    /// when both were provided.
+    pub fn android_adaptive(&self) -> Option<(&ProjectIcon, &ProjectIcon)> {
+        match (&self.android_foreground, &self.android_background) {
+            (Some(foreground), Some(background)) => Some((foreground, background)),
+            _ => None,
+        }
+    }
 }
 
 /// A discovered or constructed Peko project.
@@ -787,7 +935,7 @@ impl PekoProject {
 
         let ui_project_info = match &loaded.manifest {
             Manifest::Application(app) => match &app.ui {
-                Some(ui) => Some(build_ui_info(&root, &app.project, ui)?),
+                Some(ui) => Some(build_ui_info(&root, &app.project, ui, app.icon.as_ref())?),
                 None => None,
             },
             Manifest::Package(_) => None,
@@ -818,14 +966,55 @@ impl PekoProject {
 /// Assemble UI metadata from an application manifest's `[project]` and `[ui]`
 /// tables.
 ///
-/// The app icon is loaded from the square PNG that `[ui].icon` names, resolved
-/// relative to the project root. A UI manifest without an icon falls back to
-/// the toolchain's default icon.
-fn build_ui_info(root: &Path, project: &Project, ui: &Ui) -> Result<UIProjectInfo, ProjectError> {
-    let icon = match ui.icon.as_ref() {
-        Some(icon_path) => ProjectIcon::from_png(root.join(icon_path))?,
+/// The app icon is loaded from the square PNG the `[icon].source` names, or
+/// `[ui].icon` when there is no `[icon]` table, resolved relative to the project
+/// root. A UI manifest without an icon falls back to the toolchain's default.
+fn build_ui_info(
+    root: &Path,
+    project: &Project,
+    ui: &Ui,
+    icon_config: Option<&Icon>,
+) -> Result<UIProjectInfo, ProjectError> {
+    // A configured icon path that no longer exists falls back rather than
+    // failing the whole project load: the icon is regenerated on the next save,
+    // and a stale path should not brick opening or building the project. Only a
+    // present-but-invalid PNG is a hard error.
+    let load = |path: Option<&PathBuf>| -> Result<Option<ProjectIcon>, ProjectError> {
+        match path {
+            Some(path) => {
+                let full = root.join(path);
+                if full.exists() {
+                    Ok(Some(ProjectIcon::from_png(full)?))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    };
+
+    let source = icon_config
+        .and_then(|config| config.source.as_ref())
+        .or(ui.icon.as_ref());
+    let icon = match load(source)? {
+        Some(icon) => icon,
         None => ProjectIcon::default_icon()?,
     };
+
+    // Per-platform overrides: each present PNG replaces the base for one OS.
+    let mut icon_overrides = BTreeMap::new();
+    if let Some(config) = icon_config {
+        for (os, path) in &config.overrides {
+            if let Some(icon) = load(Some(path))? {
+                icon_overrides.insert(*os, icon);
+            }
+        }
+    }
+
+    // Android adaptive layers, present only when the icon builder saved a
+    // foreground/background split.
+    let android_foreground = load(icon_config.and_then(|config| config.android_foreground.as_ref()))?;
+    let android_background = load(icon_config.and_then(|config| config.android_background.as_ref()))?;
 
     Ok(UIProjectInfo::new(
         project.bundle.clone().unwrap_or_default(),
@@ -834,9 +1023,12 @@ fn build_ui_info(root: &Path, project: &Project, ui: &Ui) -> Result<UIProjectInf
         ui.framework.as_str().to_owned(),
         project.target_platforms.clone(),
         icon,
+        icon_overrides,
         ui.scheme.clone(),
         ui.width,
         ui.height,
+        android_foreground,
+        android_background,
     ))
 }
 

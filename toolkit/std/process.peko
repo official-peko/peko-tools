@@ -1,0 +1,227 @@
+//! std::process: spawn and control child processes.
+//!
+//! Launch a program with arguments and an optional working directory, then read
+//! its stdout and stderr line by line, write to its stdin, wait for it to exit,
+//! or terminate it. Line reads and waits block the calling thread; use on_output
+//! and on_error to stream output on background threads without blocking. The
+//! platform layer is c/process/peko_process.c. Used through the std::process
+//! prefix.
+
+import c::process::process as c_process;
+import { * } from core;
+import { * } from collections;
+import runtime;
+import threads;
+
+/// A spawned child process, with pipes to its stdin, stdout, and stderr.
+[public] class Process {
+    [private] handle: opaque
+
+    constructor(handle: opaque) {
+        this.handle = handle
+    }
+
+    /// The child's process id.
+    [public] fn pid() => number {
+        return new number(danger_cast<f64>(c_process::peko_process_pid(this.handle)))
+    }
+
+    /// Write text to the child's stdin. Returns the bytes written, or a
+    /// negative number on error.
+    [public] fn write(text: string) => number {
+        let len: i32 = danger_cast<i32>(text.size().to_raw())
+        let written: i32 = c_process::peko_process_write(this.handle, text.to_raw(), len)
+        return new number(danger_cast<f64>(written))
+    }
+
+    /// Write text followed by a newline to the child's stdin.
+    [public] fn write_line(text: string) => number {
+        return this.write(`${text}\n`)
+    }
+
+    /// Close the child's stdin, signaling end of input.
+    [public] fn close_input() {
+        c_process::peko_process_close_stdin(this.handle)
+    }
+
+    /// Read the next line from stdout, without the newline. None at end of
+    /// output. Blocks until a line is available or the stream closes.
+    [public] fn read_line() => string? {
+        return this.read_stream(constant<i32>(1))
+    }
+
+    /// Read the next line from stderr, without the newline. None at end of
+    /// output. Blocks until a line is available or the stream closes.
+    [public] fn read_error_line() => string? {
+        return this.read_stream(constant<i32>(2))
+    }
+
+    [private] fn read_stream(which: i32) => string? {
+        let status: i32 = c_process::peko_process_read_line(this.handle, which)
+        if status == constant<i32>(0) {
+            return None
+        }
+        return runtime::create_managed(c_process::peko_process_line(this.handle, which))
+    }
+
+    /// Read up to count raw bytes from stdout, without stopping at newlines.
+    /// None at end of output. For framed protocols where line reads do not fit.
+    [public] fn read(count: number) => string? {
+        let want: i32 = danger_cast<i32>(count.to_raw())
+        let got: i32 = c_process::peko_process_read_bytes(this.handle, constant<i32>(1), want)
+        if got == constant<i32>(0) {
+            return None
+        }
+        return runtime::create_managed(c_process::peko_process_line(this.handle, constant<i32>(1)))
+    }
+
+    /// Stream each stdout line to a callback on a background thread. The thread
+    /// runs until the stream closes. Returns immediately.
+    [public] fn on_output(callback: closure(string) => void) {
+        this.stream_lines(constant<i32>(1), callback)
+    }
+
+    /// Stream each stderr line to a callback on a background thread.
+    [public] fn on_error(callback: closure(string) => void) {
+        this.stream_lines(constant<i32>(2), callback)
+    }
+
+    [private] fn stream_lines(which: i32, callback: closure(string) => void) {
+        let handle: opaque = this.handle
+        threads::new_thread(closure[handle, which, callback]() => void {
+            let reading: bool = true
+            while reading {
+                let status: i32 = c_process::peko_process_read_line(handle, which)
+                if status == constant<i32>(0) {
+                    reading = false
+                } else {
+                    callback(runtime::create_managed(c_process::peko_process_line(handle, which)))
+                }
+            }
+        })
+    }
+
+    /// Wait for the child to exit and return its exit code. Blocks.
+    [public] fn wait() => number {
+        return new number(danger_cast<f64>(c_process::peko_process_wait(this.handle)))
+    }
+
+    /// Whether the child is still running.
+    [public] fn is_running() => bool {
+        return c_process::peko_process_is_running(this.handle) != constant<i32>(0)
+    }
+
+    /// The child's exit code if it has exited, or None while it is running.
+    [public] fn try_exit_code() => number? {
+        if this.is_running() {
+            return None
+        }
+        return this.wait()
+    }
+
+    /// Force the child to terminate.
+    [public] fn kill() {
+        c_process::peko_process_kill(this.handle)
+    }
+
+    /// Free the process handle and close its pipes. Does not terminate the
+    /// child; call kill first to stop a running child.
+    [public] fn free() {
+        c_process::peko_process_free(this.handle)
+    }
+}
+
+/// Spawn program with the given arguments in the current directory. Returns
+/// None when the process could not be started.
+[public] fn spawn(program: string, args: Array<string>) => Process? {
+    return spawn_in(program, args, "")
+}
+
+/// Spawn program with the given arguments and working directory. An empty
+/// directory inherits the current one. Returns None when the process could not
+/// be started.
+[public] fn spawn_in(program: string, args: Array<string>, cwd: string) => Process? {
+    let argv: opaque = c_process::peko_argv_new()
+    let count: number = args.size()
+    let one: number = 1
+    let index: number = 0
+    while index < count {
+        c_process::peko_argv_push(argv, args[index].to_raw())
+        index = index + one
+    }
+    let handle: opaque = c_process::peko_process_spawn(program.to_raw(), argv, cwd.to_raw())
+    c_process::peko_argv_free(argv)
+    if handle == null {
+        return None
+    }
+    return new Process(handle)
+}
+
+/// The captured result of running a process to completion.
+[public] class Output {
+    [public] exit_code: number
+    [public] stdout: string
+    [public] stderr: string
+
+    constructor(exit_code: number, stdout: string, stderr: string) {
+        this.exit_code = exit_code
+        this.stdout = stdout
+        this.stderr = stderr
+    }
+}
+
+/// Run program to completion, capturing all stdout and stderr. Returns None
+/// when the process could not be started. stderr is drained on a background
+/// thread so a full pipe on one stream cannot deadlock the other.
+[public] fn run(program: string, args: Array<string>) => Output? {
+    let started: Process? = spawn(program, args)
+    if !started.is_value() {
+        return None
+    }
+    let child: Process = started.unwrap()
+
+    // A large buffer so the stderr reader never blocks on a full channel while
+    // the main thread is still draining stdout.
+    let error_lines: threads::Channel<string> = new threads::Channel<string>(65536)
+    threads::new_thread(closure[child, error_lines]() => void {
+        let reading: bool = true
+        while reading {
+            let line: string? = child.read_error_line()
+            if line.is_value() {
+                error_lines.send(line.unwrap())
+            } else {
+                reading = false
+            }
+        }
+        error_lines.close()
+    })
+
+    let out: StringBuilder = new StringBuilder()
+    let reading: bool = true
+    while reading {
+        let line: string? = child.read_line()
+        if line.is_value() {
+            out.append(line.unwrap())
+            out.append("\n")
+        } else {
+            reading = false
+        }
+    }
+
+    let code: number = child.wait()
+
+    let errors: StringBuilder = new StringBuilder()
+    let draining: bool = true
+    while draining {
+        let line: string? = error_lines.recv()
+        if line.is_value() {
+            errors.append(line.unwrap())
+            errors.append("\n")
+        } else {
+            draining = false
+        }
+    }
+    error_lines.free()
+    child.free()
+    return new Output(code, out.to_string(), errors.to_string())
+}

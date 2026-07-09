@@ -57,6 +57,9 @@ pub struct ApplicationManifest {
     pub project: Project,
     /// The `[ui]` table. `None` marks a command-line application.
     pub ui: Option<Ui>,
+    /// The `[icon]` table: the app-icon source and its editable project. `None`
+    /// falls back to `[ui].icon`.
+    pub icon: Option<Icon>,
     /// The `[dependencies]` table.
     pub dependencies: BTreeMap<String, Dependency>,
     /// The `[platforms]` table.
@@ -96,6 +99,9 @@ pub struct Project {
     pub app_id: Option<String>,
     /// The operating systems this application builds for.
     pub target_platforms: Vec<OperatingSystem>,
+    /// An explicit entry source file, relative to the project root. When absent
+    /// the entry is the first candidate under the `source` directory.
+    pub entry: Option<PathBuf>,
 }
 
 /// The `[ui]` table of a UI application.
@@ -113,6 +119,34 @@ pub struct Ui {
     pub width: Option<f64>,
     /// The initial window height in pixels. Absent uses the default.
     pub height: Option<f64>,
+}
+
+/// The `[icon]` table: the app-icon pipeline. `source` is a single square PNG
+/// reworked for every platform. Per-platform overrides replace that source for
+/// one platform (still resized into that platform's size set). `project` names
+/// the editable layered icon document (a `.pekoicon` the icon builder saves), so
+/// the icon can be reopened and re-edited.
+#[derive(Debug, Clone, Default)]
+pub struct Icon {
+    /// The master square PNG, relative to the project root.
+    pub source: Option<PathBuf>,
+    /// The editable layered icon document (`.pekoicon`), relative to the root.
+    pub project: Option<PathBuf>,
+    /// Explicit per-platform source PNGs, replacing `source` for that platform.
+    pub overrides: BTreeMap<OperatingSystem, PathBuf>,
+    /// The Android adaptive-icon foreground layer PNG, relative to the root.
+    /// When present with `android_background`, the Android build emits an
+    /// adaptive icon the launcher masks to its own shape.
+    pub android_foreground: Option<PathBuf>,
+    /// The Android adaptive-icon background layer PNG, relative to the root.
+    pub android_background: Option<PathBuf>,
+}
+
+impl Icon {
+    /// The source PNG for a platform: its override, else the shared `source`.
+    pub fn source_for(&self, platform: OperatingSystem) -> Option<&PathBuf> {
+        self.overrides.get(&platform).or(self.source.as_ref())
+    }
 }
 
 /// The UI build path an application uses.
@@ -412,7 +446,12 @@ impl Manifest {
     pub fn entry(&self, root: &Path) -> PathBuf {
         match self {
             Manifest::Package(pkg) => root.join(&pkg.lib.root),
-            Manifest::Application(_) => {
+            Manifest::Application(app) => {
+                // An explicit [project].entry overrides the source-directory
+                // convention, so the entry can live outside `source`.
+                if let Some(entry) = &app.project.entry {
+                    return root.join(entry);
+                }
                 let source = root.join(SOURCE_DIR);
                 for candidate in APP_ENTRY_CANDIDATES {
                     let path = source.join(candidate);
@@ -620,6 +659,7 @@ fn write_document(path: &Path, document: &DocumentMut) -> Result<(), ConfigError
 struct RawManifest {
     project: Option<RawProject>,
     ui: Option<RawUi>,
+    icon: Option<RawIcon>,
     package: Option<RawPackage>,
     lib: Option<RawLib>,
     #[serde(default)]
@@ -645,6 +685,7 @@ struct RawProject {
     app_id: Option<String>,
     #[serde(default)]
     target_platforms: Vec<String>,
+    entry: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -655,6 +696,20 @@ struct RawUi {
     scheme: Option<String>,
     width: Option<f64>,
     height: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIcon {
+    source: Option<String>,
+    project: Option<String>,
+    macos: Option<String>,
+    windows: Option<String>,
+    linux: Option<String>,
+    ios: Option<String>,
+    android: Option<String>,
+    android_foreground: Option<String>,
+    android_background: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -759,6 +814,7 @@ impl RawManifest {
         if is_application {
             let project = build_project(self.project.unwrap(), source)?;
             let ui = self.ui.map(|raw| build_ui(raw, source)).transpose()?;
+            let icon = self.icon.map(build_icon);
 
             if self.lib.is_some() {
                 return Err(ConfigError::invalid(
@@ -770,6 +826,7 @@ impl RawManifest {
             return Ok(Manifest::Application(ApplicationManifest {
                 project,
                 ui,
+                icon,
                 dependencies,
                 platforms,
                 native,
@@ -825,6 +882,7 @@ fn build_project(raw: RawProject, source: &Path) -> Result<Project, ConfigError>
         version,
         app_id: raw.app_id,
         target_platforms,
+        entry: raw.entry.map(PathBuf::from),
     })
 }
 
@@ -849,6 +907,29 @@ fn build_ui(raw: RawUi, source: &Path) -> Result<Ui, ConfigError> {
         width: raw.width,
         height: raw.height,
     })
+}
+
+/// Build the `[icon]` table from its raw form. Per-platform keys become the
+/// overrides map.
+fn build_icon(raw: RawIcon) -> Icon {
+    let mut overrides = BTreeMap::new();
+    let mut add = |platform: OperatingSystem, value: Option<String>| {
+        if let Some(path) = value {
+            overrides.insert(platform, PathBuf::from(path));
+        }
+    };
+    add(OperatingSystem::MacOS, raw.macos);
+    add(OperatingSystem::Windows, raw.windows);
+    add(OperatingSystem::Linux, raw.linux);
+    add(OperatingSystem::IOS, raw.ios);
+    add(OperatingSystem::Android, raw.android);
+    Icon {
+        source: raw.source.map(PathBuf::from),
+        project: raw.project.map(PathBuf::from),
+        overrides,
+        android_foreground: raw.android_foreground.map(PathBuf::from),
+        android_background: raw.android_background.map(PathBuf::from),
+    }
 }
 
 /// Validate a custom URL scheme against the RFC 3986 grammar: a leading letter

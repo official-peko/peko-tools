@@ -16,7 +16,7 @@ use peko_core::target::PekoTarget;
 
 use crate::cli::CLIInfo;
 use crate::cli::reporting::{IndicatifSink, Reporter};
-use crate::commands::devtools::{self, DevAction, DevChannel};
+use crate::commands::devtools::{self, DevAction, DevChannel, DevEvent};
 use crate::execution;
 use crate::project::PekoProject;
 
@@ -118,6 +118,209 @@ fn restore_terminal() {
     {
         let _ = Command::new("stty").arg("sane").status();
     }
+}
+
+/// Run the UI dev loop under IDE control: no window, a newline-delimited JSON
+/// stream on stdout carries dev events, and stdin carries commands. The dev
+/// loop is the same one the devtools window drives, so the loop tears the app
+/// window and dev server down on shutdown. An embedding IDE owns the app
+/// lifecycle through this transport.
+pub fn execute_with_ide(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    reporter.info("starting ide dev loop");
+
+    let peko_root = cli_info.get_peko_root().to_path_buf();
+    let release = cli_info.flags.has_flag("release");
+    let (dev, events, actions, shutdown) = devtools::channel();
+
+    // The dev loop (npm, compile, watch, relaunch) runs off the main thread so
+    // the stdin reader can drive it while stdout drains events.
+    let loop_shutdown = shutdown.clone();
+    let background = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                loop_shutdown.store(true, Ordering::Relaxed);
+                return;
+            }
+        };
+        runtime.block_on(devtools_dev_loop(peko_root, release, dev));
+    });
+
+    // Runs until stdin closes or a stop command tears the loop down.
+    run_ide_pump(events, actions, shutdown.clone());
+
+    // Tell the loop to tear down, then wait for it.
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = background.join();
+
+    restore_terminal();
+    ExitCode::SUCCESS
+}
+
+/// Pump the IDE transport: a stdin reader turns newline-delimited JSON commands
+/// into dev actions, and this thread writes dev events to stdout as
+/// newline-delimited JSON. Returns when the loop's event sender closes, when a
+/// stop command arrives, or when stdin reaches end of file.
+fn run_ide_pump(
+    events: std::sync::mpsc::Receiver<DevEvent>,
+    actions: std::sync::mpsc::Sender<DevAction>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::io::{BufRead, Write};
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Duration;
+
+    // Reader thread: a command per line. A stop command or end of file sets the
+    // shutdown flag and asks the loop to tear down.
+    let reader_shutdown = shutdown.clone();
+    let reader = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let kind = value.get("t").and_then(|v| v.as_str()).unwrap_or("");
+            match kind {
+                "stop" => break,
+                "rebuild" => {
+                    let _ = actions.send(DevAction::Rebuild);
+                }
+                "restart" => {
+                    let _ = actions.send(DevAction::RestartApp);
+                }
+                "eval" => {
+                    let code = value
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = actions.send(DevAction::Eval(code));
+                }
+                "complete" => {
+                    let code = value
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = actions.send(DevAction::Complete(code));
+                }
+                "page" => {
+                    let _ = actions.send(DevAction::PageInfo);
+                }
+                "resource" => {
+                    let url = value
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = actions.send(DevAction::Resource(url));
+                }
+                "source" => {
+                    let _ = actions.send(DevAction::ViewSource);
+                }
+                _ => {}
+            }
+        }
+        reader_shutdown.store(true, Ordering::Relaxed);
+        let _ = actions.send(DevAction::Shutdown);
+    });
+
+    // Writer loop: drain events to stdout until the loop closes the channel.
+    loop {
+        match events.recv_timeout(Duration::from_millis(150)) {
+            Ok(event) => {
+                let line = ide_event_json(&event);
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                let _ = writeln!(handle, "{line}");
+                let _ = handle.flush();
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if shutdown.load(Ordering::Relaxed) {
+                    // Keep draining until the loop drops its sender, so the last
+                    // teardown events reach the IDE.
+                    continue;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = reader.join();
+}
+
+/// Serialize a dev event as one line of the IDE transport. The tags match the
+/// build/run panel's event dispatch: status, diagnostics, route, console, eval,
+/// and trace.
+fn ide_event_json(event: &DevEvent) -> String {
+    let value = match event {
+        DevEvent::Status(text) => serde_json::json!({ "t": "status", "text": text }),
+        DevEvent::Diagnostics(items) => {
+            let items: Vec<_> = items
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "file": d.file,
+                        "line": d.line,
+                        "column": d.column,
+                        "severity": d.severity.to_lowercase(),
+                        "message": d.message,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "t": "diagnostics", "items": items })
+        }
+        DevEvent::Route(path) => serde_json::json!({ "t": "route", "path": path }),
+        DevEvent::Console(line) => {
+            serde_json::json!({ "t": "console", "level": line.level, "text": line.text })
+        }
+        DevEvent::EvalResult { kind, ok, text } => {
+            if kind == "complete" {
+                // The page returns {base, names} as JSON; forward it for the
+                // console's completion popup.
+                let parsed: serde_json::Value =
+                    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}));
+                serde_json::json!({
+                    "t": "complete",
+                    "base": parsed.get("base").cloned().unwrap_or(serde_json::Value::String(String::new())),
+                    "names": parsed.get("names").cloned().unwrap_or(serde_json::Value::Array(Vec::new())),
+                })
+            } else if kind == "page" {
+                // The page returns a snapshot object as JSON; forward it for the
+                // page inspector.
+                let parsed: serde_json::Value =
+                    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}));
+                serde_json::json!({ "t": "page", "info": parsed })
+            } else if kind == "resource" {
+                // The page returns {url, mime, text} for a fetched resource.
+                let parsed: serde_json::Value =
+                    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({}));
+                serde_json::json!({ "t": "resource", "resource": parsed })
+            } else {
+                // An eval result: tag it "result" (an evaluated expression's
+                // return value) so the console can style it apart from a
+                // forwarded console.log line, or "error" when it threw.
+                let level = if *ok { "result" } else { "error" };
+                serde_json::json!({ "t": "console", "level": level, "text": text })
+            }
+        }
+        DevEvent::Trace { dir, label, data } => {
+            serde_json::json!({ "t": "trace", "dir": dir, "label": label, "data": data })
+        }
+    };
+    value.to_string()
 }
 
 /// The dev loop under devtools: load the project, resolve dependencies, then run
@@ -359,12 +562,20 @@ async fn run_ui_project(
         Ok(w) => w,
         Err(e) => {
             reporter.error(format!("could not start the file watcher: {e}"));
-            let _ = dev_server.kill();
+            stop_dev_server(&mut dev_server);
             return ExitCode::FAILURE;
         }
     };
     use notify::Watcher;
     let _ = watcher.watch(&root.join("source"), notify::RecursiveMode::Recursive);
+    // Also watch the directory that actually holds the entry file: a project can
+    // set a custom `[project] entry` (for example src/main.peko) outside the
+    // conventional source/ directory, and a save there must still relaunch.
+    if let Some(entry_dir) = project.get_entrypoint().parent() {
+        if entry_dir != root.join("source") {
+            let _ = watcher.watch(entry_dir, notify::RecursiveMode::Recursive);
+        }
+    }
     let _ = watcher.watch(&root.join("peko.toml"), notify::RecursiveMode::NonRecursive);
     // Under devtools, also watch the dev-route file to stream navigations to the
     // window. It sits directly in .peko, so a non-recursive watch avoids the
@@ -412,6 +623,21 @@ async fn run_ui_project(
                     DevAction::Eval(code) => {
                         if let Some(tx) = &call_tx {
                             let _ = tx.send(devtools_eval_call("eval", &code));
+                        }
+                    }
+                    DevAction::Complete(code) => {
+                        if let Some(tx) = &call_tx {
+                            let _ = tx.send(devtools_eval_call("complete", &code));
+                        }
+                    }
+                    DevAction::PageInfo => {
+                        if let Some(tx) = &call_tx {
+                            let _ = tx.send(devtools_eval_call("page", ""));
+                        }
+                    }
+                    DevAction::Resource(url) => {
+                        if let Some(tx) = &call_tx {
+                            let _ = tx.send(devtools_eval_call("resource", &url));
                         }
                     }
                     DevAction::ViewSource => {
@@ -513,8 +739,7 @@ async fn run_ui_project(
         let _ = child.kill();
         let _ = child.wait();
     }
-    let _ = dev_server.kill();
-    let _ = dev_server.wait();
+    stop_dev_server(&mut dev_server);
     reporter.info("dev session stopped");
     if let Some(channel) = &dev {
         channel.status("dev session stopped");
@@ -757,10 +982,30 @@ fn dev_script_present(root: &std::path::Path) -> bool {
 /// Start `npm run dev` and read back the local URL it serves on. The child's
 /// output is forwarded so the framework's logs stay visible, and its handle is
 /// returned so the caller can stop it. Waits up to 30 seconds for the URL.
+/// Stop the dev server together with the process group it leads, so the bundler
+/// it spawns (for example Vite) does not outlive it. The group gets a terminate
+/// signal first so the bundler can restore the terminal, then the server is
+/// reaped.
+fn stop_dev_server(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // The server leads its own group (see start_dev_server), so a negative
+        // pid signals every process in it.
+        let pid = child.id();
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(format!("-{pid}"))
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
     use std::io::{BufRead, BufReader};
 
-    let mut child = Command::new("npm")
+    let mut command = Command::new("npm");
+    command
         .arg("run")
         .arg("dev")
         .current_dir(root)
@@ -770,7 +1015,16 @@ fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
         // broken until the shell resets. With no stdin it never grabs it.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // Lead a new process group so the whole tree (npm and the bundler it
+    // spawns, for example Vite) can be signalled together at teardown. Without
+    // this, killing npm orphans the bundler.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("could not run npm run dev: {e}"))?;
 
@@ -810,7 +1064,7 @@ fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
     match url_rx.recv_timeout(std::time::Duration::from_secs(30)) {
         Ok(url) => Ok((child, url)),
         Err(_) => {
-            let _ = child.kill();
+            stop_dev_server(&mut child);
             Err("timed out waiting for the dev server URL".to_string())
         }
     }

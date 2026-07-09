@@ -373,6 +373,15 @@ void peko_webview_set_decorations(webview_t w, int decorated) {
     (void)decorated;
 }
 
+void peko_webview_set_titlebar_height(webview_t w, double height) {
+    (void)w;
+    (void)height;
+}
+
+void peko_webview_activate(webview_t w) {
+    (void)w;
+}
+
 void peko_webview_begin_drag(webview_t w) {
     (void)w;
 }

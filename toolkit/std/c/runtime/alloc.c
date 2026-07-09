@@ -17,6 +17,23 @@
 #include "./include/pgc_internal.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+
+/* Debug: PEKO_GC_STRESS=N forces a collection every N allocations so races that
+ * only appear under GC pressure reproduce quickly. 0 (unset) disables it. Read
+ * once and cached. */
+static unsigned long pgc_stress_interval(void)
+{
+    static int cached = -1;
+    static unsigned long n = 0;
+    if (cached < 0) {
+        const char *s = getenv("PEKO_GC_STRESS");
+        n = (s != NULL) ? strtoul(s, NULL, 10) : 0UL;
+        cached = 1;
+    }
+    return n;
+}
 
 /* Size of a fresh TLAB chunk. Objects larger than this never use a TLAB and
  * are allocated directly from the heap under the lock. 256 KiB balances lock
@@ -148,6 +165,18 @@ static void *pgc_alloc_internal(size_t payload_size, const void *descriptor)
     size_t total   = PGC_HEADER_SIZE + payload;
 
     pgc_thread *self = pgc_current_thread();
+
+    /* Debug: force periodic collections under PEKO_GC_STRESS. Called from a
+     * Peko allocation site (a statepoint), so the caller's roots are recorded
+     * and it is a valid point to collect. */
+    unsigned long stress = pgc_stress_interval();
+    if (stress != 0 && self != NULL) {
+        static _Atomic unsigned long alloc_counter = 0;
+        unsigned long c = atomic_fetch_add_explicit(&alloc_counter, 1,
+                                                    memory_order_relaxed);
+        if (c % stress == 0)
+            pgc_collect();
+    }
 
     /* Fast path: bump within the thread's TLAB, no lock. */
     if (self != NULL) {

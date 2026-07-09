@@ -172,7 +172,11 @@ impl Spanned for UnwrapAST {
 /// Which of the three cast forms a [`CastAST`] represents.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CastKind {
-    /// `value as T`: a statically-proven-safe cast, checked at compile time.
+    /// `value as T`: a cast whose validity is checked at compile time. It
+    /// covers a numeric or wrapper coercion, an object to a trait it implements,
+    /// and a cast between two classes on the same inheritance chain (an upcast
+    /// to a base or a downcast to a derived type). A downcast reinterprets the
+    /// object as the more specific type.
     Checked,
     /// `danger_cast<T>(value)`: an unchecked, forced cast that reinterprets or
     /// numerically converts at runtime without a safety check.

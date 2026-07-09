@@ -28,6 +28,59 @@ pub struct Position {
 }
 
 // ---------------------------------------------------------------------------
+// Semantic tokens
+// ---------------------------------------------------------------------------
+
+/// A classified span for semantic highlighting, in engine-neutral char-based
+/// coordinates on a single line. `token_type` indexes [`SEMANTIC_TOKEN_TYPES`]
+/// and `modifiers` is a bitset over [`SEMANTIC_TOKEN_MODIFIERS`]. The wire
+/// boundary transcodes the range and delta-encodes the stream.
+#[derive(Debug, Clone)]
+pub struct SemanticToken {
+    pub range: Range,
+    pub token_type: u32,
+    pub modifiers: u32,
+}
+
+/// The semantic token type legend. The array index is the token-type id used on
+/// the wire, so the client must register the same list in the same order.
+pub const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "namespace",     // 0
+    "type",          // 1
+    "class",         // 2
+    "enum",          // 3
+    "interface",     // 4
+    "function",      // 5
+    "method",        // 6
+    "parameter",     // 7
+    "variable",      // 8
+    "property",      // 9
+    "enumMember",    // 10
+    "typeParameter", // 11
+];
+
+/// The semantic token modifier legend. Each entry is one bit, low bit first.
+pub const SEMANTIC_TOKEN_MODIFIERS: &[&str] = &["declaration"];
+
+/// Token type ids and modifier bits, matching the legends above.
+pub mod sem {
+    pub const NAMESPACE: u32 = 0;
+    pub const TYPE: u32 = 1;
+    pub const CLASS: u32 = 2;
+    pub const ENUM: u32 = 3;
+    pub const INTERFACE: u32 = 4;
+    pub const FUNCTION: u32 = 5;
+    pub const METHOD: u32 = 6;
+    pub const PARAMETER: u32 = 7;
+    pub const VARIABLE: u32 = 8;
+    pub const PROPERTY: u32 = 9;
+    pub const ENUM_MEMBER: u32 = 10;
+    pub const TYPE_PARAMETER: u32 = 11;
+
+    pub const MOD_DECLARATION: u32 = 1 << 0;
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostic
 // ---------------------------------------------------------------------------
 
@@ -338,6 +391,30 @@ pub trait AnalysisEngine: Send + Sync + 'static {
     /// the editor's indentation preference so the output matches it.
     fn format(&self, path: &Path, text: &str, indent_size: usize, use_spaces: bool)
     -> Option<String>;
+
+    // ------------------------------------------------------------------
+    // Semantic tokens (optional)
+    // ------------------------------------------------------------------
+
+    /// Return classified spans for semantic highlighting over the whole file,
+    /// in engine-neutral coordinates. `text` is the editor's current buffer, so
+    /// this does not depend on a prior analysis pass. The default returns none
+    /// for engines that do not support it.
+    fn semantic_tokens(&self, _path: &Path, _text: &str) -> Vec<SemanticToken> {
+        Vec::new()
+    }
+
+    // ------------------------------------------------------------------
+    // References (optional)
+    // ------------------------------------------------------------------
+
+    /// Return every reference to the symbol at `position` within the file,
+    /// including the symbol under the cursor. `text` is the editor's current
+    /// buffer, so this does not depend on a prior analysis pass. The default
+    /// returns none for engines that do not support it.
+    fn references(&self, _path: &Path, _text: &str, _position: &Position) -> Vec<Location> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

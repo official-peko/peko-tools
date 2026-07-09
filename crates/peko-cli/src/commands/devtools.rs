@@ -325,6 +325,14 @@ pub enum DevAction {
     RestartApp,
     /// Evaluate an expression in the running page.
     Eval(String),
+    /// List the property names available on an expression, for console
+    /// completion. An empty expression lists the global scope.
+    Complete(String),
+    /// Fetch a snapshot of the running page (route, url, title, metrics, and
+    /// source) for the page inspector.
+    PageInfo,
+    /// Fetch one loaded resource's text body (by URL) for the source viewer.
+    Resource(String),
     /// Fetch the current page source.
     ViewSource,
     Shutdown,

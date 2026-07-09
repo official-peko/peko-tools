@@ -1127,6 +1127,12 @@ impl fmt::Display for PekoType {
             final_type.push_str(&arg_strs.join(", "));
 
             final_type.push(')');
+        } else if self.name() == "Option" && self.generics().len() == 1 {
+            // Re-sugar the optional wrapper `Option<T>` back to the surface form
+            // `T?`, so the `?` a user wrote is preserved and never expanded.
+            // Nested optionals fall out of the inner recursion.
+            final_type.push_str(&self.generics()[0].to_string());
+            final_type.push('?');
         } else {
             for name in self.module_names() {
                 final_type.push_str(name);

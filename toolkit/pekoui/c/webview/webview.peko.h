@@ -46,6 +46,9 @@ p_fn void peko_webview_bind(p_opaque w, p_gc(p_i8) name, p_opaque callback, p_gc
    the injected drag shim. These are no-ops on iOS and Android. */
 p_fn void peko_webview_set_transparent(p_opaque w, p_i32 transparent);
 p_fn void peko_webview_set_decorations(p_opaque w, p_i32 decorated);
+/* Grow the macOS titlebar to the given height so the traffic-light buttons
+   center vertically in a custom titlebar. No-op off macOS. */
+p_fn void peko_webview_set_titlebar_height(p_opaque w, p_f64 height);
 p_fn void peko_webview_begin_drag(p_opaque w);
 
 /* Native window controls for a custom titlebar. minimize hides the window to
@@ -54,6 +57,11 @@ p_fn void peko_webview_begin_drag(p_opaque w);
 p_fn void peko_webview_minimize(p_opaque w);
 p_fn void peko_webview_maximize(p_opaque w);
 p_fn void peko_webview_close(p_opaque w);
+
+/* Brings the app in front of other apps and raises the window, so a newly
+   spawned instance opens frontmost rather than behind the launching window.
+   A no-op on iOS and Android, which have no movable window. */
+p_fn void peko_webview_activate(p_opaque w);
 
 /* macOS native window controls. set_window_buttons_hidden shows or hides the
    traffic-light close, miniaturize, and zoom buttons, so a frameless window can

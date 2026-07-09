@@ -3,6 +3,7 @@ name = "std"
 version = "0.1.0"
 description = "The Pekoscript standard library."
 license = "MIT"
+repository = "https://github.com/official-peko/peko-tools"
 authors = ["Preston Brown"]
 keywords = [
     "std",
@@ -54,11 +55,12 @@ sources = [
     "c/crypto/crypto.c",
     "c/crypto/legacy.c",
     "c/threads/threads.c",
+    "c/process/peko_process.c",
     "c/sockets/peko_sockets.c",
     "c/sockets/peko_sockets_tls.c",
     "c/sockets/peko_websocket.c",
 ]
-include = ["c/runtime/include", "c/io", "c/random", "c/fs", "c/crypto/vendor", "c/threads", "c/sockets", "c/sockets/inc"]
+include = ["c/runtime/include", "c/io", "c/random", "c/fs", "c/crypto/vendor", "c/threads", "c/process", "c/sockets", "c/sockets/inc"]
 
 [native.flags]
 all = ["-O2", "-fno-strict-aliasing"]

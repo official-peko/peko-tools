@@ -148,6 +148,8 @@ pub struct User {
     pub email: Option<String>,
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
+    #[serde(rename = "photoURL")]
+    pub photo_url: Option<String>,
     pub role: Option<String>,
     pub tier: Option<String>,
 }

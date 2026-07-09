@@ -1,0 +1,20 @@
+peko search - search or replace text across the project
+
+Prints a JSON result to stdout. Primarily used by the Peko Studio IDE search
+panel, but usable directly.
+
+Usage:
+  peko search --query=<text> [options]
+
+Options:
+  --query=<text>     text or regex to search for (required)
+  --regex            treat the query as a regular expression
+  --case             case-sensitive (default is case-insensitive)
+  --word             match whole words only
+  --include=<globs>  comma-separated globs; only matching files are searched
+  --exclude=<globs>  comma-separated globs; matching files are skipped
+  --replace=<text>   replace mode: substitute this for every match, in place
+  --root=<dir>       search root (defaults to the working directory)
+
+Search output:  {"matches":[{path,line,column,text,start,length}],"truncated":bool}
+Replace output: {"replaced":<count>,"files":<count>}

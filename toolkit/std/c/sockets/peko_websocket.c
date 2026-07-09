@@ -677,74 +677,115 @@ static void ws_frag_reset(ws_frag_buf_t *f)
  * so the payload is never unmasked during the read phase.
  * ====================================================================== */
 
-static uint8_t *ws_recv_one_frame(peko_socket_t sock, size_t *out_len)
+/*
+ * A persistent receive buffer. A single recv can return several coalesced
+ * frames, so the reader keeps leftover bytes between calls and returns one
+ * frame at a time. Without this, every frame after the first in a recv is lost.
+ */
+typedef struct {
+    uint8_t *buf;
+    size_t   length;   /* bytes currently buffered */
+    size_t   capacity;
+} ws_read_buf_t;
+
+static int ws_read_buf_init(ws_read_buf_t *rb)
 {
-    size_t   capacity = PEKO_WS_READ_CHUNK;
-    size_t   length   = 0;
-    /* +1 extra byte so we can safely null-terminate payload later */
-    uint8_t *buf      = (uint8_t *)malloc(capacity + 1);
+    rb->capacity = PEKO_WS_READ_CHUNK;
+    rb->length   = 0;
+    /* +1 extra byte so a payload can be null-terminated in place if needed */
+    rb->buf      = (uint8_t *)malloc(rb->capacity + 1);
+    return rb->buf != NULL;
+}
 
-    if (!buf)
-        return NULL;
+static void ws_read_buf_free(ws_read_buf_t *rb)
+{
+    free(rb->buf);
+    rb->buf = NULL;
+}
 
+/*
+ * Inspect the buffered bytes for one complete frame using a header-only parse
+ * (no unmasking). Returns 1 and sets *total_len to the frame's header+payload
+ * length when a full frame is buffered; 0 when more bytes are needed.
+ */
+static int ws_buffered_frame_len(const ws_read_buf_t *rb, size_t *total_len)
+{
+    if (rb->length < 2)
+        return 0;
+
+    size_t plen = (size_t)(rb->buf[1] & 0x7F);
+    size_t hlen = 2;
+
+    if (plen == 126) {
+        if (rb->length < 4) return 0;
+        plen = ((size_t)rb->buf[2] << 8) | rb->buf[3];
+        hlen = 4;
+    } else if (plen == 127) {
+        if (rb->length < 10) return 0;
+        size_t p = 0;
+        for (int i = 0; i < 8; i++)
+            p = (p << 8) | rb->buf[2 + i];
+        plen = p;
+        hlen = 10;
+    }
+
+    if (rb->buf[1] & 0x80)
+        hlen += 4;
+
+    if (rb->length < hlen + plen)
+        return 0;
+
+    *total_len = hlen + plen;
+    return 1;
+}
+
+/*
+ * Read one complete frame. On success returns rb->buf with the frame at
+ * offset 0 and sets *frame_len to its header+payload length. Bytes past the
+ * frame belong to following frames and stay buffered for the next call.
+ * Returns NULL on close or error.
+ */
+static uint8_t *ws_recv_next_frame(peko_socket_t sock, ws_read_buf_t *rb,
+                                   size_t *frame_len)
+{
     for (;;) {
-        /* Grow buffer if needed */
-        if (length + PEKO_WS_READ_CHUNK + 1 > capacity) {
-            capacity *= 2;
-            uint8_t *tmp = (uint8_t *)realloc(buf, capacity + 1);
-            if (!tmp) {
-                free(buf);
+        if (ws_buffered_frame_len(rb, frame_len))
+            return rb->buf;
+
+        if (rb->length + PEKO_WS_READ_CHUNK + 1 > rb->capacity) {
+            size_t newcap = rb->capacity * 2;
+            while (rb->length + PEKO_WS_READ_CHUNK + 1 > newcap)
+                newcap *= 2;
+            uint8_t *tmp = (uint8_t *)realloc(rb->buf, newcap + 1);
+            if (!tmp)
                 return NULL;
-            }
-            buf = tmp;
+            rb->buf      = tmp;
+            rb->capacity = newcap;
         }
 
         pgc_begin_blocking();
-        int n = (int)peko_recv(sock, (char *)(buf + length), PEKO_WS_READ_CHUNK);
+        int n = (int)peko_recv(sock, (char *)(rb->buf + rb->length),
+                               PEKO_WS_READ_CHUNK);
         pgc_end_blocking();
-        if (n < 0) {
-            free(buf);
-            return NULL;
-        }
-        if (n == 0)
-            break; /* connection closed */
+        if (n <= 0)
+            return NULL; /* error or connection closed */
 
-        length += (size_t)n;
-
-        /*
-         * Check completeness using header-only parse (no unmasking). The
-         * payload is unmasked exactly once later, after the full frame has
-         * arrived, so it is never unmasked twice.
-         */
-        if (length >= 2) {
-            size_t plen = (size_t)(buf[1] & 0x7F);
-            size_t hlen = 2;
-
-            /* Extended payload length fields */
-            if (plen == 126) {
-                if (length < 4) continue;
-                plen = ((size_t)buf[2] << 8) | buf[3];
-                hlen = 4;
-            } else if (plen == 127) {
-                if (length < 10) continue;
-                size_t p = 0;
-                for (int i = 0; i < 8; i++)
-                    p = (p << 8) | buf[2 + i];
-                plen = p;
-                hlen = 10;
-            }
-
-            /* Add masking key length if masked */
-            if (buf[1] & 0x80)
-                hlen += 4;
-
-            if (length >= hlen + plen)
-                break; /* have a complete frame */
-        }
+        rb->length += (size_t)n;
     }
+}
 
-    *out_len = length;
-    return buf;
+/*
+ * Drop the leading frame_len bytes, shifting any buffered following frames to
+ * the front so the next read starts at a frame boundary.
+ */
+static void ws_consume_frame(ws_read_buf_t *rb, size_t frame_len)
+{
+    if (frame_len >= rb->length) {
+        rb->length = 0;
+    } else {
+        memmove(rb->buf, rb->buf + frame_len, rb->length - frame_len);
+        rb->length -= frame_len;
+    }
 }
 
 /* =========================================================================
@@ -916,16 +957,26 @@ int peko_ws_serve(peko_socket_t   client,
     ws_frag_buf_t frag;
     ws_frag_init(&frag);
 
+    ws_read_buf_t rb;
+    if (!ws_read_buf_init(&rb)) {
+        ws_frag_reset(&frag);
+        void *live_data = pgc_handle_get(data_handle);
+        handler(live_data, PEKO_WS_EVENT_CLOSE, client, "");
+        ws_conn_unregister(client);
+        peko_close_socket(client);
+        pgc_handle_release(data_handle);
+        return 1;
+    }
+
     for (;;) {
         size_t   frame_len  = 0;
-        uint8_t *frame_data = ws_recv_one_frame(client, &frame_len);
+        uint8_t *frame_data = ws_recv_next_frame(client, &rb, &frame_len);
 
         if (!frame_data)
             break; /* connection error or closed */
 
         ws_frame_header_t hdr;
         if (!ws_parse_frame_header(frame_data, frame_len, &hdr)) {
-            free(frame_data);
             break;
         }
 
@@ -934,7 +985,9 @@ int peko_ws_serve(peko_socket_t   client,
         if (hdr.masked)
             ws_unmask_payload(payload, hdr.payload_len, hdr.mask);
 
-        payload[hdr.payload_len] = '\0';
+        /* The payload is not null-terminated in place: the byte after it
+         * belongs to the next buffered frame. Ping and text paths use the
+         * explicit payload length, and ws_frag_append copies and terminates. */
 
         if (hdr.opcode == WS_OPCODE_PING) {
             size_t pong_len = 0;
@@ -945,11 +998,11 @@ int peko_ws_serve(peko_socket_t   client,
                     ws_locked_send(client, send_mu, pong, pong_len);
                 free(pong);
             }
-            free(frame_data);
+            ws_consume_frame(&rb, frame_len);
             continue;
 
         } else if (hdr.opcode == WS_OPCODE_PONG) {
-            free(frame_data);
+            ws_consume_frame(&rb, frame_len);
             continue;
 
         } else if (hdr.opcode == WS_OPCODE_CLOSE) {
@@ -960,7 +1013,6 @@ int peko_ws_serve(peko_socket_t   client,
                     ws_locked_send(client, send_mu, close_frame, close_len);
                 free(close_frame);
             }
-            free(frame_data);
             break;
         }
 
@@ -972,14 +1024,18 @@ int peko_ws_serve(peko_socket_t   client,
         }
 
         if (!ws_frag_append(&frag, payload, hdr.payload_len)) {
-            free(frame_data);
             break; /* OOM */
         }
 
-        free(frame_data);
+        int     is_fin      = hdr.fin;
+        uint8_t frag_opcode = frag.opcode;
 
-        if (hdr.fin) {
-            if (frag.opcode == WS_OPCODE_TXT) {
+        /* Consume this frame before dispatch. The message is delivered from
+         * frag.data, a separate buffer, so following frames stay intact. */
+        ws_consume_frame(&rb, frame_len);
+
+        if (is_fin) {
+            if (frag_opcode == WS_OPCODE_TXT) {
                 void *live_data = pgc_handle_get(data_handle);
                 handler(live_data, PEKO_WS_EVENT_MESSAGE, client,
                         (char *)frag.data);
@@ -988,6 +1044,7 @@ int peko_ws_serve(peko_socket_t   client,
         }
     }
 
+    ws_read_buf_free(&rb);
     ws_frag_reset(&frag);
 
     /* The connection closed. Signal the handler so the managed side can drop

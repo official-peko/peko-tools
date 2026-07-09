@@ -275,6 +275,16 @@ void peko_menu_role(const char *label, int role)
 void peko_menu_apply(void *callback, void *context, void *window)
 {
     (void)window; /* macOS installs a global menu bar; no window needed. */
+
+    /* Reach a safepoint before the handle operations below take the GC lock.
+     * pgc_handle_create/release take g_gc.lock, and a stop-the-world collection
+     * running on another thread holds that lock while it waits for this thread
+     * to park. Without parking first, this main-thread call blocks on the lock
+     * and the collector waits on this thread: a deadlock. Parking and unparking
+     * lets any in-progress collection finish first. */
+    pgc_begin_blocking();
+    pgc_end_blocking();
+
     g_menu_cb = (peko_menu_callback)callback;
     if (g_menu_ctx_set) {
         pgc_handle_release(g_menu_ctx);

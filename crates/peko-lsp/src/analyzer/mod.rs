@@ -9,6 +9,7 @@
 
 mod document;
 mod helpers;
+mod semantic_tokens;
 
 use std::{
     cmp,
@@ -39,8 +40,8 @@ use crate::{
     char_is_peko_id_eligible, char_is_peko_type_eligible, char_is_whitespace,
     server::analysis::{
         AnalysisEngine, Command, CompletionItem, CompletionKind, CompletionTextEdit, Diagnostic,
-        HoverInfo, InsertTextFormat, Location, ParameterInfo, Position, Range, SignatureHelp,
-        SignatureInfo, Symbol,
+        HoverInfo, InsertTextFormat, Location, ParameterInfo, Position, Range, SemanticToken,
+        SignatureHelp, SignatureInfo, Symbol,
     },
 };
 
@@ -1019,6 +1020,59 @@ impl AnalysisEngine for PekoAnalyzer {
                 code: None,
                 message: peko_diagnostic.message.clone(),
                 source: Some("pekoscript".to_string()),
+            })
+            .collect()
+    }
+
+    fn semantic_tokens(&self, path: &Path, text: &str) -> Vec<SemanticToken> {
+        semantic_tokens::collect(path, text)
+    }
+
+    fn references(&self, path: &Path, text: &str, position: &Position) -> Vec<Location> {
+        // Reuse the semantic-token pass, which classifies every identifier span
+        // (variable, function, type, ...). References are the spans that share
+        // the cursor token's name and kind. This is same-file and name-and-kind
+        // based, not full scope resolution, but it is fast and reuses one parse.
+        let tokens = semantic_tokens::collect(path, text);
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        // Per-line characters, so a token's identifier text can be read back.
+        let lines: Vec<Vec<char>> = text.lines().map(|l| l.chars().collect()).collect();
+        let name_of = |token: &SemanticToken| -> String {
+            let line = token.range.start.line as usize;
+            let Some(chars) = lines.get(line) else {
+                return String::new();
+            };
+            let start = token.range.start.character as usize;
+            let end = (token.range.end.character as usize).min(chars.len());
+            if start >= end {
+                return String::new();
+            }
+            chars[start..end].iter().collect()
+        };
+
+        // The identifier span under the cursor (spans are single-line).
+        let Some(target) = tokens.iter().find(|t| {
+            t.range.start.line == position.line
+                && position.character >= t.range.start.character
+                && position.character <= t.range.end.character
+        }) else {
+            return Vec::new();
+        };
+        let target_name = name_of(target);
+        if target_name.is_empty() {
+            return Vec::new();
+        }
+        let target_type = target.token_type;
+
+        tokens
+            .iter()
+            .filter(|t| t.token_type == target_type && name_of(t) == target_name)
+            .map(|t| Location {
+                file: path.to_path_buf(),
+                range: t.range.clone(),
             })
             .collect()
     }

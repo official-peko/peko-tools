@@ -44,7 +44,16 @@ async fn main() -> ExitCode {
     // Global flags are picked up out of `cli_info.flags`. Subcommands see
     // the same flags, so individual commands can also branch on them if
     // they want to, but the canonical wiring is via the Reporter.
-    let mut reporter = Reporter::new().with_progress(IndicatifSink::new());
+    // `--json` emits machine-readable NDJSON on stdout. The progress spinner is
+    // left off in that mode so it does not corrupt the event stream.
+    let mut reporter = if cli_info.flags.has_flag("json") {
+        Reporter::new()
+    } else {
+        Reporter::new().with_progress(IndicatifSink::new())
+    };
+    if cli_info.flags.has_flag("json") {
+        reporter.set_json(true);
+    }
     if cli_info.flags.has_flag("no-color") {
         reporter.disable_color();
     }
@@ -135,6 +144,16 @@ async fn main() -> ExitCode {
         return commands::run::execute_with_devtools(&cli_info, &reporter);
     }
 
+    // ---- `peko run --ide`: newline-delimited JSON control transport -----
+    //
+    // The same dev loop as devtools, driven over stdin/stdout instead of a
+    // window, so an embedding IDE owns the app lifecycle and receives dev
+    // events. The reader and writer are plain blocking threads, so this takes
+    // the synchronous entry alongside the devtools path.
+    if subcommand_name == "run" && cli_info.flags.has_flag("ide") {
+        return commands::run::execute_with_ide(&cli_info, &reporter);
+    }
+
     // ---- Look up and dispatch the subcommand -----------------------------
     let Some(command) = commands::lookup(subcommand_name) else {
         reporter.error(format!("command '{subcommand_name}' doesn't exist"));
@@ -201,6 +220,7 @@ fn print_master_help(executable: &str) {
     println!("    --verbose             enable extra-noisy output");
     println!("    --quiet               suppress informational output");
     println!("    --no-color            disable ANSI color in output");
+    println!("    --json                emit machine-readable JSON events (for tooling)");
     println!();
     println!("Run '{executable} help <command>' for per-command help.");
 }

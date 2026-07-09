@@ -91,9 +91,30 @@ fn create_linux_squashfs(
         .push_dir("usr/bin", filesystem_header)
         .unwrap();
 
+    // A stable identifier for the app: the reverse-DNS bundle id, else a slug of
+    // the name. It names the binary, so the window's WM_CLASS and Wayland app_id
+    // (which GTK derives from the binary name) equal StartupWMClass and the
+    // .desktop basename. The desktop environment then shows the app name and
+    // icon instead of the raw executable name ("exec").
+    let app_id = project
+        .ui_project_info
+        .as_ref()
+        .map(|ui| ui.bundle_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| {
+            let slug: String = project
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .collect();
+            let slug = slug.trim_matches('-').to_string();
+            if slug.is_empty() { "peko-app".to_string() } else { slug }
+        });
+    let binary_path = format!("/usr/bin/{app_id}");
+
     let binary_handle = io_at(main_binary, File::open(main_binary))?;
     filesystem_writer
-        .push_file(binary_handle, "/usr/bin/exec", executable_header)
+        .push_file(binary_handle, &binary_path, executable_header)
         .unwrap();
 
     // .desktop manifest tells the desktop environment how to launch the
@@ -108,26 +129,31 @@ fn create_linux_squashfs(
         .as_ref()
         .and_then(|ui| ui.scheme.as_deref());
     let exec_line = match scheme {
-        Some(_) => "Exec=exec %u",
-        None => "Exec=exec",
+        Some(_) => format!("Exec={app_id} %u"),
+        None => format!("Exec={app_id}"),
     };
     let mime_line = match scheme {
         Some(scheme) => format!("\nMimeType=x-scheme-handler/{scheme};"),
         None => String::new(),
     };
+    // X-AppImage-Integrate=false stops AppImageLauncher from creating its own
+    // menu entry: the app self-registers a desktop entry on first launch (see
+    // integrate_desktop in the app), so a second, launcher-created copy would be
+    // a duplicate.
     let desktop_file_contents = format!(
         "[Desktop Entry]\n\
-         StartupWMClass=Exec\n\
-         Name={}\n\
+         StartupWMClass={app_id}\n\
+         Name={name}\n\
          {exec_line}\n\
          Icon=icon\n\
+         X-AppImage-Integrate=false\n\
          Type=Application{mime_line}",
-        project.name
+        name = project.name
     );
     filesystem_writer
         .push_file(
             Cursor::new(desktop_file_contents.clone().into_bytes()),
-            format!("{}.desktop", project.name),
+            format!("{app_id}.desktop"),
             readable_header,
         )
         .unwrap();
@@ -145,7 +171,7 @@ fn create_linux_squashfs(
     filesystem_writer
         .push_file(
             Cursor::new(desktop_file_contents.into_bytes()),
-            format!("usr/share/applications/{}.desktop", project.name),
+            format!("usr/share/applications/{app_id}.desktop"),
             readable_header,
         )
         .unwrap();
@@ -189,18 +215,20 @@ fn create_linux_squashfs(
     // app. A deep-link launch (Exec=exec %u, or a direct ./App.AppImage
     // "scheme://path" invocation) passes the URL as an argument, so it must
     // reach the binary for deep-link handling to see it.
-    let app_run_contents = "#!/bin/sh\n\
-        CD=\"$(dirname \"$(readlink -f \"${0}\")\")\"\n\
-        cd \"${CD}\"\n\
-        EXEC=\"${CD}/usr/bin/exec\"\n\
-        export LD_LIBRARY_PATH=\"${CD}/usr/lib:${LD_LIBRARY_PATH}\"\n\
-        export GIO_MODULE_DIR=\"${CD}/usr/lib/gio/modules\"\n\
+    let app_run_contents = format!(
+        "#!/bin/sh\n\
+        CD=\"$(dirname \"$(readlink -f \"${{0}}\")\")\"\n\
+        cd \"${{CD}}\"\n\
+        EXEC=\"${{CD}}/usr/bin/{app_id}\"\n\
+        export LD_LIBRARY_PATH=\"${{CD}}/usr/lib:${{LD_LIBRARY_PATH}}\"\n\
+        export GIO_MODULE_DIR=\"${{CD}}/usr/lib/gio/modules\"\n\
         export GIO_USE_VFS=local\n\
         export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1\n\
-        exec \"${EXEC}\" \"$@\"\n";
+        exec \"${{EXEC}}\" \"$@\"\n"
+    );
     filesystem_writer
         .push_file(
-            Cursor::new(app_run_contents.as_bytes().to_vec()),
+            Cursor::new(app_run_contents.into_bytes()),
             "AppRun",
             executable_header,
         )
@@ -224,7 +252,7 @@ fn create_linux_squashfs(
             .ui_project_info
             .as_ref()
             .unwrap()
-            .icon
+            .icon_for(OperatingSystem::Linux)
             .resize(256, 256)
             .to_png(&mut icon_bytes);
     }

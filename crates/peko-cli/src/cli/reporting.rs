@@ -249,6 +249,10 @@ pub struct Reporter {
     /// [`with_progress`]: Reporter::with_progress
     progress: Box<dyn ProgressSink>,
     verbosity: Verbosity,
+    /// When set, output is emitted as newline-delimited JSON events on stdout
+    /// (one object per line) for machine consumption (`--json`), instead of the
+    /// human-readable colored lines.
+    json: bool,
 }
 
 /// How much of the reporter's output is actually printed. Set once at
@@ -284,7 +288,29 @@ impl Reporter {
             source_cache: RefCell::new(HashMap::new()),
             progress: Box::new(NoProgress),
             verbosity: Verbosity::Normal,
+            json: false,
         }
+    }
+
+    /// Switch to machine-readable JSON output (`--json`). Every status, info,
+    /// success, warning, error, and diagnostic is emitted as one JSON object per
+    /// line on stdout. Color is turned off so the stream stays clean.
+    pub fn set_json(&mut self, on: bool) {
+        self.json = on;
+        if on {
+            self.use_color = false;
+        }
+    }
+
+    /// Whether JSON output is active.
+    pub fn is_json(&self) -> bool {
+        self.json
+    }
+
+    /// Emit one JSON event line on stdout.
+    fn emit_event(&self, kind: &str, message: &str) {
+        let event = serde_json::json!({ "type": kind, "message": message });
+        println!("{event}");
     }
 
     /// Attach a progress sink. Replaces any previously attached sink.
@@ -431,6 +457,10 @@ impl Reporter {
     /// right-aligned in a fixed-width column so successive lines
     /// align vertically.
     fn write_status_stdout(&self, verb: &str, style: Style, detail: impl Display) {
+        if self.json {
+            self.emit_event(&verb.to_lowercase(), &detail.to_string());
+            return;
+        }
         let padded = format!("{verb:>width$}", verb = verb, width = STATUS_VERB_WIDTH);
         let label = self.styled(padded, style);
         println!("{label} {detail}");
@@ -438,6 +468,10 @@ impl Reporter {
 
     /// Same as [`write_status_stdout`] but to stderr.
     fn write_status_stderr(&self, verb: &str, style: Style, detail: impl Display) {
+        if self.json {
+            self.emit_event(&verb.to_lowercase(), &detail.to_string());
+            return;
+        }
         let padded = format!("{verb:>width$}", verb = verb, width = STATUS_VERB_WIDTH);
         let label = self.styled(padded, style);
         eprintln!("{label} {detail}");
@@ -479,6 +513,21 @@ impl Reporter {
     /// the header and location lines are still printed; the snippet and
     /// squiggle are omitted.
     pub fn report_diagnostic(&self, diagnostic: &PekoDiagnostic) {
+        if self.json {
+            let event = serde_json::json!({
+                "type": "diagnostic",
+                "severity": diagnostic.diagnostic_type.to_string(),
+                "file": diagnostic.file.display().to_string(),
+                "line": diagnostic.start.line,
+                "column": diagnostic.start.column,
+                "endLine": diagnostic.end.line,
+                "endColumn": diagnostic.end.column,
+                "message": diagnostic.message,
+            });
+            println!("{event}");
+            return;
+        }
+
         // Header
         let header_label = match diagnostic.diagnostic_type {
             DiagnosticType::Error => self.styled("Error", Style::new().red().bold()),

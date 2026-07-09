@@ -20,7 +20,7 @@ use tower_lsp_server::{Client, LanguageServer};
 use crate::server::analysis::{self, AnalysisHost};
 use crate::server::converters::{
     completion_item_to_lsp, diagnostic_to_lsp, document_symbol_to_lsp, hover_to_lsp,
-    location_to_lsp, signature_help_to_lsp, uri_to_path,
+    location_to_lsp, semantic_tokens_to_lsp, signature_help_to_lsp, uri_to_path,
 };
 use crate::server::documents::DocumentStore;
 use crate::server::encoding::{LineIndex, PosMapper, WireEncoding};
@@ -224,6 +224,8 @@ impl LanguageServer for Backend {
 
                 definition_provider: Some(OneOf::Left(true)),
 
+                references_provider: Some(OneOf::Left(true)),
+
                 document_symbol_provider: Some(OneOf::Left(true)),
 
                 document_formatting_provider: Some(OneOf::Left(true)),
@@ -235,6 +237,28 @@ impl LanguageServer for Backend {
                         work_done_progress: None,
                     },
                 }),
+
+                // Whole-file semantic highlighting. The legend order matches the
+                // token-type ids the engine emits.
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                        legend: SemanticTokensLegend {
+                            token_types: analysis::SEMANTIC_TOKEN_TYPES
+                                .iter()
+                                .map(|t| SemanticTokenType::new(t))
+                                .collect(),
+                            token_modifiers: analysis::SEMANTIC_TOKEN_MODIFIERS
+                                .iter()
+                                .map(|m| SemanticTokenModifier::new(m))
+                                .collect(),
+                        },
+                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        range: Some(false),
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
+                    }),
+                ),
 
                 ..Default::default()
             },
@@ -382,6 +406,50 @@ impl LanguageServer for Backend {
     }
 
     // ------------------------------------------------------------------
+    // Find references
+    // ------------------------------------------------------------------
+
+    async fn references(&self, params: ReferenceParams) -> LspResult<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let path = uri_to_path(uri);
+        let pos = self.to_internal(uri, params.text_document_position.position);
+
+        tracing::debug!(uri = %uri.as_str(), ?pos, "references");
+
+        // The buffer comes from the document store when open, else disk (which
+        // matches the buffer at open time), mirroring semantic_tokens_full.
+        let text = match self.documents.get_text(uri) {
+            Some(t) => t,
+            None => std::fs::read_to_string(&path).unwrap_or_default(),
+        };
+        if text.is_empty() {
+            return Ok(None);
+        }
+
+        let raw = self
+            .analysis
+            .read()
+            .await
+            .engine
+            .references(&path, &text, &pos);
+
+        let encoding = self.encoding();
+        let locations: Vec<Location> = raw
+            .iter()
+            .map(|loc| {
+                let index = self.line_index_for_path(&loc.file);
+                location_to_lsp(loc, &PosMapper::new(&index, encoding))
+            })
+            .collect();
+
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Document symbols (outline / breadcrumbs)
     // ------------------------------------------------------------------
 
@@ -407,6 +475,40 @@ impl LanguageServer for Backend {
             .collect();
 
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    // ------------------------------------------------------------------
+    // Semantic tokens (whole-file highlighting)
+    // ------------------------------------------------------------------
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> LspResult<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let path = uri_to_path(uri);
+
+        tracing::debug!(uri = %uri.as_str(), "semantic_tokens_full");
+
+        // The buffer comes from the document store when the file is open. The
+        // editor can request tokens before its did_open is processed, so fall
+        // back to the file on disk, which matches the buffer at open time.
+        let text = match self.documents.get_text(uri) {
+            Some(t) => t,
+            None => std::fs::read_to_string(&path).unwrap_or_default(),
+        };
+        if text.is_empty() {
+            return Ok(None);
+        }
+        let index = LineIndex::new(&text);
+        let map = PosMapper::new(&index, self.encoding());
+        let tokens = self.analysis.read().await.engine.semantic_tokens(&path, &text);
+        let data = semantic_tokens_to_lsp(&tokens, &map);
+
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     // ------------------------------------------------------------------

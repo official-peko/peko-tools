@@ -104,6 +104,50 @@ pub fn document_symbol_to_lsp(s: &analysis::Symbol, map: &PosMapper) -> lsp::Doc
 }
 
 // ---------------------------------------------------------------------------
+// Semantic tokens
+// ---------------------------------------------------------------------------
+
+/// Delta-encode neutral semantic tokens into the LSP wire form. Each range is
+/// mapped to the negotiated encoding first, so lengths are in wire code units.
+/// Tokens must arrive sorted by position; multi-line or empty spans are skipped.
+pub fn semantic_tokens_to_lsp(
+    tokens: &[analysis::SemanticToken],
+    map: &PosMapper,
+) -> Vec<lsp::SemanticToken> {
+    let mut data = Vec::with_capacity(tokens.len());
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+    for token in tokens {
+        let range = map.range(&token.range);
+        if range.start.line != range.end.line {
+            continue;
+        }
+        let length = range.end.character.saturating_sub(range.start.character);
+        if length == 0 {
+            continue;
+        }
+        let line = range.start.line;
+        let start = range.start.character;
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start.saturating_sub(prev_start)
+        } else {
+            start
+        };
+        data.push(lsp::SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: token.token_type,
+            token_modifiers_bitset: token.modifiers,
+        });
+        prev_line = line;
+        prev_start = start;
+    }
+    data
+}
+
+// ---------------------------------------------------------------------------
 // Hover
 // ---------------------------------------------------------------------------
 

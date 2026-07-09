@@ -548,9 +548,43 @@ public:
           WebKitURIRequest *request =
               webkit_navigation_action_get_request(action);
           const char *uri = webkit_uri_request_get_uri(request);
-          if (uri == nullptr ||
-              strncmp(uri, "http://", 7) == 0 ||
-              strncmp(uri, "https://", 8) == 0) {
+          if (uri == nullptr) {
+            return FALSE;
+          }
+          bool is_http = strncmp(uri, "http://", 7) == 0 ||
+                         strncmp(uri, "https://", 8) == 0;
+          if (is_http) {
+            // A clicked link to an external site opens in the browser; a
+            // same-origin navigation (SPA route, dev server, reload) stays in
+            // the app.
+            auto host_of = [](const char *u) -> std::string {
+              if (!u) {
+                return "";
+              }
+              std::string s(u);
+              size_t m = s.find("://");
+              if (m == std::string::npos) {
+                return "";
+              }
+              size_t start = m + 3;
+              size_t end = s.find('/', start);
+              return s.substr(start, end == std::string::npos
+                                         ? std::string::npos
+                                         : end - start);
+            };
+            WebKitNavigationType ntype =
+                webkit_navigation_action_get_navigation_type(action);
+            const char *current = webkit_web_view_get_uri(web_view);
+            if (ntype == WEBKIT_NAVIGATION_TYPE_LINK_CLICKED &&
+                !host_of(uri).empty() && host_of(uri) != host_of(current)) {
+              GError *open_error = nullptr;
+              g_app_info_launch_default_for_uri(uri, nullptr, &open_error);
+              if (open_error) {
+                g_error_free(open_error);
+              }
+              webkit_policy_decision_ignore(decision);
+              return TRUE;
+            }
             return FALSE;
           }
 
@@ -946,6 +980,56 @@ private:
     objc_registerClassPair(cls);
     return objc::msg_send<id>((id)cls, "new"_sel);
   }
+  static id create_navigation_delegate() {
+    // A clicked link to an external site (http/https on a different host than
+    // the loaded page) opens in the user's browser instead of replacing the
+    // app's own view. Same-origin navigations (SPA routes, the dev server, a
+    // reload) proceed normally.
+    auto cls = objc_allocateClassPair((Class) "NSObject"_cls,
+                                      "WebkitNavigationDelegate", 0);
+    class_addProtocol(cls, objc_getProtocol("WKNavigationDelegate"));
+    class_addMethod(
+        cls,
+        "webView:decidePolicyForNavigationAction:decisionHandler:"_sel,
+        (IMP)(+[](id, SEL, id web_view, id action, id decision_handler) {
+          // WKNavigationTypeLinkActivated == 0.
+          auto nav_type = objc::msg_send<long>(action, "navigationType"_sel);
+          auto request = objc::msg_send<id>(action, "request"_sel);
+          auto url = objc::msg_send<id>(request, "URL"_sel);
+          auto scheme = url ? objc::msg_send<id>(url, "scheme"_sel) : nullptr;
+          bool is_http =
+              scheme && objc::msg_send<BOOL>(scheme, "hasPrefix:"_sel, "http"_str);
+          auto target_host = url ? objc::msg_send<id>(url, "host"_sel) : nullptr;
+          auto current_url = objc::msg_send<id>(web_view, "URL"_sel);
+          auto current_host =
+              current_url ? objc::msg_send<id>(current_url, "host"_sel) : nullptr;
+          bool same_host =
+              target_host && current_host &&
+              objc::msg_send<BOOL>(target_host, "isEqualToString:"_sel,
+                                   current_host);
+          bool external = is_http && nav_type == 0 && target_host && !same_host;
+
+          // WKNavigationActionPolicyCancel == 0, Allow == 1.
+          long policy = external ? 0 : 1;
+          if (external) {
+            auto workspace = objc::msg_send<id>("NSWorkspace"_cls,
+                                                "sharedWorkspace"_sel);
+            objc::msg_send<void>(workspace, "openURL:"_sel, url);
+          }
+
+          // Invoke decisionHandler(policy).
+          auto sig = objc::msg_send<id>("NSMethodSignature"_cls,
+                                        "signatureWithObjCTypes:"_sel, "v@?q");
+          auto invocation = objc::msg_send<id>(
+              "NSInvocation"_cls, "invocationWithMethodSignature:"_sel, sig);
+          objc::msg_send<void>(invocation, "setTarget:"_sel, decision_handler);
+          objc::msg_send<void>(invocation, "setArgument:atIndex:"_sel, &policy, 1);
+          objc::msg_send<void>(invocation, "invoke"_sel);
+        }),
+        "v@:@@@");
+    objc_registerClassPair(cls);
+    return objc::msg_send<id>((id)cls, "new"_sel);
+  }
   static id get_shared_application() {
     return objc::msg_send<id>("NSApplication"_cls, "sharedApplication"_sel);
   }
@@ -1045,6 +1129,8 @@ private:
     objc::msg_send<void>(m_webview, "initWithFrame:configuration:"_sel,
                          CGRectMake(0, 0, 0, 0), config);
     objc::msg_send<void>(m_webview, "setUIDelegate:"_sel, ui_delegate);
+    auto nav_delegate = create_navigation_delegate();
+    objc::msg_send<void>(m_webview, "setNavigationDelegate:"_sel, nav_delegate);
     auto script_message_handler = create_script_message_handler();
     objc::msg_send<void>(m_manager, "addScriptMessageHandler:name:"_sel,
                          script_message_handler, "external"_str);
@@ -1401,10 +1487,19 @@ private:
 inline bool enable_dpi_awareness() {
   auto user32 = native_library(L"user32.dll");
   if (auto fn = user32.get(user32_symbols::SetProcessDpiAwarenessContext)) {
-    if (fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
-      return true;
+    // Per-Monitor V2 (-4), then V1 (-3). The context values are passed
+    // explicitly rather than through a header macro, which is missing or wrong
+    // in some cross-compile SDKs and would leave the process DPI unaware. An
+    // unaware process gets a virtualized (scaled-down) client rect, so the web
+    // view is sized to a fraction of the window on a high-DPI display.
+    for (intptr_t context : {-4, -3}) {
+      if (fn(reinterpret_cast<user32_symbols::DPI_AWARENESS_CONTEXT>(context))) {
+        return true;
+      }
+      if (GetLastError() == ERROR_ACCESS_DENIED) {
+        return true; // Already set, e.g. by an embedded manifest.
+      }
     }
-    return GetLastError() == ERROR_ACCESS_DENIED;
   }
   if (auto shcore = native_library(L"shcore.dll")) {
     if (auto fn = shcore.get(shcore_symbols::SetProcessDpiAwareness)) {
@@ -1416,6 +1511,38 @@ inline bool enable_dpi_awareness() {
     return !!fn();
   }
   return true;
+}
+
+// The window's client rect in PHYSICAL pixels. The web view composes through a
+// DirectComposition visual, which uses physical pixels and ignores DPI
+// virtualization, but GetClientRect returns virtualized (logical) pixels when
+// the process is not per-monitor DPI aware, so the view would fill only 1/scale
+// of the window on a high-DPI monitor.
+//
+// The thread's DPI awareness context is temporarily set to per-monitor-aware V2
+// (-4) around the GetClientRect call. Window/GDI queries return values relative
+// to the calling thread's awareness, so within that context GetClientRect
+// reports the true physical client rect regardless of the process's own
+// awareness. The previous context is restored immediately. Querying the monitor
+// DPI directly is not reliable here: for an unaware process the effective DPI is
+// itself virtualized to 96.
+inline RECT peko_client_bounds_physical(HWND wnd) {
+  RECT bounds;
+  typedef HANDLE(WINAPI * SetThreadDpiAwarenessContext_t)(HANDLE);
+  static auto set_thread_dpi = reinterpret_cast<SetThreadDpiAwarenessContext_t>(
+      GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                     "SetThreadDpiAwarenessContext"));
+  if (set_thread_dpi) {
+    HANDLE previous =
+        set_thread_dpi(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4)));
+    GetClientRect(wnd, &bounds);
+    if (previous) {
+      set_thread_dpi(previous);
+    }
+  } else {
+    GetClientRect(wnd, &bounds);
+  }
+  return bounds;
 }
 
 // Enable built-in WebView2Loader implementation by default.
@@ -2372,8 +2499,7 @@ private:
     if (m_controller == nullptr) {
       return;
     }
-    RECT bounds;
-    GetClientRect(wnd, &bounds);
+    RECT bounds = peko_client_bounds_physical(wnd);
     m_controller->put_Bounds(bounds);
   }
 
@@ -2506,11 +2632,13 @@ private:
   // and the sizing borders are provided through hit-testing.
   bool m_frameless = false;
   // Composition hosting (DirectComposition + WS_EX_NOREDIRECTIONBITMAP) lets the
-  // window present a per-pixel transparent surface, but a window with no
-  // redirection bitmap cannot paint a native menu bar. Default to windowed
-  // hosting so a decorated window can carry a native menu; a transparent window
-  // opts back into composition.
-  bool m_composited = false;
+  // window present a per-pixel transparent surface. The pekoui desktop model is a
+  // frameless, transparent window with an HTML (not native) menu on Windows, so
+  // composition is the default. set_transparent then toggles only the default
+  // background color. (A window created before this default is applied cannot opt
+  // in later, which is why the transparent surface never appeared when this was
+  // false.)
+  bool m_composited = true;
 };
 
 } // namespace detail
@@ -2766,6 +2894,98 @@ extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
   }
 }
 
+// Vertically center the three traffic-light buttons in a titlebar of the given
+// height. The buttons live inside a titlebar view inside an
+// NSTitlebarContainerView; the container is grown to the height and each button
+// re-centered. AppKit re-lays these out on every window layout, so this is
+// re-applied from notification observers rather than once.
+static void peko_center_window_buttons(id window, double height) {
+  id close = objc::msg_send<id>(window, "standardWindowButton:"_sel, (NSInteger)0);
+  if (!close) {
+    return;
+  }
+  id title_view = objc::msg_send<id>(close, "superview"_sel);
+  if (!title_view) {
+    return;
+  }
+  // The buttons sit in a fixed-height titlebar view (about 28pt) at the window
+  // top. Rather than resize that view, which AppKit reverts on layout, move each
+  // button down within it so its center lands at height/2 from the window top.
+  // For a 16pt button in a 28pt view targeting a 40pt strip this is y = 0, which
+  // stays inside the view (no clipping).
+  double base = objc::msg_send<CGRect>(title_view, "frame"_sel).size.height;
+  // The titlebar view may be flipped (origin top-left, y grows down) or not
+  // (origin bottom-left, y grows up). Center the button so its middle sits at
+  // height/2 from the window top in either coordinate system.
+  BOOL flipped = objc::msg_send<BOOL>(title_view, "isFlipped"_sel);
+
+  CGRect close_frame = objc::msg_send<CGRect>(close, "frame"_sel);
+  double button_size = close_frame.size.height;
+  double target = flipped ? (height / 2.0 - button_size / 2.0)
+                          : (base - height / 2.0 - button_size / 2.0);
+  double delta = close_frame.origin.y - target;
+  if (delta < 0) {
+    delta = -delta;
+  }
+  if (delta < 0.5) {
+    return;
+  }
+
+  for (NSInteger index = 0; index < 3; index++) {
+    id button = objc::msg_send<id>(window, "standardWindowButton:"_sel, index);
+    if (!button) {
+      continue;
+    }
+    CGRect button_frame = objc::msg_send<CGRect>(button, "frame"_sel);
+    button_frame.origin.y = flipped
+                                ? (height / 2.0 - button_frame.size.height / 2.0)
+                                : (base - height / 2.0 - button_frame.size.height / 2.0);
+    objc::msg_send<void>(button, "setFrameOrigin:"_sel, button_frame.origin);
+  }
+}
+
+extern "C" void peko_webview_set_titlebar_height(webview_t w, double height) {
+  id window = (id)webview_get_window(w);
+  if (!window || height <= 0) {
+    return;
+  }
+  peko_center_window_buttons(window, height);
+
+  // The window is not on screen yet when this is called, and AppKit re-lays out
+  // the buttons when it displays and on every resize. Re-center from layout
+  // notifications so the centering sticks. The notification center copies the
+  // block; it captures the window and height by value.
+  id center =
+      objc::msg_send<id>("NSNotificationCenter"_cls, "defaultCenter"_sel);
+  void (^apply)(id) = ^(id note) {
+    (void)note;
+    peko_center_window_buttons(window, height);
+  };
+  objc::msg_send<id>(center, "addObserverForName:object:queue:usingBlock:"_sel,
+                     "NSWindowDidResizeNotification"_str, window, (id)nullptr,
+                     (id)apply);
+  objc::msg_send<id>(center, "addObserverForName:object:queue:usingBlock:"_sel,
+                     "NSWindowDidBecomeKeyNotification"_str, window,
+                     (id)nullptr, (id)apply);
+  objc::msg_send<id>(center, "addObserverForName:object:queue:usingBlock:"_sel,
+                     "NSWindowDidExposeNotification"_str, window, (id)nullptr,
+                     (id)apply);
+
+  // The most reliable trigger: watch the close button's own frame. AppKit moves
+  // it back on every titlebar layout (including the async one after the web view
+  // loads its content, which fires no window notification). Re-centering on the
+  // button's frame change keeps it centered through those layouts; the guard in
+  // peko_center_window_buttons prevents an update loop.
+  id close = objc::msg_send<id>(window, "standardWindowButton:"_sel, (NSInteger)0);
+  if (close) {
+    objc::msg_send<void>(close, "setPostsFrameChangedNotifications:"_sel, YES);
+    objc::msg_send<id>(center,
+                       "addObserverForName:object:queue:usingBlock:"_sel,
+                       "NSViewFrameDidChangeNotification"_str, close,
+                       (id)nullptr, (id)apply);
+  }
+}
+
 extern "C" void peko_webview_begin_drag(webview_t w) {
   id window = (id)webview_get_window(w);
   if (!window) {
@@ -2832,6 +3052,18 @@ extern "C" void peko_webview_close(webview_t w) {
   objc::msg_send<void>(window, "close"_sel);
 }
 
+extern "C" void peko_webview_activate(webview_t w) {
+  // Bring the app in front of other apps and raise the window, so a newly
+  // spawned instance opens frontmost rather than behind the launching app.
+  auto app = objc::msg_send<id>("NSApplication"_cls, "sharedApplication"_sel);
+  objc::msg_send<void>(app, "activateIgnoringOtherApps:"_sel, YES);
+  id window = (id)webview_get_window(w);
+  if (window) {
+    objc::msg_send<void>(window, "makeKeyAndOrderFront:"_sel, (id) nullptr);
+    objc::msg_send<void>(window, "orderFrontRegardless"_sel);
+  }
+}
+
 extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
   id window = (id)webview_get_window(w);
   if (!window) {
@@ -2895,6 +3127,12 @@ extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
   gtk_widget_set_app_paintable(window, transparent ? TRUE : FALSE);
 }
 
+extern "C" void peko_webview_set_titlebar_height(webview_t w, double height) {
+  // The traffic-light layout is macOS specific; no-op elsewhere.
+  (void)w;
+  (void)height;
+}
+
 extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
   auto *window = static_cast<GtkWidget *>(webview_get_window(w));
   if (!window) {
@@ -2945,6 +3183,15 @@ extern "C" void peko_webview_close(webview_t w) {
     return;
   }
   gtk_window_close(GTK_WINDOW(window));
+}
+
+extern "C" void peko_webview_activate(webview_t w) {
+  auto *window = static_cast<GtkWidget *>(webview_get_window(w));
+  if (!window) {
+    return;
+  }
+  // present raises the window and gives it focus above other applications.
+  gtk_window_present(GTK_WINDOW(window));
 }
 
 extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {
@@ -3001,6 +3248,12 @@ extern "C" void peko_webview_set_transparent(webview_t w, int transparent) {
   }
 }
 
+extern "C" void peko_webview_set_titlebar_height(webview_t w, double height) {
+  // The traffic-light layout is macOS specific; no-op elsewhere.
+  (void)w;
+  (void)height;
+}
+
 extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
   auto *engine = static_cast<webview::webview *>(w);
   HWND hwnd = static_cast<HWND>(webview_get_window(w));
@@ -3020,8 +3273,7 @@ extern "C" void peko_webview_set_decorations(webview_t w, int decorated) {
   auto *controller =
       static_cast<ICoreWebView2Controller *>(engine->controller());
   if (controller) {
-    RECT bounds;
-    GetClientRect(hwnd, &bounds);
+    RECT bounds = webview::detail::peko_client_bounds_physical(hwnd);
     controller->put_Bounds(bounds);
   }
 }
@@ -3058,6 +3310,17 @@ extern "C" void peko_webview_close(webview_t w) {
   if (hwnd) {
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
   }
+}
+
+extern "C" void peko_webview_activate(webview_t w) {
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  if (!hwnd) {
+    return;
+  }
+  // Raise a newly spawned instance above the launching window.
+  ShowWindow(hwnd, SW_SHOW);
+  BringWindowToTop(hwnd);
+  SetForegroundWindow(hwnd);
 }
 
 extern "C" void peko_webview_set_window_buttons_hidden(webview_t w, int hidden) {

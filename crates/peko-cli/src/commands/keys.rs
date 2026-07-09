@@ -48,15 +48,25 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     };
     let bundle_id = ui_info.bundle_id.clone();
     let root = project.get_root().to_path_buf();
+    // The project's declared, signable target platforms (drop Linux/Unknown).
+    let declared: Vec<String> = ui_info
+        .platforms
+        .iter()
+        .filter_map(|os| signing::platform_id(os))
+        .map(str::to_string)
+        .collect();
 
     let Some(subcommand) = cli_info.arguments.get(1) else {
-        reporter.error("`peko keys` requires a subcommand: add, list, or remove");
+        reporter.error("`peko keys` requires a subcommand: add, install, set-password, verify, list, or remove");
         reporter.help(format!("run '{} help keys' for usage", cli_info.executable));
         return ExitCode::FAILURE;
     };
 
     match subcommand.as_str() {
         "add" => add(cli_info, reporter, &root, &bundle_id),
+        "install" => install(cli_info, reporter, &root),
+        "set-password" => set_password(cli_info, reporter, &root, &bundle_id),
+        "verify" => verify(cli_info, reporter, &root, &bundle_id, &declared),
         "list" => list(reporter, &root, &bundle_id),
         "remove" => remove(cli_info, reporter, &root, &bundle_id),
         other => {
@@ -345,6 +355,231 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
 
     reporter.success(format!("registered {platform} signing key"));
     ExitCode::SUCCESS
+}
+
+/// Install a single key file into a platform and register it, without
+/// requiring the platform's other files. Used by the IDE's drag-and-drop, which
+/// adds files one at a time. `--role` names the slot (cert/p12, profile,
+/// entitlements, keystore, pfx); `--alias` sets the Android key alias.
+fn install(cli_info: &CLIInfo, reporter: &Reporter, root: &Path) -> ExitCode {
+    let Some(platform) = require_platform(cli_info, reporter) else {
+        return ExitCode::FAILURE;
+    };
+    let Some(role) = cli_info.flags.get_flag("role") else {
+        reporter.error("`--role` is required (p12, profile, entitlements, keystore, pfx)");
+        return ExitCode::FAILURE;
+    };
+    if !role_is_valid(&platform, &role) {
+        reporter.error(format!(
+            "role '{role}' is not a {platform} signing file; expected {}",
+            valid_roles(&platform).join(", ")
+        ));
+        return ExitCode::FAILURE;
+    }
+
+    let mut registry = match signing::load_registry(root) {
+        Ok(value) => value,
+        Err(e) => {
+            reporter.error(format!("could not read key registry: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Two sources: a file on disk (--file), or the file's bytes as base64 on
+    // stdin (--filename names the destination). The IDE uses the latter so a
+    // dropped file's bytes cross the bridge without a filesystem path and
+    // decoding happens here, preserving binary fidelity.
+    match (cli_info.flags.get_flag("file"), cli_info.flags.get_flag("filename")) {
+        (Some(file), _) => {
+            if !install_file(reporter, root, &platform, &role, &PathBuf::from(file), &mut registry)
+            {
+                return ExitCode::FAILURE;
+            }
+        }
+        (None, Some(filename)) => {
+            if !install_stdin_base64(reporter, root, &platform, &role, &filename, &mut registry) {
+                return ExitCode::FAILURE;
+            }
+        }
+        (None, None) => {
+            reporter.error("`--file <path>` or `--filename <name>` (with base64 on stdin) is required");
+            return ExitCode::FAILURE;
+        }
+    }
+    if platform == "android"
+        && let Some(alias) = cli_info.flags.get_flag("alias")
+    {
+        set_registry_alias(&mut registry, &platform, &alias);
+    }
+    if let Err(e) = signing::save_registry(root, &registry) {
+        reporter.error(format!("could not write key registry: {e}"));
+        return ExitCode::FAILURE;
+    }
+    reporter.success(format!("installed {platform} {role}"));
+    ExitCode::SUCCESS
+}
+
+/// Read base64 from stdin, decode it, write it into the platform key directory
+/// under `filename`, and register it under `role`. Byte fidelity is guaranteed
+/// by decoding here rather than in the webview.
+fn install_stdin_base64(
+    reporter: &Reporter,
+    root: &Path,
+    platform: &str,
+    role: &str,
+    filename: &str,
+    registry: &mut Value,
+) -> bool {
+    use base64::Engine as _;
+    use std::io::Read as _;
+
+    // Reject a path in the file name; it must be a bare name.
+    if filename.contains('/') || filename.contains('\\') || filename.is_empty() {
+        reporter.error("--filename must be a bare file name");
+        return false;
+    }
+
+    let mut encoded = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut encoded) {
+        reporter.error(format!("could not read key bytes from stdin: {e}"));
+        return false;
+    }
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            reporter.error(format!("key bytes are not valid base64: {e}"));
+            return false;
+        }
+    };
+
+    let dir = signing::platform_dir(root, platform);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        reporter.error(format!("could not create {}: {e}", dir.display()));
+        return false;
+    }
+    let dest = dir.join(filename);
+    if let Err(e) = std::fs::write(&dest, &bytes) {
+        reporter.error(format!("could not write key file to {}: {e}", dest.display()));
+        return false;
+    }
+    set_registry_file(registry, platform, role, filename);
+    true
+}
+
+/// Store one signing password in the OS keychain. The value comes from
+/// `--password`, `--password-file`, or (preferred, so it never reaches the
+/// process table) standard input.
+fn set_password(cli_info: &CLIInfo, reporter: &Reporter, _root: &Path, bundle_id: &str) -> ExitCode {
+    let Some(platform) = require_platform(cli_info, reporter) else {
+        return ExitCode::FAILURE;
+    };
+    let Some(role) = cli_info.flags.get_flag("role") else {
+        reporter.error("`--role` is required (store, key, p12, pfx)");
+        return ExitCode::FAILURE;
+    };
+    if !password_roles(&platform).contains(&role.as_str()) {
+        reporter.error(format!(
+            "role '{role}' has no password on {platform}; expected {}",
+            password_roles(&platform).join(", ")
+        ));
+        return ExitCode::FAILURE;
+    }
+    let password = read_password(cli_info).or_else(|| {
+        use std::io::Read;
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer).ok()?;
+        let trimmed = buffer.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    let Some(password) = password else {
+        reporter.error("a password is required (use --password, --password-file, or stdin)");
+        return ExitCode::FAILURE;
+    };
+    let mut secrets = signing::SigningSecrets::load(bundle_id);
+    secrets.set(&platform, &role, &password);
+    if let Err(e) = secrets.store(bundle_id) {
+        reporter.error(format!("could not store password: {e}"));
+        return ExitCode::FAILURE;
+    }
+    reporter.success(format!("set {platform} {role} password"));
+    ExitCode::SUCCESS
+}
+
+/// Verify that registered signing material satisfies each platform's
+/// requirements (files present, passwords open them, certificates are the right
+/// kind and unexpired). With `--json`, prints the machine-readable reports the
+/// IDE reads; otherwise a human summary. Exits non-zero when a platform is
+/// missing material or fails a check.
+fn verify(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    root: &Path,
+    bundle_id: &str,
+    declared: &[String],
+) -> ExitCode {
+    let platforms: Vec<String> = match cli_info.flags.get_flag("platform") {
+        Some(p) => vec![p],
+        None if !declared.is_empty() => declared.to_vec(),
+        None => vec![
+            "android".into(),
+            "ios".into(),
+            "macos".into(),
+            "windows".into(),
+        ],
+    };
+    // Read the keychain once for the whole command. Every platform's
+    // verification shares this snapshot, so the operating system authorizes
+    // keychain access a single time rather than once per platform.
+    let secrets = signing::SigningSecrets::load(bundle_id);
+    let reports: Vec<signing::PlatformReport> = platforms
+        .iter()
+        .filter(|p| matches!(p.as_str(), "android" | "ios" | "macos" | "windows"))
+        .map(|p| signing::verify_platform(root, &secrets, p))
+        .collect();
+
+    if cli_info.flags.has_flag("json") {
+        println!(
+            "{}",
+            serde_json::to_string(&reports).unwrap_or_else(|_| "[]".to_string())
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let mut all_ok = true;
+    for report in &reports {
+        reporter.info(format!("{}: {}", report.platform, report.state));
+        for check in &report.checks {
+            let mark = if check.ok { "ok" } else { "FAIL" };
+            reporter.info(format!("  [{mark}] {}: {}", check.role, check.detail));
+        }
+        if report.state == "invalid" || report.state == "missing" {
+            all_ok = false;
+        }
+    }
+    if all_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// The registry roles that are files for a platform.
+fn valid_roles(platform: &str) -> &'static [&'static str] {
+    match platform {
+        "android" => &["keystore"],
+        "ios" => &["p12", "profile", "entitlements"],
+        "macos" => &["p12", "entitlements"],
+        "windows" => &["pfx"],
+        _ => &[],
+    }
+}
+
+fn role_is_valid(platform: &str, role: &str) -> bool {
+    valid_roles(platform).contains(&role)
 }
 
 fn list(reporter: &Reporter, root: &Path, bundle_id: &str) -> ExitCode {

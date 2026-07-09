@@ -328,6 +328,12 @@ void pgc_mark_clear(void);                 /* clear all mark bits           */
 bool pgc_is_marked(const pgc_header *h);
 void pgc_set_marked(pgc_header *h);
 
+/* audit.c: read-only debugging passes, world stopped. pgc_audit validates heap
+ * structure; pgc_verify_mark conservatively cross-checks the precise mark for
+ * missed roots/fields. Both gated by env vars in pgc_collect. */
+int pgc_audit(void);
+int pgc_verify_mark(unsigned long generation);
+
 /* roots.c: enumerate root sources by invoking a visitor on each slot.
  * The visitor may read and rewrite the slot (for pointer updating). */
 typedef void (*pgc_root_visitor)(void **slot);

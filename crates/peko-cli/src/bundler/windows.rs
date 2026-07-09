@@ -27,12 +27,14 @@ use crate::project::PekoProject;
 /// and version metadata into the final binary. `{bundle_id}`,
 /// `{version}`, and `{name}` are substituted at bundle time.
 const WINDOWS_RC_TEMPLATE: &str = r#"MAINICON ICON "icon.ico"
+1 24 "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-    FILEVERSION 0, 0, 0, 0
-    PRODUCTVERSION 0,0,0,0
+    FILEVERSION {ver_commas}
+    PRODUCTVERSION {ver_commas}
     FILEFLAGSMASK 0x3FL
-    FILEOS 0x4L
+    FILEFLAGS 0x0L
+    FILEOS 0x40004L
     FILETYPE 0x1L
     FILESUBTYPE 0x0L
 BEGIN
@@ -41,8 +43,13 @@ BEGIN
         BLOCK "040904E4"
         BEGIN
             VALUE "CompanyName", "{bundle_id}"
-            VALUE "ProductVersion", "{version}"
+            VALUE "FileDescription", "{name}"
+            VALUE "FileVersion", "{version}"
+            VALUE "InternalName", "{name}"
+            VALUE "OriginalFilename", "{original}"
             VALUE "ProductName", "{name}"
+            VALUE "ProductVersion", "{version}"
+            VALUE "LegalCopyright", "{bundle_id}"
         END
     END
     BLOCK "VarFileInfo"
@@ -50,6 +57,48 @@ BEGIN
         VALUE "Translation", 0x409, 1252
     END
 END"#;
+
+/// The side-by-side application manifest embedded in the executable. It runs the
+/// app at the invoking user's privilege level (no UAC elevation) and declares
+/// per-monitor DPI awareness so the window content is sized to the physical
+/// client area on a high-DPI display (a DPI-unaware process gets a virtualized,
+/// scaled-down client rect and the web view fills only a fraction of the
+/// window). Both the 2005 (`dpiAware`) and 2016 (`dpiAwareness`) forms are
+/// declared for broad Windows compatibility. A well-formed manifest plus the
+/// version metadata also makes the binary look like a normal application, which
+/// reduces heuristic antivirus false positives; the definitive fix for those is
+/// Authenticode signing.
+///
+/// This is kept minimal (no assemblyIdentity or compatibility block): a manifest
+/// Windows rejects as malformed is ignored wholesale, which would silently drop
+/// the DPI awareness.
+const WINDOWS_MANIFEST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>"#;
+
+/// Format a dotted version like `1.2.3` as the comma-separated `1, 2, 3, 0` a
+/// VERSIONINFO FILEVERSION field requires. Missing or non-numeric parts are 0.
+fn version_fields(version: &str) -> String {
+    let mut parts = version.split('.').map(|part| part.trim().parse::<u16>().unwrap_or(0));
+    let major = parts.next().unwrap_or(0);
+    let minor = parts.next().unwrap_or(0);
+    let patch = parts.next().unwrap_or(0);
+    format!("{major}, {minor}, {patch}, 0")
+}
 
 /// Build a Windows `.exe` for the project.
 pub fn bundle(
@@ -83,14 +132,24 @@ pub fn bundle(
     // accompanying .rc resource script with the project metadata baked
     // in.
     let converted_icon = windows_build_directory.join("icon.ico");
-    let icon = &project.ui_project_info.as_ref().unwrap().icon;
+    let icon = project
+        .ui_project_info
+        .as_ref()
+        .unwrap()
+        .icon_for(OperatingSystem::Windows);
     icon.to_ico(&mut io_at(&converted_icon, File::create(&converted_icon))?);
 
     let ui_info = project.ui_project_info.as_ref().unwrap();
     let mut resource_code = WINDOWS_RC_TEMPLATE
+        .replace("{ver_commas}", &version_fields(&ui_info.version))
         .replace("{bundle_id}", &ui_info.bundle_id)
         .replace("{version}", &ui_info.version)
+        .replace("{original}", &format!("{}.exe", project.name))
         .replace("{name}", &project.name);
+
+    // Write the application manifest the .rc embeds.
+    let manifest_file = windows_build_directory.join("app.manifest");
+    io_at(&manifest_file, fs::write(&manifest_file, WINDOWS_MANIFEST_TEMPLATE))?;
 
     // Embed each project asset as a resource of custom type PEKO_ASSET.
     // The resource name is the asset's path uppercased (what the assets

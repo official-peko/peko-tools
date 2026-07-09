@@ -29,7 +29,7 @@ pub use container::{
 };
 pub use lock::{LOCKFILE_FILE, LOCKFILE_VERSION, LockSource, LockedPackage, Lockfile};
 pub use manifest::{
-    ApplicationManifest, Dependency, DependencySpec, Framework, Lib, LoadedManifest, Manifest,
+    ApplicationManifest, Dependency, DependencySpec, Framework, Icon, Lib, LoadedManifest, Manifest,
     ManifestKind, Native, NativeFlags, NativeLink, PackageManifest, PackageMeta, Platforms,
     Project, Ui, Vendor,
 };

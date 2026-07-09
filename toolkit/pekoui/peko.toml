@@ -3,6 +3,7 @@ name = "pekoui"
 version = "0.1.0"
 description = "The PekoUI framework: a native webview host and UI runtime."
 license = "MIT"
+repository = "https://github.com/official-peko/peko-tools"
 authors = ["Preston Brown"]
 keywords = ["ui", "webview", "gui", "desktop", "pekoui"]
 categories = ["gui"]
@@ -27,6 +28,10 @@ sources = [
     "c/assets/peko_assets_windows.c",
     "c/appdir/peko_appdir.c",
     "c/env/peko_env.c",
+    "c/dialog/peko_dialog_apple.m",
+    "c/dialog/peko_dialog_windows.c",
+    "c/dialog/peko_dialog_linux.c",
+    "c/dialog/peko_dialog_fallback.c",
     "c/menu/peko_menu_apple.m",
     "c/menu/peko_menu_windows.c",
     "c/menu/peko_menu_linux.c",
@@ -52,4 +57,4 @@ all = ["-O2", "-fno-strict-aliasing"]
 linux = ["-lwebkit2gtk-4.0", "-lgtk-3", "-lgobject-2.0", "-lglib-2.0"]
 macos = ["-framework", "WebKit", "-framework", "Cocoa"]
 ios = ["-framework", "WebKit"]
-windows = ["dwmapi.lib", "comctl32.lib", "advapi32.lib"]
+windows = ["dwmapi.lib", "comctl32.lib", "advapi32.lib", "ole32.lib"]

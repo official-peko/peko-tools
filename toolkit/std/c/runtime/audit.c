@@ -22,10 +22,27 @@
  * It does NOT allocate, move, or write anything. Findings go to stderr.
  * ====================================================================== */
 
+/* dladdr and Dl_info are GNU extensions on glibc, gated behind _GNU_SOURCE, so
+   define it before any system header. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "./include/pgc_internal.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+
+/* dladdr symbolizes addresses for the verifier's diagnostics. It is absent on
+   the mobile and cross-compile toolchains, so guard on the header's presence
+   and fall back to no symbol name where it is missing. */
+#if defined(__has_include)
+#if __has_include(<dlfcn.h>)
+#define PGC_HAVE_DLADDR 1
+#include <dlfcn.h>
+#endif
+#endif
 
 /* The single global GC state (defined in the runtime). */
 extern pgc_state g_gc;
@@ -291,4 +308,221 @@ int pgc_audit(void)
         return 1;
     }
     return 0;
+}
+
+/* =========================================================================
+ * pgc_verify_mark -- an INDEPENDENT mark-completeness check.
+ *
+ * Called after the precise mark (pgc_mark_all) and before compaction, while
+ * the world is stopped. The precise mark trusts the compiler's stackmaps and
+ * each type's descriptor. This pass distrusts both: it conservatively scans
+ * every thread stack and every marked object's payload for words that point
+ * exactly at a valid heap object. Any such object that the precise mark left
+ * UNMARKED is a candidate missed reference:
+ *   - from a stack word  -> a missed stack root (a stackmap gap), or
+ *   - from a marked object's payload -> a missed field (a bad type descriptor).
+ * The object is live (something points at it) but about to be reclaimed.
+ *
+ * Conservative scanning has false positives (an integer that happens to equal
+ * an object address). Under PEKO_GC_STRESS the real bug reports the SAME child
+ * descriptor / parent-offset every cycle; noise is random. Read-only: marks
+ * nothing, moves nothing.
+ * ====================================================================== */
+
+/* A plausible descriptor is 8-aligned, not a tiny value, and outside the GC
+ * heap (descriptors are static consts). Mirrors heap.c's pgc_desc_plausible. */
+static int verify_desc_plausible(const void *descriptor)
+{
+    uintptr_t dv = (uintptr_t)descriptor;
+    const unsigned char *dp = (const unsigned char *)descriptor;
+    if (descriptor == PGC_ATOMIC_DESCRIPTOR)
+        return 1;
+    if ((dv & 0x7u) != 0 || dv < 0x10000u)
+        return 0;
+    if (dp >= g_gc.heap.base && dp < g_gc.heap.end)
+        return 0;
+    return 1;
+}
+
+typedef struct {
+    uintptr_t payload;  /* object payload start                          */
+    int       marked;   /* precise mark bit                              */
+} verify_obj;
+
+/* Print a descriptor's structure so a missed reference names the exact type
+ * shape the mark phase used: FIXED lists its traced offsets; ARRAY lists its
+ * stride and element descriptor. */
+static const char *verify_symbolize(const void *p)
+{
+#ifdef PGC_HAVE_DLADDR
+    Dl_info info;
+    if (p != NULL && dladdr(p, &info) != 0 && info.dli_sname != NULL)
+        return info.dli_sname;
+#else
+    (void)p;
+#endif
+    return "?";
+}
+
+static void verify_dump_desc(const void *descriptor)
+{
+    if (descriptor == NULL) {
+        fprintf(stderr, "    desc=NULL\n");
+        return;
+    }
+    if (descriptor == PGC_ATOMIC_DESCRIPTOR) {
+        fprintf(stderr, "    desc=ATOMIC (no-scan)\n");
+        return;
+    }
+    if (!verify_desc_plausible(descriptor)) {
+        fprintf(stderr, "    desc=%p (implausible)\n", descriptor);
+        return;
+    }
+    const pgc_descriptor *d = (const pgc_descriptor *)descriptor;
+    if (d->kind == PGC_DESC_FIXED) {
+        const pgc_descriptor_fixed *df = (const pgc_descriptor_fixed *)d;
+        fprintf(stderr, "    desc=%p <%s> FIXED count=%d offsets=[", descriptor,
+                verify_symbolize(descriptor), df->count);
+        for (int32_t k = 0; k < df->count && k < 16; k++)
+            fprintf(stderr, "%lld ", (long long)df->offsets[k]);
+        fprintf(stderr, "]\n");
+    } else if (d->kind == PGC_DESC_ARRAY) {
+        const pgc_descriptor_array *da = (const pgc_descriptor_array *)d;
+        fprintf(stderr, "    desc=%p <%s> ARRAY stride=%lld element=%p <%s>\n",
+                descriptor, verify_symbolize(descriptor), (long long)da->stride,
+                da->element, verify_symbolize(da->element));
+    } else {
+        fprintf(stderr, "    desc=%p kind=%d (unknown)\n", descriptor, d->kind);
+    }
+}
+
+/* Binary search the ascending object table for an exact payload-start match.
+ * Returns the index, or -1 when addr is not a live object's payload start. */
+static long verify_find(const verify_obj *tab, size_t n, uintptr_t addr)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (tab[mid].payload == addr)
+            return (long)mid;
+        if (tab[mid].payload < addr)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return -1;
+}
+
+int pgc_verify_mark(unsigned long generation)
+{
+    /* 1. Build an ascending table of every heap object's payload + mark bit. */
+    size_t count = 0;
+    unsigned char *scan = g_gc.heap.base;
+    while (scan < g_gc.heap.top) {
+        pgc_header *h = (pgc_header *)scan;
+        if (h->size == 0 && !verify_desc_plausible(h->descriptor))
+            break;
+        size_t total = pgc_object_total(h);
+        if (total < PGC_HEADER_SIZE)
+            break;
+        count++;
+        scan += total;
+    }
+    if (count == 0)
+        return 0;
+
+    verify_obj *tab = (verify_obj *)malloc(count * sizeof(verify_obj));
+    if (tab == NULL)
+        return 0;
+
+    size_t i = 0;
+    scan = g_gc.heap.base;
+    while (scan < g_gc.heap.top && i < count) {
+        pgc_header *h = (pgc_header *)scan;
+        if (h->size == 0 && !verify_desc_plausible(h->descriptor))
+            break;
+        size_t total = pgc_object_total(h);
+        if (total < PGC_HEADER_SIZE)
+            break;
+        tab[i].payload = (uintptr_t)PGC_PAYLOAD_OF(h);
+        tab[i].marked = pgc_is_marked(h) ? 1 : 0;
+        i++;
+        scan += total;
+    }
+    size_t n = i;
+
+    int findings = 0;
+    const uintptr_t heap_lo = (uintptr_t)g_gc.heap.base;
+    const uintptr_t heap_hi = (uintptr_t)g_gc.heap.top;
+
+    /* 2. Missed stack roots: conservatively scan each stopped thread's stack
+     * between its captured frame and its base. */
+    for (int t = 0; t < g_gc.thread_count && findings < 40; t++) {
+        pgc_thread *thread = &g_gc.threads[t];
+        if (!thread->in_use || thread->stack_top == NULL || thread->stack_base == NULL)
+            continue;
+        uintptr_t top = (uintptr_t)thread->stack_top;
+        uintptr_t base = (uintptr_t)thread->stack_base;
+        if (top > base) {
+            uintptr_t tmp = top;
+            top = base;
+            base = tmp;
+        }
+        top &= ~(uintptr_t)7;
+        for (uintptr_t w = top; w + sizeof(void *) <= base && findings < 40;
+             w += sizeof(void *)) {
+            uintptr_t p = *(uintptr_t *)w;
+            if (p < heap_lo || p >= heap_hi)
+                continue;
+            long oi = verify_find(tab, n, p);
+            if (oi >= 0 && !tab[oi].marked) {
+                pgc_header *ch = PGC_HEADER_OF((void *)p);
+                fprintf(stderr,
+                        "[pgc][verify gen=%lu] MISSED STACK ROOT: thread %d "
+                        "stack@%p -> unmarked obj payload=%p size=%lu desc=%p\n",
+                        generation, t, (void *)w, (void *)p,
+                        (unsigned long)ch->size, (void *)ch->descriptor);
+                findings++;
+            }
+        }
+    }
+
+    /* 3. Missed fields: conservatively scan each MARKED object's payload for a
+     * word that points at an unmarked live object. */
+    int dumped_field = 0;
+    for (size_t o = 0; o < n && findings < 40; o++) {
+        if (!tab[o].marked)
+            continue;
+        pgc_header *ph = PGC_HEADER_OF((void *)tab[o].payload);
+        size_t psize = pgc_object_size(ph);
+        unsigned char *pl = (unsigned char *)tab[o].payload;
+        for (size_t off = 0; off + sizeof(void *) <= psize && findings < 40;
+             off += sizeof(void *)) {
+            uintptr_t p = *(uintptr_t *)(pl + off);
+            if (p < heap_lo || p >= heap_hi)
+                continue;
+            long oi = verify_find(tab, n, p);
+            if (oi >= 0 && !tab[oi].marked) {
+                pgc_header *ch = PGC_HEADER_OF((void *)p);
+                fprintf(stderr,
+                        "[pgc][verify gen=%lu] MISSED FIELD: parent payload=%p "
+                        "desc=%p off=%lu -> unmarked child payload=%p size=%lu "
+                        "desc=%p\n",
+                        generation, (void *)tab[o].payload,
+                        (void *)ph->descriptor, (unsigned long)off, (void *)p,
+                        (unsigned long)ch->size, (void *)ch->descriptor);
+                if (!dumped_field) {
+                    dumped_field = 1;
+                    fprintf(stderr, "  parent:\n");
+                    verify_dump_desc(ph->descriptor);
+                    fprintf(stderr, "  child:\n");
+                    verify_dump_desc(ch->descriptor);
+                }
+                findings++;
+            }
+        }
+    }
+
+    free(tab);
+    return findings;
 }

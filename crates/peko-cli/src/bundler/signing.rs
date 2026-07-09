@@ -18,7 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use apple_codesign::AppleCertificate;
 use peko_core::target::OperatingSystem;
+use x509_certificate::CapturedX509Certificate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -340,6 +342,434 @@ pub enum OptionalSignOutcome {
     /// A signing key is registered but the external signing tool is not
     /// available on the system.
     ToolUnavailable,
+}
+
+// ---------------------------------------------------------------------------
+// Verification
+//
+// Checks that the registered material for a platform actually satisfies that
+// platform's signing requirements: the files are present, the passwords open
+// them, the certificates are the right kind (an Apple code-signing certificate
+// for macOS/iOS, a code-signing certificate for Windows), and nothing has
+// expired. Runs on any host: PKCS#12 parsing and certificate inspection use the
+// pure-Rust apple-codesign crate; a JKS keystore is verified with `keytool`
+// when a JDK is present and otherwise reported as present-but-unverified.
+// ---------------------------------------------------------------------------
+
+/// One check within a platform's signing verification.
+#[derive(Debug, Serialize)]
+pub struct KeyCheck {
+    /// What is being checked, e.g. "certificate", "provisioning profile".
+    pub role: String,
+    /// The registered file name, when the check concerns a file.
+    pub file: Option<String>,
+    /// The material (file and any secret) exists.
+    pub present: bool,
+    /// The material is present and satisfies the platform's requirements.
+    pub ok: bool,
+    /// The material is present but could not be fully verified on this host
+    /// (e.g. a JKS keystore with no JDK available); treated as a soft pass.
+    pub unverified: bool,
+    /// A human message: the certificate identity and validity, or the reason
+    /// the material does not satisfy the requirement.
+    pub detail: String,
+}
+
+/// The verification result for one platform.
+#[derive(Debug, Serialize)]
+pub struct PlatformReport {
+    pub platform: String,
+    /// "missing" (required material absent), "invalid" (present but a check
+    /// failed), "unverified" (present, a soft pass), or "valid".
+    pub state: String,
+    pub checks: Vec<KeyCheck>,
+}
+
+fn file_name_of(path: &Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().to_string())
+}
+
+/// Open a PKCS#12 container, returning the leaf certificate or a message that
+/// distinguishes a wrong password from a malformed file.
+fn open_pkcs12(bytes: &[u8], password: &str) -> Result<CapturedX509Certificate, String> {
+    match apple_codesign::cryptography::parse_pfx_data(bytes, password) {
+        Ok((certificate, _key)) => Ok(certificate),
+        Err(e) => {
+            let debug = format!("{e:?}");
+            if debug.contains("BadPassword") {
+                Err("wrong password".to_string())
+            } else {
+                Err(format!("not a valid PKCS#12 certificate ({e})"))
+            }
+        }
+    }
+}
+
+/// Check a certificate's validity window against the current time. Returns a
+/// short "valid until <date>" message, or the reason it is out of window.
+fn cert_validity(cert: &CapturedX509Certificate) -> Result<String, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let not_before = cert.validity_not_before().timestamp();
+    let not_after = cert.validity_not_after().timestamp();
+    if now < not_before {
+        return Err(format!("not valid until {}", cert.validity_not_before()));
+    }
+    if now > not_after {
+        return Err(format!("expired on {}", cert.validity_not_after()));
+    }
+    Ok(format!("valid until {}", cert.validity_not_after()))
+}
+
+/// Whether an Apple certificate profile is usable for signing an application on
+/// the given platform, with a message naming the profile or the mismatch.
+fn apple_profile_ok(cert: &CapturedX509Certificate, platform: &str) -> Result<String, String> {
+    use apple_codesign::CertificateProfile as P;
+    let Some(profile) = cert.apple_guess_profile() else {
+        return Err("not an Apple code-signing certificate".to_string());
+    };
+    let acceptable = match platform {
+        // A macOS .app is signed by a Developer ID (distributed outside the App
+        // Store), an Apple Distribution (App Store), or an Apple Development
+        // certificate.
+        "macos" => matches!(
+            profile,
+            P::DeveloperIdApplication | P::AppleDistribution | P::AppleDevelopment
+        ),
+        // iOS uses Apple Distribution or Apple Development, paired with a
+        // provisioning profile.
+        "ios" => matches!(profile, P::AppleDistribution | P::AppleDevelopment),
+        _ => false,
+    };
+    if acceptable {
+        Ok(format!("{profile:?}"))
+    } else {
+        match profile {
+            P::MacInstallerDistribution | P::DeveloperIdInstaller => Err(
+                "installer-signing certificate; an application-signing certificate is required"
+                    .to_string(),
+            ),
+            other => Err(format!("{other:?} is not usable for {platform} app signing")),
+        }
+    }
+}
+
+/// Civil date (year, month, day) from a Unix day count. Howard Hinnant's
+/// algorithm; used to format "today" without a date-library dependency.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn today_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days(secs / 86400);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Read a provisioning profile's ExpirationDate. Returns Some((expired, date))
+/// when a date is found, None when the profile parses but names no expiration.
+fn profile_expiration(path: &Path) -> Result<Option<(bool, String)>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read profile: {e}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let start = text
+        .find("<?xml")
+        .ok_or("not a valid provisioning profile")?;
+    let end_rel = text[start..]
+        .find("</plist>")
+        .ok_or("not a valid provisioning profile")?;
+    let plist = &text[start..start + end_rel];
+    let Some(key_pos) = plist.find("<key>ExpirationDate</key>") else {
+        return Ok(None);
+    };
+    let after = &plist[key_pos..];
+    let Some(date_start) = after.find("<date>") else {
+        return Ok(None);
+    };
+    let Some(date_end) = after[date_start..].find("</date>") else {
+        return Ok(None);
+    };
+    let date = &after[date_start + 6..date_start + date_end];
+    // ISO 8601 UTC strings order chronologically, so a lexical compare of the
+    // YYYY-MM-DD prefix against today decides expiration.
+    let day = date.get(0..10).unwrap_or(date);
+    Ok(Some((day < today_iso().as_str(), date.to_string())))
+}
+
+/// Verify a JKS keystore's store password and alias with `keytool`. Ok(true)
+/// when the alias opens, Ok(false) when it does not, Err when keytool is not
+/// available (so the caller can report the material as unverified).
+fn verify_jks_with_keytool(keystore: &Path, store_password: &str, alias: &str) -> Result<bool, ()> {
+    let status = Command::new("keytool")
+        .arg("-list")
+        .arg("-keystore")
+        .arg(keystore)
+        .arg("-storepass")
+        .arg(store_password)
+        .arg("-alias")
+        .arg(alias)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) => Ok(status.success()),
+        Err(_) => Err(()),
+    }
+}
+
+fn verify_apple(
+    root: &Path,
+    registry: &Value,
+    secrets: &SigningSecrets,
+    platform: &str,
+    checks: &mut Vec<KeyCheck>,
+) {
+    let cert_file = registered_file(root, registry, platform, "p12");
+    let password = secrets.get(platform, "p12");
+    let mut check = KeyCheck {
+        role: "certificate".to_string(),
+        file: cert_file.as_deref().and_then(file_name_of),
+        present: false,
+        ok: false,
+        unverified: false,
+        detail: String::new(),
+    };
+    match (cert_file, password) {
+        (None, _) => check.detail = "no signing certificate registered".to_string(),
+        (Some(_), None) => check.detail = "certificate password not set".to_string(),
+        (Some(path), Some(password)) => {
+            check.present = true;
+            match std::fs::read(&path) {
+                Err(e) => check.detail = format!("cannot read certificate: {e}"),
+                Ok(bytes) => match open_pkcs12(&bytes, &password) {
+                    Err(message) => check.detail = message,
+                    Ok(cert) => {
+                        let cn = cert.subject_common_name().unwrap_or_default();
+                        let team = cert
+                            .apple_team_id()
+                            .map(|t| format!(" [team {t}]"))
+                            .unwrap_or_default();
+                        match cert_validity(&cert).and_then(|valid| {
+                            apple_profile_ok(&cert, platform).map(|profile| (valid, profile))
+                        }) {
+                            Err(message) => check.detail = format!("{cn}: {message}"),
+                            Ok((valid, profile)) => {
+                                check.ok = true;
+                                check.detail = format!("{cn}{team} - {profile}, {valid}");
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+    checks.push(check);
+
+    if platform == "ios" {
+        let profile_file = registered_file(root, registry, "ios", "profile");
+        let mut check = KeyCheck {
+            role: "provisioning profile".to_string(),
+            file: profile_file.as_deref().and_then(file_name_of),
+            present: profile_file.is_some(),
+            ok: false,
+            unverified: false,
+            detail: String::new(),
+        };
+        match profile_file {
+            None => check.detail = "no provisioning profile registered".to_string(),
+            Some(path) => match profile_expiration(&path) {
+                Err(message) => check.detail = message,
+                Ok(None) => {
+                    check.ok = true;
+                    check.detail = "profile parsed".to_string();
+                }
+                Ok(Some((expired, when))) => {
+                    if expired {
+                        check.detail = format!("profile expired on {when}");
+                    } else {
+                        check.ok = true;
+                        check.detail = format!("valid until {when}");
+                    }
+                }
+            },
+        }
+        checks.push(check);
+    }
+}
+
+fn verify_windows(
+    root: &Path,
+    registry: &Value,
+    secrets: &SigningSecrets,
+    checks: &mut Vec<KeyCheck>,
+) {
+    let cert_file = registered_file(root, registry, "windows", "pfx");
+    let password = secrets.get("windows", "pfx");
+    let mut check = KeyCheck {
+        role: "certificate".to_string(),
+        file: cert_file.as_deref().and_then(file_name_of),
+        present: false,
+        ok: false,
+        unverified: false,
+        detail: String::new(),
+    };
+    match (cert_file, password) {
+        (None, _) => check.detail = "no signing certificate registered".to_string(),
+        (Some(_), None) => check.detail = "certificate password not set".to_string(),
+        (Some(path), Some(password)) => {
+            check.present = true;
+            match std::fs::read(&path) {
+                Err(e) => check.detail = format!("cannot read certificate: {e}"),
+                Ok(bytes) => match open_pkcs12(&bytes, &password) {
+                    Err(message) => check.detail = message,
+                    Ok(cert) => {
+                        let cn = cert.subject_common_name().unwrap_or_default();
+                        match cert_validity(&cert) {
+                            Err(message) => check.detail = format!("{cn}: {message}"),
+                            Ok(valid) => {
+                                let purposes = cert.apple_extended_key_usage_purposes();
+                                let has_code_signing = purposes.iter().any(|p| {
+                                    matches!(p, apple_codesign::ExtendedKeyUsagePurpose::CodeSigning)
+                                });
+                                if has_code_signing {
+                                    check.ok = true;
+                                    check.detail = format!("{cn} - code-signing certificate, {valid}");
+                                } else if purposes.is_empty() {
+                                    check.ok = true;
+                                    check.unverified = true;
+                                    check.detail =
+                                        format!("{cn} - {valid} (key usage could not be determined)");
+                                } else {
+                                    check.detail = format!(
+                                        "{cn}: not a code-signing certificate (no Code Signing extended key usage)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+    checks.push(check);
+}
+
+fn verify_android(
+    root: &Path,
+    registry: &Value,
+    secrets: &SigningSecrets,
+    checks: &mut Vec<KeyCheck>,
+) {
+    let keystore = registered_file(root, registry, "android", "keystore");
+    let alias = platform_entry(registry, "android")
+        .and_then(|e| e.get("alias"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("upload")
+        .to_string();
+    let store_password = secrets.get("android", "store");
+    let mut check = KeyCheck {
+        role: "keystore".to_string(),
+        file: keystore.as_deref().and_then(file_name_of),
+        present: false,
+        ok: false,
+        unverified: false,
+        detail: String::new(),
+    };
+    match (keystore, store_password) {
+        (None, _) => check.detail = "no keystore registered".to_string(),
+        (Some(_), None) => check.detail = "keystore password not set".to_string(),
+        (Some(path), Some(store_password)) => {
+            check.present = true;
+            match std::fs::read(&path) {
+                Err(e) => check.detail = format!("cannot read keystore: {e}"),
+                Ok(bytes) if bytes.first() == Some(&0x30) => {
+                    // PKCS#12 keystore.
+                    match open_pkcs12(&bytes, &store_password) {
+                        Err(message) => check.detail = format!("keystore: {message}"),
+                        Ok(cert) => {
+                            let cn = cert.subject_common_name().unwrap_or_default();
+                            match cert_validity(&cert) {
+                                Err(message) => check.detail = format!("{cn}: {message}"),
+                                Ok(valid) => {
+                                    check.ok = true;
+                                    check.detail = format!("PKCS#12 keystore - {cn}, {valid}");
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(bytes) if bytes.len() >= 4 && bytes[0..4] == [0xFE, 0xED, 0xFE, 0xED] => {
+                    // JKS keystore: verify with keytool when a JDK is present.
+                    match verify_jks_with_keytool(&path, &store_password, &alias) {
+                        Ok(true) => {
+                            check.ok = true;
+                            check.detail =
+                                format!("JKS keystore - alias '{alias}' opens with the password");
+                        }
+                        Ok(false) => {
+                            check.detail =
+                                format!("alias '{alias}' not found or the store password is wrong");
+                        }
+                        Err(()) => {
+                            check.ok = true;
+                            check.unverified = true;
+                            check.detail = format!(
+                                "JKS keystore present; install a JDK (keytool) to verify alias '{alias}'"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    check.detail = "unrecognized keystore format (expected JKS or PKCS#12)".to_string()
+                }
+            }
+        }
+    }
+    checks.push(check);
+}
+
+/// Verify all registered signing material for a platform.
+pub fn verify_platform(
+    project_root: &Path,
+    secrets: &SigningSecrets,
+    platform: &str,
+) -> PlatformReport {
+    let registry = load_registry(project_root).unwrap_or_else(|_| Value::Object(Default::default()));
+    let mut checks = Vec::new();
+    match platform {
+        "macos" | "ios" => verify_apple(project_root, &registry, secrets, platform, &mut checks),
+        "windows" => verify_windows(project_root, &registry, secrets, &mut checks),
+        "android" => verify_android(project_root, &registry, secrets, &mut checks),
+        _ => {}
+    }
+
+    let state = if checks.is_empty() || checks.iter().any(|c| !c.present) {
+        "missing"
+    } else if checks.iter().any(|c| !c.ok) {
+        "invalid"
+    } else if checks.iter().any(|c| c.unverified) {
+        "unverified"
+    } else {
+        "valid"
+    };
+    PlatformReport {
+        platform: platform.to_string(),
+        state: state.to_string(),
+        checks,
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -13,3 +13,4 @@ export storage;
 export keychain;
 export menu;
 export bridge;
+export dialog;
