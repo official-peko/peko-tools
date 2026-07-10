@@ -7,7 +7,7 @@
 //! for local testing of resolution without the standard library, and is removed
 //! once resolution is validated.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -284,7 +284,7 @@ fn print_config(loaded: &LoadedManifest) {
 /// diagnostics and returning whether it resolved without errors.
 fn simulate_source(
     project_root: &Path,
-    modules: &HashMap<String, ExternalModuleInfo>,
+    modules: &IndexMap<String, ExternalModuleInfo>,
     label: &str,
     source: &str,
 ) -> bool {

@@ -116,7 +116,7 @@ pub struct PekoSimulatorContext {
 
     /// All modules discoverable in the Peko packages directory, keyed by
     /// module name.
-    pub external_modules: HashMap<String, ExternalModuleInfo>,
+    pub external_modules: IndexMap<String, ExternalModuleInfo>,
 
     /// Module-resolution state: active module stack and top-level module
     /// registry.
@@ -320,7 +320,7 @@ impl PekoSimulatorContext {
             minified_import_errors: false,
             declaring_signatures_only: false,
             diagnostics: diagnostics::DiagnosticList::new(),
-            external_modules: HashMap::new(),
+            external_modules: IndexMap::new(),
             target,
             files_to_link: Vec::new(),
             module_context: ExecutionModuleContext::new(main_module, extern_module),
@@ -1774,7 +1774,7 @@ impl
         &mut self.module_context
     }
 
-    fn get_external_modules(&self) -> &HashMap<String, ExternalModuleInfo> {
+    fn get_external_modules(&self) -> &IndexMap<String, ExternalModuleInfo> {
         &self.external_modules
     }
 

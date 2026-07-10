@@ -17,7 +17,6 @@
 //! caller's responsibility: each function here represents a single unit of
 //! work, so the caller installs a phase + ticks once per call.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -134,8 +133,8 @@ pub(super) fn parse_peko_source(file: PathBuf, source: String) -> (Vec<PekoAST>,
 pub(crate) fn external_modules_for<P: AsRef<Path>>(
     peko_root: &Path,
     compilation_root: Option<P>,
-) -> HashMap<String, ExternalModuleInfo> {
-    let mut modules = HashMap::new();
+) -> IndexMap<String, ExternalModuleInfo> {
+    let mut modules = IndexMap::new();
 
     // Resolve the auto-imported `std` package from the installed registry cache
     // under the Peko root, rather than requiring it in every project lockfile.
@@ -438,7 +437,7 @@ pub fn simulate_snippet_with_std(source: &str) -> DiagnosticList {
     let work_dir = std::env::temp_dir();
 
     // Load the std package and register it as an external module.
-    let mut external_modules = HashMap::new();
+    let mut external_modules = IndexMap::new();
     match peko_core::config::Manifest::load("std/peko.toml") {
         Ok(loaded) => {
             let info = loaded.manifest.to_external_module(&loaded.root);

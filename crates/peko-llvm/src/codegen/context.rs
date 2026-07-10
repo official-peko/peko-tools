@@ -6,6 +6,7 @@
 //! [`crate::codegen::builders`]. See [`crate::codegen::builders`] for
 //! the layer table and per-trait documentation.
 
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -99,7 +100,7 @@ pub struct PekoCodegenContext {
     pub diagnostics: peko_core::diagnostics::DiagnosticList,
     pub errored: bool,
 
-    pub external_modules: HashMap<String, ExternalModuleInfo>,
+    pub external_modules: IndexMap<String, ExternalModuleInfo>,
     pub module_context: ExecutionModuleContext<CodegenModule>,
     pub outside_primary_module: bool,
     pub outside_declarations_only: bool,
@@ -251,7 +252,7 @@ impl PekoCodegenContext {
             diagnostics: peko_core::diagnostics::DiagnosticList::new(),
             errored: false,
 
-            external_modules: HashMap::new(),
+            external_modules: IndexMap::new(),
             outside_declarations_only,
             outside_primary_module: false,
             target,
@@ -579,7 +580,7 @@ impl
         &mut self.current_this
     }
 
-    fn get_external_modules(&self) -> &HashMap<String, ExternalModuleInfo> {
+    fn get_external_modules(&self) -> &IndexMap<String, ExternalModuleInfo> {
         &self.external_modules
     }
 

@@ -322,7 +322,7 @@ pub trait ExecutionContextAlgorithms<
 
     /// The package registry: every module discoverable in the local and
     /// global Peko packages directories, keyed by module name.
-    fn get_external_modules(&self) -> &HashMap<String, ExternalModuleInfo>;
+    fn get_external_modules(&self) -> &IndexMap<String, ExternalModuleInfo>;
 
     /// The root folder that `project::` paths resolve against and that
     /// canonical module ids are rooted at.

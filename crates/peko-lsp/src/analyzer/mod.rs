@@ -21,6 +21,7 @@ use std::{
 
 use document::PekoDocument;
 use helpers::create_position;
+use indexmap::IndexMap;
 use peko_core::{
     ExternalModuleInfo,
     asts::PekoAST,
@@ -319,8 +320,8 @@ impl PekoAnalyzer {
     /// Imports resolve against the versions pinned in the project's
     /// `peko.lock`. A project without a discovered root or lockfile resolves
     /// against nothing.
-    fn external_modules(&self) -> HashMap<String, ExternalModuleInfo> {
-        let mut modules = HashMap::new();
+    fn external_modules(&self) -> IndexMap<String, ExternalModuleInfo> {
+        let mut modules = IndexMap::new();
 
         // The auto-imported `std` package, resolved from the installed registry
         // cache under the Peko root. Mirrors the compiler's

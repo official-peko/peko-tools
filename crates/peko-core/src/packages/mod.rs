@@ -9,7 +9,7 @@
 //! resolves imports against. A package's submodules and entry resolve within
 //! the source directory named by `[lib].root` in its manifest.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{LockSource, Lockfile, MANIFEST_FILE, Manifest};
@@ -40,7 +40,7 @@ pub fn registry_source_dir(peko_root: &Path, name: &str, version: &str) -> PathB
 /// queried by the simulator when resolving `import` statements.
 #[derive(Clone, Debug, Default)]
 pub struct PekoPackageIndex {
-    modules: HashMap<String, ExternalModuleInfo>,
+    modules: IndexMap<String, ExternalModuleInfo>,
 }
 
 impl PekoPackageIndex {
@@ -58,7 +58,7 @@ impl PekoPackageIndex {
         global_peko_root: impl AsRef<Path>,
         local_peko_root: Option<impl AsRef<Path>>,
     ) -> PekoResult<Self> {
-        let mut modules = HashMap::new();
+        let mut modules = IndexMap::new();
         scan_source_root(
             &registry_source_root(global_peko_root.as_ref()),
             &mut modules,
@@ -80,7 +80,7 @@ impl PekoPackageIndex {
         project_root: &Path,
         lockfile: &Lockfile,
     ) -> PekoPackageIndex {
-        let mut modules = HashMap::new();
+        let mut modules = IndexMap::new();
         for package in &lockfile.packages {
             let version_dir = match package.source {
                 LockSource::Registry => {
@@ -99,7 +99,7 @@ impl PekoPackageIndex {
     }
 
     /// A flat name to info map of every discoverable external module.
-    pub fn get_external_modules(&self) -> HashMap<String, ExternalModuleInfo> {
+    pub fn get_external_modules(&self) -> IndexMap<String, ExternalModuleInfo> {
         self.modules.clone()
     }
 }
@@ -109,7 +109,7 @@ impl PekoPackageIndex {
 /// Entries scanned from a later root overwrite earlier ones, so a local install
 /// shadows a global one. Unreadable directories and packages that carry no
 /// parseable version are skipped.
-fn scan_source_root(src_root: &Path, modules: &mut HashMap<String, ExternalModuleInfo>) {
+fn scan_source_root(src_root: &Path, modules: &mut IndexMap<String, ExternalModuleInfo>) {
     let Ok(entries) = std::fs::read_dir(src_root) else {
         return;
     };
