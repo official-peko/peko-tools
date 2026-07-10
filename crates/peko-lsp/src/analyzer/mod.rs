@@ -184,21 +184,21 @@ fn is_method_decl_position(line_prefix: &str) -> bool {
 }
 
 impl PekoAnalyzer {
-    /// Construct a new analyzer. Returns `None` if the `PEKO_ROOT_PATH`
-    /// environment variable is unset or does not point at an existing
-    /// directory; the LSP cannot function without the standard library, so
-    /// callers should treat this as a fatal startup error.
+    /// Construct a new analyzer. Resolves the Peko root from `PEKO_ROOT_PATH`,
+    /// falling back to `~/.Peko` (as the CLI does) when the variable is unset,
+    /// so an editor that launches `peko lsp` without injecting the variable
+    /// still finds the standard library. Returns `None` only when no root can
+    /// be resolved or the resolved root is not a directory; the LSP cannot
+    /// function without the standard library, so callers should treat that as a
+    /// fatal startup error.
     pub fn new() -> Option<Self> {
         let peko_root = match std::env::var("PEKO_ROOT_PATH") {
-            Ok(path) => {
-                let path = PathBuf::from(path);
-                if !path.exists() || !path.is_dir() {
-                    return None;
-                }
-                path
-            }
-            Err(_) => return None,
+            Ok(path) => PathBuf::from(path),
+            Err(_) => dirs::home_dir().map(|home| home.join(".Peko"))?,
         };
+        if !peko_root.exists() || !peko_root.is_dir() {
+            return None;
+        }
 
         let mut analyzer = Self {
             preloaded_modules: HashMap::new(),
@@ -334,6 +334,19 @@ impl PekoAnalyzer {
         if let Ok(loaded) = peko_core::config::Manifest::load(&installed_std) {
             let info = loaded.manifest.to_external_module(&loaded.root);
             modules.insert(info.module_name.clone(), info);
+        }
+
+        // Packages installed with `peko add --global` (pekoui, and std once it is
+        // locked normally) live in the shared global manifest under the Peko
+        // root and are importable from every project. Mirrors the compiler's
+        // `external_modules_for`. Without this pass the editor reports spurious
+        // "no module named `pekoui`" that the build never sees.
+        let global_root = self.peko_root.join("global");
+        if let Ok(Some(lockfile)) = Lockfile::load_from_root(&global_root) {
+            modules.extend(
+                PekoPackageIndex::from_lockfile(&self.peko_root, &global_root, &lockfile)
+                    .get_external_modules(),
+            );
         }
 
         if let Some(project_root) = self.project_root.as_ref() {
