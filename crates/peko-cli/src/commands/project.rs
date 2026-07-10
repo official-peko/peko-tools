@@ -425,7 +425,7 @@ fn overlay_peko_host(
         .replace("{name}", project_name)
         .replace("{bundle}", bundle_id)
         .replace("{version}", version)
-        .replace("{pekoui_path}", &pekoui_path.display().to_string());
+        .replace("{pekoui_path}", &config_path_string(&pekoui_path));
 
     if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
         reporter.error(format!("could not create source directory: {e}"));
@@ -594,7 +594,7 @@ fn add_client_dependency(project_root: &Path, pekoui_path: &Path) -> std::io::Re
     let mut package: serde_json::Value = serde_json::from_str(&source)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let dependency = format!("file:{}", pekoui_path.join("client").display());
+    let dependency = format!("file:{}", config_path_string(&pekoui_path.join("client")));
     let object = package
         .as_object_mut()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "package.json is not an object"))?;
@@ -689,16 +689,24 @@ fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_y
     }
 }
 
+/// Render a filesystem path for a manifest or config file using forward
+/// slashes. A path built by joining a forward-slash literal onto a Windows base
+/// otherwise mixes separators (`C:\Users\me\.Peko\registry/src/...`). Backslashes
+/// are also escape characters in a TOML double-quoted string, so a raw Windows
+/// path is fragile there. Forward slashes avoid both problems and are accepted
+/// on every platform when the path is read back.
+fn config_path_string(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 /// Expand a leading `~` (or `~/...`, `~\...`) in a directory argument to the
 /// user's home directory. A `~` a UI passes through unexpanded then resolves to
 /// the home directory instead of a literal `~` path that does not exist.
 fn expand_home(dir: &str) -> PathBuf {
     let rest = if dir == "~" {
         Some("")
-    } else if let Some(rest) = dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\")) {
-        Some(rest)
     } else {
-        None
+        dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\"))
     };
     match rest {
         Some(rest) => match dirs::home_dir() {

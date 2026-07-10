@@ -604,7 +604,11 @@ impl Manifest {
             }
             DependencySpec::Path(dir) => {
                 let mut entry = toml_edit::InlineTable::new();
-                entry.insert("path", dir.clone().into());
+                // Store the path with forward slashes. A backslash is an escape
+                // character in a TOML string, so a raw Windows path is fragile,
+                // and joining a forward-slash literal onto a Windows base mixes
+                // separators. Forward slashes parse on every platform.
+                entry.insert("path", dir.replace('\\', "/").into());
                 dependencies[name] = toml_edit::value(entry);
             }
         }
