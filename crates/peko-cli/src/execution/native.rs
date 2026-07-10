@@ -60,6 +60,7 @@ pub(crate) fn compile_native_sources(
             continue;
         };
         let package_name = loaded.manifest.name().to_owned();
+        let package_version = loaded.manifest.version().to_string();
         let package_root = loaded.root;
 
         // Include directories: the global FFI header directory
@@ -78,7 +79,8 @@ pub(crate) fn compile_native_sources(
 
         for source in &native.sources {
             let source_file = package_root.join(source);
-            let object_file = native_directory.join(object_name(&package_name, source));
+            let object_file =
+                native_directory.join(object_name(&package_name, &package_version, source));
 
             if is_up_to_date(&object_file, &source_file) {
                 objects.push(object_file);
@@ -179,6 +181,7 @@ pub(crate) fn collect_android_dex_files(peko_root: &Path, project_root: &Path) -
 fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
+    let mut std_resolved = false;
 
     let add = |root: PathBuf, roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>| {
         let key = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -189,12 +192,36 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
 
     add(project_root.to_path_buf(), &mut roots, &mut seen);
 
-    // Resolve `std` from the installed registry cache under the Peko root, so
-    // its native C sources compile even when the package is not in the
-    // project's lockfile (std is auto-imported). Mirrors `external_modules_for`.
-    let installed_std = registry_source_dir(peko_root, "std", "0.1.0");
-    if installed_std.join("peko.toml").is_file() {
-        add(installed_std, &mut roots, &mut seen);
+    // Packages installed with `peko add --global` (std and pekoui, for example)
+    // are importable from every project. Resolve them from the shared global
+    // lockfile so their native C compiles from the locked version. Mirrors
+    // `external_modules_for`.
+    let global_root = peko_root.join("global");
+    if let Ok(Some(lockfile)) = Lockfile::load_from_root(&global_root) {
+        for package in &lockfile.packages {
+            let root = match package.source {
+                LockSource::Registry => {
+                    registry_source_dir(peko_root, &package.name, &package.version)
+                }
+                LockSource::Path => match &package.path {
+                    Some(path) => global_root.join(path),
+                    None => continue,
+                },
+            };
+            if package.name == "std" {
+                std_resolved = true;
+            }
+            add(root, &mut roots, &mut seen);
+        }
+    }
+
+    // std is auto-imported and its runtime and GC C must always compile, even
+    // when no global lockfile pins it. Fall back to the installed 0.1.0 source.
+    if !std_resolved {
+        let installed_std = registry_source_dir(peko_root, "std", "0.1.0");
+        if installed_std.join("peko.toml").is_file() {
+            add(installed_std, &mut roots, &mut seen);
+        }
     }
 
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {
@@ -216,11 +243,14 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
 }
 
 /// A filesystem-safe, package-scoped object name for a native source. Two
-/// packages may ship a `alloc.c`, so the package name leads and the source's
-/// relative path is flattened into the stem.
-fn object_name(package_name: &str, source: &Path) -> String {
+/// packages may ship a `alloc.c`, so the package name and version lead and the
+/// source's relative path is flattened into the stem. The version keeps two
+/// installed versions of one package from aliasing to the same object, so a
+/// version switch recompiles instead of reusing the prior version's object.
+fn object_name(package_name: &str, package_version: &str, source: &Path) -> String {
+    let version = package_version.replace(['/', '\\', '.', ' '], "_");
     let flattened = source.to_string_lossy().replace(['/', '\\', '.', ' '], "_");
-    format!("{package_name}__{flattened}.o")
+    format!("{package_name}-{version}__{flattened}.o")
 }
 
 /// Whether `object_file` exists and is at least as new as `source_file`.
