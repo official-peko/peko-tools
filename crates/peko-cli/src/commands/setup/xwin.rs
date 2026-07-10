@@ -74,7 +74,7 @@ pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
 
     let cache = layout.root().join(".xwin-cache");
     let ctx = xwin::Ctx::with_dir(utf8(&cache)?, ProgressTarget::Hidden, client, 5)
-        .map_err(|e| SetupError::Process(format!("xwin context: {e}")))?;
+        .map_err(|e| SetupError::Process(format!("xwin context: {e:#}")))?;
     let ctx = Arc::new(ctx);
 
     let manifest = xwin::manifest::get_manifest(
@@ -83,13 +83,13 @@ pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
         VS_CHANNEL,
         indicatif::ProgressBar::hidden(),
     )
-    .map_err(|e| SetupError::Process(format!("xwin manifest: {e}")))?;
+    .map_err(|e| SetupError::Process(format!("xwin manifest: {e:#}")))?;
     let pkg_manifest =
         xwin::manifest::get_package_manifest(&ctx, &manifest, indicatif::ProgressBar::hidden())
-            .map_err(|e| SetupError::Process(format!("xwin package manifest: {e}")))?;
+            .map_err(|e| SetupError::Process(format!("xwin package manifest: {e:#}")))?;
 
     let pruned = xwin::prune_pkg_list(&pkg_manifest, arches, variants, false, false, None, None)
-        .map_err(|e| SetupError::Process(format!("xwin prune: {e}")))?;
+        .map_err(|e| SetupError::Process(format!("xwin prune: {e:#}")))?;
 
     let work_items: Vec<WorkItem> = pruned
         .payloads
@@ -127,7 +127,7 @@ pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
         variants,
         Ops::Splat(splat_config),
     )
-    .map_err(|e| SetupError::Process(format!("xwin splat: {e}")))?;
+    .map_err(|e| SetupError::Process(format!("xwin splat: {e:#}")))?;
 
     let _ = std::fs::remove_dir_all(&cache);
     Ok(())
