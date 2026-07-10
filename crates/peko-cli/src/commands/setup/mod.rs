@@ -233,22 +233,27 @@ async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> Result<String> {
             // Microsoft manifest host being unreachable) must not abort the rest
             // of the install, so it warns and continues instead of propagating.
             reporter.status("Toolchains", "splatting the Windows SDK and CRT via xwin");
-            match xwin::splat(&layout, reporter) {
-                Ok(()) => {
-                    reporter.status("Toolchains", "installing the WebView2 SDK headers");
-                    if let Err(e) = xwin::install_webview2(&github, &layout, reporter).await {
-                        reporter.warning(format!("skipped the WebView2 SDK headers: {e}"));
-                    }
-                }
-                Err(e) => {
-                    reporter.warning(format!(
-                        "skipped the Windows toolchain: {e}. Re-run with --windows \
-                         --accept-microsoft-license to retry it"
-                    ));
-                }
+            if let Err(e) = xwin::splat(&layout, reporter) {
+                reporter.warning(format!(
+                    "skipped the Windows toolchain: {e}. Re-run with --windows \
+                     --accept-microsoft-license to retry it"
+                ));
             }
         } else {
-            reporter.info("Windows toolchain already present");
+            reporter.info("Windows SDK and CRT already present");
+        }
+
+        // The WebView2 headers come from a separate NuGet package, so they are
+        // installed apart from the SDK splat. This runs even when the SDK is
+        // already present, so a prior install that stopped before WebView2 is
+        // completed on the next run.
+        if force || !xwin::webview2_present(&layout) {
+            reporter.status("Toolchains", "installing the WebView2 SDK headers");
+            if let Err(e) = xwin::install_webview2(&github, &layout, reporter).await {
+                reporter.warning(format!("skipped the WebView2 SDK headers: {e}"));
+            }
+        } else {
+            reporter.info("WebView2 SDK headers already present");
         }
     }
     // Record the windows toolchain from what is on disk, so a later run without

@@ -34,6 +34,16 @@ pub fn is_present(layout: &Layout) -> bool {
         .is_dir()
 }
 
+/// Whether the WebView2 SDK headers are already installed at `layout`. The SDK
+/// splat and the WebView2 NuGet package are separate downloads, so this is
+/// checked apart from `is_present`.
+pub fn webview2_present(layout: &Layout) -> bool {
+    layout
+        .toolchain_dir("windows")
+        .join("webview2/build/native/include/WebView2.h")
+        .is_file()
+}
+
 /// Convert a std path to the utf-8 path xwin uses. Install paths live under the
 /// Peko root, which is utf-8 in every supported layout.
 fn utf8(path: &std::path::Path) -> Result<xwin::PathBuf> {
