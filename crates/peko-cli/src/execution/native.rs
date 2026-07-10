@@ -242,34 +242,25 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
     roots
 }
 
-/// The clang binary used to compile native C sources. The host clang bundled
-/// under the Peko root is preferred so a build does not depend on a system
-/// clang being on PATH (a standard Windows install has none). The bundled clang
-/// is only used when its resource directory (its builtin headers such as
-/// stddef.h) ships alongside it under `Compiler/bin/lib/clang`; without those a
-/// bundled clang cannot compile, so `clang` on PATH is used instead.
+/// The clang binary used to compile native C sources.
+///
+/// On Windows a standard install has no system clang on PATH, so the bundled
+/// `clang.exe` is used together with its resource directory (its builtin
+/// headers such as stddef.h) shipped alongside it under `Compiler/bin/lib/clang`.
+/// On macOS and Linux the system clang on PATH compiles the native C. The
+/// bundled cross clang is not used there: it targets Windows from the host and
+/// produces an executable the Windows loader rejects, whereas the system clang
+/// cross-compiles correctly.
 fn host_clang(peko_root: &Path) -> PathBuf {
-    let name = if cfg!(target_os = "windows") {
-        "clang.exe"
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            "clang-darwin-arm"
-        } else {
-            "clang-darwin-x86_64"
+    if cfg!(target_os = "windows") {
+        let clang_bin = peko_root.join("Compiler").join("bin");
+        let bundled = clang_bin.join("clang").join("clang.exe");
+        let resource_dir = clang_bin.join("lib").join("clang");
+        if bundled.is_file() && resource_dir.is_dir() {
+            return bundled;
         }
-    } else if cfg!(target_arch = "aarch64") {
-        "clang-linux-arm"
-    } else {
-        "clang-linux-x86_64"
-    };
-    let clang_bin = peko_root.join("Compiler").join("bin");
-    let bundled = clang_bin.join("clang").join(name);
-    let resource_dir = clang_bin.join("lib").join("clang");
-    if bundled.is_file() && resource_dir.is_dir() {
-        bundled
-    } else {
-        PathBuf::from("clang")
     }
+    PathBuf::from("clang")
 }
 
 /// A filesystem-safe, package-scoped object name for a native source. Two
