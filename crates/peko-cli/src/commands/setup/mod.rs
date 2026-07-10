@@ -229,10 +229,24 @@ async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> Result<String> {
             )));
         }
         if force || !xwin::is_present(&layout) {
+            // The Windows toolchain is optional. A failure here (for example the
+            // Microsoft manifest host being unreachable) must not abort the rest
+            // of the install, so it warns and continues instead of propagating.
             reporter.status("Toolchains", "splatting the Windows SDK and CRT via xwin");
-            xwin::splat(&layout, reporter)?;
-            reporter.status("Toolchains", "installing the WebView2 SDK headers");
-            xwin::install_webview2(&github, &layout, reporter).await?;
+            match xwin::splat(&layout, reporter) {
+                Ok(()) => {
+                    reporter.status("Toolchains", "installing the WebView2 SDK headers");
+                    if let Err(e) = xwin::install_webview2(&github, &layout, reporter).await {
+                        reporter.warning(format!("skipped the WebView2 SDK headers: {e}"));
+                    }
+                }
+                Err(e) => {
+                    reporter.warning(format!(
+                        "skipped the Windows toolchain: {e}. Re-run with --windows \
+                         --accept-microsoft-license to retry it"
+                    ));
+                }
+            }
         } else {
             reporter.info("Windows toolchain already present");
         }
