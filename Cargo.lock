@@ -5026,6 +5026,7 @@ dependencies = [
  "tokio-tungstenite",
  "walkdir",
  "windows-native-keyring-store",
+ "windows-sys 0.59.0",
  "x509-certificate",
  "xwin",
  "zip 2.4.2",

@@ -111,12 +111,31 @@ pub fn execute_with_devtools(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCod
     result
 }
 
-/// Reset the controlling terminal to a sane cooked mode. A no-op where `stty`
-/// is unavailable or stdin is not a terminal.
+/// Reset the controlling terminal to a sane cooked mode. A no-op where stdin is
+/// not a terminal.
 fn restore_terminal() {
     #[cfg(unix)]
     {
         let _ = Command::new("stty").arg("sane").status();
+    }
+    #[cfg(windows)]
+    {
+        // The Windows equivalent of `stty sane`: restore the console input mode
+        // to the cooked defaults (line editing and echo) a child may have
+        // cleared.
+        use windows_sys::Win32::System::Console::{
+            ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetStdHandle,
+            STD_INPUT_HANDLE, SetConsoleMode,
+        };
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            if !handle.is_null() {
+                SetConsoleMode(
+                    handle,
+                    ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT,
+                );
+            }
+        }
     }
 }
 
@@ -995,6 +1014,16 @@ fn stop_dev_server(child: &mut Child) {
         let _ = Command::new("kill")
             .arg("-TERM")
             .arg(format!("-{pid}"))
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no POSIX process groups. taskkill with /T ends the server
+        // and every process it spawned (for example Vite) as a tree, so the
+        // bundler does not outlive it.
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID"])
+            .arg(child.id().to_string())
             .status();
     }
     let _ = child.kill();
