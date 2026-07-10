@@ -14,7 +14,7 @@ use crate::registry::install;
 
 /// Execute the `add` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
-    let Some(name) = cli_info.arguments.get(1) else {
+    let Some(raw_name) = cli_info.arguments.get(1) else {
         reporter.error("`add` requires a package name");
         reporter.help(format!(
             "run '{} help add' to see how this command works",
@@ -23,7 +23,15 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let spec = match dependency_spec(cli_info, reporter) {
+    // Support the `name@version` form (for example `peko add std@0.1.1`). Without
+    // this the whole `name@version` string is treated as the package name and
+    // never resolves.
+    let (name, inline_version) = match raw_name.split_once('@') {
+        Some((n, v)) if !n.is_empty() && !v.is_empty() => (n, Some(v)),
+        _ => (raw_name.as_str(), None),
+    };
+
+    let spec = match dependency_spec(cli_info, reporter, inline_version) {
         Ok(spec) => spec,
         Err(code) => return code,
     };
@@ -121,8 +129,14 @@ async fn add_global(
     }
 }
 
-/// Build the dependency spec from the `--path` / `--version` flags.
-fn dependency_spec(cli_info: &CLIInfo, reporter: &Reporter) -> Result<DependencySpec, ExitCode> {
+/// Build the dependency spec from the `--path` / `--version` flags, or an
+/// inline `name@version` requirement. Precedence: `--path`, then `--version`,
+/// then the inline version, then any version (`*`).
+fn dependency_spec(
+    cli_info: &CLIInfo,
+    reporter: &Reporter,
+    inline_version: Option<&str>,
+) -> Result<DependencySpec, ExitCode> {
     if cli_info.flags.has_flag("path") {
         return match cli_info.flags.get_flag("path") {
             Some(path) => Ok(DependencySpec::Path(path)),
@@ -141,6 +155,10 @@ fn dependency_spec(cli_info: &CLIInfo, reporter: &Reporter) -> Result<Dependency
                 Err(ExitCode::FAILURE)
             }
         };
+    }
+
+    if let Some(version) = inline_version {
+        return Ok(DependencySpec::Version(version.to_string()));
     }
 
     Ok(DependencySpec::Version(String::from("*")))
