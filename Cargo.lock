@@ -4832,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "peko-cli"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "app-store-connect",
  "apple-codesign",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "peko-core"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "derive-new",
  "indexmap",
@@ -4898,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "peko-llvm"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "cc",
  "derive-new",
@@ -4912,7 +4912,7 @@ dependencies = [
 
 [[package]]
 name = "peko-lsp"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "dashmap",
  "peko-core",
