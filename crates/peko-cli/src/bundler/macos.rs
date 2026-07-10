@@ -303,7 +303,7 @@ fn resolve_llvm_lipo(peko_root: &Path) -> PathBuf {
             "arm" | "aarch64" => "llvm-lipo-darwin-arm",
             _ => "llvm-lipo-darwin-x86_64",
         },
-        _ => "llvm-lipo-windows.exe",
+        _ => "llvm-lipo.exe",
     };
     let bundled = peko_root.join("Compiler/bin/llvm-lipo").join(host_binary);
     if bundled.exists() {

@@ -216,7 +216,7 @@ pub fn bundle(
         },
         _ => cli_info
             .get_peko_root()
-            .join("Compiler/bin/llvm-rc/llvm-rc-windows.exe"),
+            .join("Compiler/bin/llvm-rc/llvm-rc.exe"),
     };
 
     run_tool(
