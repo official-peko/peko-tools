@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use x509_certificate::CapturedX509Certificate;
 
-use crate::bundler::{BundleError, BundleResult, run_tool};
+use crate::bundler::{BundleError, BundleResult, java_tool, run_tool};
 
 /// Service name used for every keychain entry this module creates.
 const KEYCHAIN_SERVICE: &str = "dev.peko.signing";
@@ -514,8 +514,13 @@ fn profile_expiration(path: &Path) -> Result<Option<(bool, String)>, String> {
 /// Verify a JKS keystore's store password and alias with `keytool`. Ok(true)
 /// when the alias opens, Ok(false) when it does not, Err when keytool is not
 /// available (so the caller can report the material as unverified).
-fn verify_jks_with_keytool(keystore: &Path, store_password: &str, alias: &str) -> Result<bool, ()> {
-    let status = Command::new("keytool")
+fn verify_jks_with_keytool(
+    peko_root: &Path,
+    keystore: &Path,
+    store_password: &str,
+    alias: &str,
+) -> Result<bool, ()> {
+    let status = Command::new(java_tool(peko_root, "keytool"))
         .arg("-list")
         .arg("-keystore")
         .arg(keystore)
@@ -676,6 +681,7 @@ fn verify_windows(
 
 fn verify_android(
     root: &Path,
+    peko_root: &Path,
     registry: &Value,
     secrets: &SigningSecrets,
     checks: &mut Vec<KeyCheck>,
@@ -720,7 +726,7 @@ fn verify_android(
                 }
                 Ok(bytes) if bytes.len() >= 4 && bytes[0..4] == [0xFE, 0xED, 0xFE, 0xED] => {
                     // JKS keystore: verify with keytool when a JDK is present.
-                    match verify_jks_with_keytool(&path, &store_password, &alias) {
+                    match verify_jks_with_keytool(peko_root, &path, &store_password, &alias) {
                         Ok(true) => {
                             check.ok = true;
                             check.detail =
@@ -752,6 +758,7 @@ fn verify_android(
 /// Verify all registered signing material for a platform.
 pub fn verify_platform(
     project_root: &Path,
+    peko_root: &Path,
     secrets: &SigningSecrets,
     platform: &str,
 ) -> PlatformReport {
@@ -761,7 +768,7 @@ pub fn verify_platform(
     match platform {
         "macos" | "ios" => verify_apple(project_root, &registry, secrets, platform, &mut checks),
         "windows" => verify_windows(project_root, &registry, secrets, &mut checks),
-        "android" => verify_android(project_root, &registry, secrets, &mut checks),
+        "android" => verify_android(project_root, peko_root, &registry, secrets, &mut checks),
         _ => {}
     }
 

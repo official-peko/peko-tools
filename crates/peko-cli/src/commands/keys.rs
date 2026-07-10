@@ -538,7 +538,7 @@ fn verify(
     let reports: Vec<signing::PlatformReport> = platforms
         .iter()
         .filter(|p| matches!(p.as_str(), "android" | "ios" | "macos" | "windows"))
-        .map(|p| signing::verify_platform(root, &secrets, p))
+        .map(|p| signing::verify_platform(root, cli_info.get_peko_root(), &secrets, p))
         .collect();
 
     if cli_info.flags.has_flag("json") {
