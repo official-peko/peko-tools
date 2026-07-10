@@ -216,7 +216,7 @@ fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCo
     };
 
     let base_dir = match cli_info.flags.get_flag("dir") {
-        Some(dir) => PathBuf::from(dir),
+        Some(dir) => expand_home(&dir),
         None => match std::env::current_dir() {
             Ok(dir) => dir,
             Err(e) => {
@@ -686,6 +686,27 @@ fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_y
             "" => return default_yes,
             _ => println!(">> please type either yes or no"),
         }
+    }
+}
+
+/// Expand a leading `~` (or `~/...`, `~\...`) in a directory argument to the
+/// user's home directory. A `~` a UI passes through unexpanded then resolves to
+/// the home directory instead of a literal `~` path that does not exist.
+fn expand_home(dir: &str) -> PathBuf {
+    let rest = if dir == "~" {
+        Some("")
+    } else if let Some(rest) = dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\")) {
+        Some(rest)
+    } else {
+        None
+    };
+    match rest {
+        Some(rest) => match dirs::home_dir() {
+            Some(home) if rest.is_empty() => home,
+            Some(home) => home.join(rest),
+            None => PathBuf::from(dir),
+        },
+        None => PathBuf::from(dir),
     }
 }
 
