@@ -105,7 +105,12 @@ static int stream_raw_read(PekoStream *s, unsigned char *buf, int len)
     return (int)got;
 }
 
-/* Quote one argument for the Windows command-line parsing rules. */
+/* Quote one argument following the Windows CommandLineToArgvW rules. The
+   argument is wrapped in quotes only when it contains a space, a tab, or a
+   double quote, or is empty. Inside the quotes, a run of backslashes is doubled
+   only when it precedes a double quote or the closing quote, and a double quote
+   is escaped with a backslash. An argument without spaces is emitted verbatim,
+   so a plain path keeps its single backslashes. */
 static void append_quoted(char **cmd, size_t *len, size_t *cap, const char *arg)
 {
     size_t need = strlen(arg) * 2 + 4;
@@ -116,11 +121,42 @@ static void append_quoted(char **cmd, size_t *len, size_t *cap, const char *arg)
     char *p = *cmd + *len;
     if (*len)
         *p++ = ' ';
+
+    int needs_quote = (arg[0] == '\0');
+    for (const char *c = arg; *c && !needs_quote; c++)
+        if (*c == ' ' || *c == '\t' || *c == '"')
+            needs_quote = 1;
+
+    if (!needs_quote) {
+        for (const char *c = arg; *c; c++)
+            *p++ = *c;
+        *p = '\0';
+        *len = (size_t)(p - *cmd);
+        return;
+    }
+
     *p++ = '"';
-    for (const char *c = arg; *c; c++) {
-        if (*c == '"' || *c == '\\')
-            *p++ = '\\';
-        *p++ = *c;
+    for (const char *c = arg;;) {
+        size_t backslashes = 0;
+        while (*c == '\\') {
+            backslashes++;
+            c++;
+        }
+        if (*c == '\0') {
+            for (size_t i = 0; i < backslashes * 2; i++)
+                *p++ = '\\';
+            break;
+        } else if (*c == '"') {
+            for (size_t i = 0; i < backslashes * 2 + 1; i++)
+                *p++ = '\\';
+            *p++ = '"';
+            c++;
+        } else {
+            for (size_t i = 0; i < backslashes; i++)
+                *p++ = '\\';
+            *p++ = *c;
+            c++;
+        }
     }
     *p++ = '"';
     *p = '\0';
