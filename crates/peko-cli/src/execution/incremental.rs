@@ -56,12 +56,20 @@ use super::parse_peko_source;
 /// Separator placed between path components in the encoded file-id string.
 const FILEID_SEPARATOR: &str = "----";
 
+/// Encoding of a `:` in an encoded file id. A raw colon is the Windows drive
+/// separator, so an object path built by joining an id that still begins with
+/// `C:` is treated as drive-relative and lands outside the objects directory
+/// (in the process working directory). Encoding it keeps the id a plain
+/// relative component. The marker holds no path separators or dashes so it does
+/// not collide with [`FILEID_SEPARATOR`].
+const FILEID_COLON: &str = "__colon__";
+
 /// Encode a path as a stable, filesystem-safe string id.
 ///
 /// The path is canonicalized first, then every native path separator is
-/// replaced by [`FILEID_SEPARATOR`]. On Windows, the `\\?\` long-path
-/// prefix that canonicalization adds is stripped so the encoded id begins
-/// with the drive letter rather than a UNC prefix.
+/// replaced by [`FILEID_SEPARATOR`] and every `:` by [`FILEID_COLON`]. On
+/// Windows, the `\\?\` long-path prefix that canonicalization adds is stripped
+/// so the encoded id begins with the drive letter rather than a UNC prefix.
 fn pathbuf_to_fileid(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut string = canonical.display().to_string();
@@ -73,14 +81,20 @@ fn pathbuf_to_fileid(path: &Path) -> String {
         string = stripped.to_owned();
     }
 
-    string.replace(std::path::MAIN_SEPARATOR, FILEID_SEPARATOR)
+    string
+        .replace(std::path::MAIN_SEPARATOR, FILEID_SEPARATOR)
+        .replace(':', FILEID_COLON)
 }
 
 /// Inverse of [`pathbuf_to_fileid`]. Reconstructs an absolute path from an
-/// encoded file id by swapping every [`FILEID_SEPARATOR`] back to the
-/// native separator.
+/// encoded file id by swapping every [`FILEID_COLON`] back to a `:` and every
+/// [`FILEID_SEPARATOR`] back to the native separator.
 fn fileid_to_pathbuf(fileid: &str) -> PathBuf {
-    PathBuf::from(fileid.replace(FILEID_SEPARATOR, std::path::MAIN_SEPARATOR_STR))
+    PathBuf::from(
+        fileid
+            .replace(FILEID_COLON, ":")
+            .replace(FILEID_SEPARATOR, std::path::MAIN_SEPARATOR_STR),
+    )
 }
 
 /// Compute the md5 digest of `hashable`'s utf-8 bytes.
