@@ -299,7 +299,7 @@ fn finish_new_project(
         );
     }
 
-    if let Err(e) = std::fs::create_dir_all(project_root.join("source")) {
+    if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
         reporter.error(format!("could not create source directory: {e}"));
         return ExitCode::FAILURE;
     }
@@ -310,7 +310,7 @@ fn finish_new_project(
     let files: Vec<(PathBuf, Vec<u8>)> = vec![
         (project_root.join("peko.toml"), manifest.into_bytes()),
         (
-            project_root.join("source/main.peko"),
+            project_root.join("src/main.peko"),
             CLI_MAIN_PEKO_TEMPLATE.as_bytes().to_vec(),
         ),
     ];
@@ -427,14 +427,14 @@ fn overlay_peko_host(
         .replace("{version}", version)
         .replace("{pekoui_path}", &pekoui_path.display().to_string());
 
-    if let Err(e) = std::fs::create_dir_all(project_root.join("source")) {
+    if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
         reporter.error(format!("could not create source directory: {e}"));
         return false;
     }
     let overlay: Vec<(PathBuf, &[u8])> = vec![
         (project_root.join("peko.toml"), manifest.as_bytes()),
         (
-            project_root.join("source/main.peko"),
+            project_root.join("src/main.peko"),
             UI_MAIN_PEKO_TEMPLATE.as_bytes(),
         ),
     ];
@@ -694,6 +694,7 @@ const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     name = \"{name}\"\n\
                                     bundle = \"{bundle}\"\n\
                                     version = \"{version}\"\n\
+                                    entry = \"src/main.peko\"\n\
                                     target_platforms = [\"android\", \"ios\", \"linux\", \"macos\", \"windows\"]\n\
                                     \n\
                                     [ui]\n\
@@ -702,7 +703,7 @@ const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     [dependencies]\n\
                                     pekoui = { path = \"{pekoui_path}\" }\n";
 
-/// The `source/main.peko` scaffolded for a UI project: a one-line host that
+/// The `src/main.peko` scaffolded for a UI project: a one-line host that
 /// serves the built web app in a native webview.
 const UI_MAIN_PEKO_TEMPLATE: &str = "import pekoui as ui;\n\
                                      \n\
@@ -714,10 +715,11 @@ const UI_MAIN_PEKO_TEMPLATE: &str = "import pekoui as ui;\n\
 const CLI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                      name = \"{name}\"\n\
                                      version = \"{version}\"\n\
+                                     entry = \"src/main.peko\"\n\
                                      \n\
                                      [dependencies]\n";
 
-/// The `source/main.peko` scaffolded for a CLI project.
+/// The `src/main.peko` scaffolded for a CLI project.
 const CLI_MAIN_PEKO_TEMPLATE: &str = "import std::io;\n\
                                       \n\
                                       fn on_start() {\n\
