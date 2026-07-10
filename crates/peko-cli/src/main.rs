@@ -123,11 +123,14 @@ async fn main() -> ExitCode {
     //
     // Skip this check for `check` (which exists to report on it), `version`
     // (which never touches the root), and `setup` (which creates the root and
-    // must run before it exists).
+    // must run before it exists). PEKO_SKIP_ROOT_CHECKUP also skips it, so setup
+    // can invoke other subcommands (such as `add` for the global packages) while
+    // the root is still being built, before it has been certified.
     if !cli_info.perform_root_checkup()
         && subcommand_name != "check"
         && subcommand_name != "version"
         && subcommand_name != "setup"
+        && std::env::var_os("PEKO_SKIP_ROOT_CHECKUP").is_none()
     {
         reporter.error(format!(
             "Peko toolchain installation looks corrupted. Run '{} setup' to install it.",

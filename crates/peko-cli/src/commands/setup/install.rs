@@ -145,6 +145,7 @@ pub fn install_packages(layout: &Layout) -> Result<()> {
         let output = std::process::Command::new(&peko)
             .args(["add", package, "--global"])
             .env("PEKO_ROOT_PATH", layout.root())
+            .env("PEKO_SKIP_ROOT_CHECKUP", "1")
             .output()
             .map_err(|e| SetupError::io(format!("run peko add {package}"), e))?;
         if !output.status.success() {
