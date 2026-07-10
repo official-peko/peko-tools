@@ -54,7 +54,7 @@ fn utf8(path: &std::path::Path) -> Result<xwin::PathBuf> {
 /// Splat the MSVC CRT and Windows SDK into the windows toolchain directory. This
 /// downloads roughly a gigabyte from Microsoft's CDN and runs synchronously.
 /// xwin's own progress bars are hidden; the caller reports coarse status.
-pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
+pub fn splat(layout: &Layout, reporter: &Reporter) -> Result<()> {
     use xwin::{Arch, Ops, SplatConfig, Variant, WorkItem, util::ProgressTarget};
 
     let arches = Arch::X86_64 as u32;
@@ -117,7 +117,7 @@ pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
         copy: true,
     };
 
-    ctx.execute(
+    let result = ctx.execute(
         pkg_manifest.packages,
         work_items,
         pruned.crt_version,
@@ -126,10 +126,35 @@ pub fn splat(layout: &Layout, _reporter: &Reporter) -> Result<()> {
         arches,
         variants,
         Ops::Splat(splat_config),
-    )
-    .map_err(|e| SetupError::Process(format!("xwin splat: {e:#}")))?;
+    );
 
     let _ = std::fs::remove_dir_all(&cache);
+
+    if let Err(e) = result {
+        let message = format!("{e:#}");
+        // xwin gives the flattened SDK layout a versioned directory symlink
+        // (sdk/include/{version} and sdk/lib/{version}). On Windows, creating a
+        // directory symlink needs a privilege a standard user account does not
+        // hold (os error 1314), so this step fails after the headers and
+        // libraries are already splatted. Only one variant and one arch are
+        // splatted, so this is the last step and the content is complete. The
+        // toolchain include and library paths reference the flattened
+        // directories, not the versioned ones, so the toolchain works without
+        // the symlink.
+        let sdk_root = output.join("sdk");
+        let content_present = sdk_root.join("include").join("um").is_dir()
+            && sdk_root.join("lib").is_dir()
+            && output.join("crt").join("include").is_dir();
+        if message.contains("unable to symlink") && content_present {
+            reporter.warning(
+                "the Windows SDK splatted, but the versioned SDK directory symlink \
+                 needs elevation and was skipped; the toolchain does not use it",
+            );
+        } else {
+            return Err(SetupError::Process(format!("xwin splat: {message}")));
+        }
+    }
+
     Ok(())
 }
 
