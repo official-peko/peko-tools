@@ -1256,8 +1256,7 @@ impl PekoValueSimulator for FunctionCallAST {
                                 && let Some(caller_method) =
                                     simulator_context.current_method_name.clone()
                             {
-                                let this_class =
-                                    this_variable.variable_type.name().to_string();
+                                let this_class = this_variable.variable_type.name().to_string();
                                 simulator_context.mutates_call_edges.push((
                                     this_class.clone(),
                                     caller_method,

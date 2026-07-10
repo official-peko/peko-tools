@@ -7,8 +7,8 @@
 use crate::asts::data_structures::UnpackItem;
 use crate::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
-    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST, VariableReassignmentAST,
-    WhileLoopAST,
+    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
+    VariableReassignmentAST, WhileLoopAST,
 };
 
 use super::context::FormatContext;

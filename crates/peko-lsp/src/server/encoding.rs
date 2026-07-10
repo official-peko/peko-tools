@@ -154,8 +154,11 @@ impl LineIndex {
     /// Convert an internal char-based [`analysis::Position`] to a wire
     /// `Position` in the negotiated encoding.
     pub fn internal_to_wire(&self, pos: &analysis::Position, enc: WireEncoding) -> lsp::Position {
-        let character =
-            char_col_to_wire(self.line_str(pos.line as usize), pos.character as usize, enc);
+        let character = char_col_to_wire(
+            self.line_str(pos.line as usize),
+            pos.character as usize,
+            enc,
+        );
         lsp::Position {
             line: pos.line,
             character,

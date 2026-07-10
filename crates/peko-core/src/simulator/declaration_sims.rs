@@ -32,9 +32,8 @@ use crate::types::{self, PekoType};
 use super::PekoValueSimulator;
 use super::context::PekoSimulatorContext;
 use super::data_structures::{
-    DefinedObject, Scope, ScopeEnum, ScopeFunction, ScopeModule, ScopeSymbol, ScopeTrait,
-    ScopeMethodSignature, ScopeVariable, SimulatorArg, SimulatorFunction, SimulatorModule,
-    SimulatorVariable,
+    DefinedObject, Scope, ScopeEnum, ScopeFunction, ScopeMethodSignature, ScopeModule, ScopeSymbol,
+    ScopeTrait, ScopeVariable, SimulatorArg, SimulatorFunction, SimulatorModule, SimulatorVariable,
 };
 
 /// Builds a generic-class template: a `SimulatorClass` stored under its bare
@@ -2044,12 +2043,11 @@ impl PekoValueSimulator for ClassAST {
                             break;
                         }
 
-                        for (argument_name, argument_info) in &parent_class
-                            .main_virtual_table
-                            .methods["constructor"][0]
-                            .read()
-                            .unwrap()
-                            .arguments
+                        for (argument_name, argument_info) in
+                            &parent_class.main_virtual_table.methods["constructor"][0]
+                                .read()
+                                .unwrap()
+                                .arguments
                         {
                             constructor_arguments
                                 .insert(argument_name.clone(), argument_info.argument_type.clone());

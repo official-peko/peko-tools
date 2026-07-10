@@ -113,7 +113,10 @@ pub fn module_prelude_imports(module_name: &str) -> Vec<PekoAST> {
         ))
     }
 
-    let mut imports = vec![unpack_import("std::core"), unpack_import("std::collections")];
+    let mut imports = vec![
+        unpack_import("std::core"),
+        unpack_import("std::collections"),
+    ];
 
     // bundle:: is compile-time project metadata, available in every module the
     // same way it is in the main file. The bundle module itself is excluded so

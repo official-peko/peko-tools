@@ -571,10 +571,10 @@ async fn run_ui_project(
     // Also watch the directory that actually holds the entry file: a project can
     // set a custom `[project] entry` (for example src/main.peko) outside the
     // conventional source/ directory, and a save there must still relaunch.
-    if let Some(entry_dir) = project.get_entrypoint().parent() {
-        if entry_dir != root.join("source") {
-            let _ = watcher.watch(entry_dir, notify::RecursiveMode::Recursive);
-        }
+    if let Some(entry_dir) = project.get_entrypoint().parent()
+        && entry_dir != root.join("source")
+    {
+        let _ = watcher.watch(entry_dir, notify::RecursiveMode::Recursive);
     }
     let _ = watcher.watch(&root.join("peko.toml"), notify::RecursiveMode::NonRecursive);
     // Under devtools, also watch the dev-route file to stream navigations to the

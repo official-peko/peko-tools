@@ -93,7 +93,9 @@ const WINDOWS_MANIFEST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8" 
 /// Format a dotted version like `1.2.3` as the comma-separated `1, 2, 3, 0` a
 /// VERSIONINFO FILEVERSION field requires. Missing or non-numeric parts are 0.
 fn version_fields(version: &str) -> String {
-    let mut parts = version.split('.').map(|part| part.trim().parse::<u16>().unwrap_or(0));
+    let mut parts = version
+        .split('.')
+        .map(|part| part.trim().parse::<u16>().unwrap_or(0));
     let major = parts.next().unwrap_or(0);
     let minor = parts.next().unwrap_or(0);
     let patch = parts.next().unwrap_or(0);
@@ -149,7 +151,10 @@ pub fn bundle(
 
     // Write the application manifest the .rc embeds.
     let manifest_file = windows_build_directory.join("app.manifest");
-    io_at(&manifest_file, fs::write(&manifest_file, WINDOWS_MANIFEST_TEMPLATE))?;
+    io_at(
+        &manifest_file,
+        fs::write(&manifest_file, WINDOWS_MANIFEST_TEMPLATE),
+    )?;
 
     // Embed each project asset as a resource of custom type PEKO_ASSET.
     // The resource name is the asset's path uppercased (what the assets

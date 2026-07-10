@@ -142,12 +142,7 @@ impl Format for FunctionDeclarationAST {
         ctx.write("fn ");
         ctx.write(&self.function_name.value);
         format_generic_parameters(&self.generic_types, &self.generic_bounds, ctx);
-        format_declaration_arguments(
-            &self.arguments,
-            &self.varargs_type,
-            &self.varargs_name,
-            ctx,
-        );
+        format_declaration_arguments(&self.arguments, &self.varargs_type, &self.varargs_name, ctx);
         if let Some(return_type) = &self.return_type {
             ctx.write(&format!(" => {return_type}"));
         }

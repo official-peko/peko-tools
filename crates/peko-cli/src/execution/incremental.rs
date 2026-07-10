@@ -805,9 +805,7 @@ fn bundle_info_for(project: &PekoProject, debug: bool) -> BundleInfo {
             .ui_project_info
             .as_ref()
             .and_then(|ui| match (ui.width, ui.height) {
-                (Some(width), Some(height)) => {
-                    Some(format!("{}x{}", width as u32, height as u32))
-                }
+                (Some(width), Some(height)) => Some(format!("{}x{}", width as u32, height as u32)),
                 _ => None,
             })
             .unwrap_or_default(),

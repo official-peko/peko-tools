@@ -7,13 +7,13 @@ use std::sync::{Arc, RwLock};
 
 use llvm_sys_180::core;
 use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
+use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::VisibilityData;
 use peko_core::asts::statements::{
     BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
     PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
     VariableReassignmentAST, WhileLoopAST,
 };
-use peko_core::asts::PekoAST;
 use peko_core::diagnostics;
 use peko_core::execution::ExecutionContextAlgorithms;
 use peko_core::execution::data_structures::{ExecutionModule, ExecutionValue};

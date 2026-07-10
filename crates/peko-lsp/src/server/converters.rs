@@ -267,7 +267,10 @@ pub fn location_to_lsp(loc: &analysis::Location, map: &PosMapper) -> lsp::Locati
 /// as an offset pair `[start, end]`, which is what `ls-types` expects for
 /// `SignatureInformation::parameters`. The offsets count code units in the
 /// negotiated wire encoding.
-pub fn signature_help_to_lsp(sh: &analysis::SignatureHelp, enc: WireEncoding) -> lsp::SignatureHelp {
+pub fn signature_help_to_lsp(
+    sh: &analysis::SignatureHelp,
+    enc: WireEncoding,
+) -> lsp::SignatureHelp {
     let signatures: Vec<lsp::SignatureInformation> = sh
         .signatures
         .iter()
@@ -281,7 +284,10 @@ pub fn signature_help_to_lsp(sh: &analysis::SignatureHelp, enc: WireEncoding) ->
     }
 }
 
-fn signature_info_to_lsp(sig: &analysis::SignatureInfo, enc: WireEncoding) -> lsp::SignatureInformation {
+fn signature_info_to_lsp(
+    sig: &analysis::SignatureInfo,
+    enc: WireEncoding,
+) -> lsp::SignatureInformation {
     let parameters: Vec<lsp::ParameterInformation> = sig
         .parameters
         .iter()

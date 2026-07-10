@@ -1116,9 +1116,7 @@ impl PekoSimulatorContext {
                     // file differs from this module's is not a member. A module
                     // brought in by `import name` is an alias, not a member of
                     // this module, so module-kind symbols are dropped as well.
-                    if symbol.get_kind() == "module"
-                        || symbol.get_start().file != module_own_file
-                    {
+                    if symbol.get_kind() == "module" || symbol.get_start().file != module_own_file {
                         continue;
                     }
                     if symbol.get_start().file != position.file
@@ -1145,7 +1143,12 @@ impl PekoSimulatorContext {
             .module_aliases
             .get(first_name)
             .cloned()
-            .or_else(|| self.module_context.top_level_modules.get(first_name).cloned());
+            .or_else(|| {
+                self.module_context
+                    .top_level_modules
+                    .get(first_name)
+                    .cloned()
+            });
 
         if let Some(mut module_referenced) = module_start {
             // Descend into submodules.
@@ -2076,7 +2079,12 @@ impl
             .module_aliases
             .get(&module_names[0])
             .cloned()
-            .or_else(|| self.module_context.top_level_modules.get(&module_names[0]).cloned())?;
+            .or_else(|| {
+                self.module_context
+                    .top_level_modules
+                    .get(&module_names[0])
+                    .cloned()
+            })?;
         for module_name in &module_names[1..] {
             let child = next_module
                 .read()

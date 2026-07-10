@@ -20,9 +20,9 @@ use std::process::{Command, Stdio};
 
 use apple_codesign::AppleCertificate;
 use peko_core::target::OperatingSystem;
-use x509_certificate::CapturedX509Certificate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use x509_certificate::CapturedX509Certificate;
 
 use crate::bundler::{BundleError, BundleResult, run_tool};
 
@@ -451,7 +451,9 @@ fn apple_profile_ok(cert: &CapturedX509Certificate, platform: &str) -> Result<St
                 "installer-signing certificate; an application-signing certificate is required"
                     .to_string(),
             ),
-            other => Err(format!("{other:?} is not usable for {platform} app signing")),
+            other => Err(format!(
+                "{other:?} is not usable for {platform} app signing"
+            )),
         }
     }
 }
@@ -642,16 +644,21 @@ fn verify_windows(
                             Ok(valid) => {
                                 let purposes = cert.apple_extended_key_usage_purposes();
                                 let has_code_signing = purposes.iter().any(|p| {
-                                    matches!(p, apple_codesign::ExtendedKeyUsagePurpose::CodeSigning)
+                                    matches!(
+                                        p,
+                                        apple_codesign::ExtendedKeyUsagePurpose::CodeSigning
+                                    )
                                 });
                                 if has_code_signing {
                                     check.ok = true;
-                                    check.detail = format!("{cn} - code-signing certificate, {valid}");
+                                    check.detail =
+                                        format!("{cn} - code-signing certificate, {valid}");
                                 } else if purposes.is_empty() {
                                     check.ok = true;
                                     check.unverified = true;
-                                    check.detail =
-                                        format!("{cn} - {valid} (key usage could not be determined)");
+                                    check.detail = format!(
+                                        "{cn} - {valid} (key usage could not be determined)"
+                                    );
                                 } else {
                                     check.detail = format!(
                                         "{cn}: not a code-signing certificate (no Code Signing extended key usage)"
@@ -733,7 +740,8 @@ fn verify_android(
                     }
                 }
                 Ok(_) => {
-                    check.detail = "unrecognized keystore format (expected JKS or PKCS#12)".to_string()
+                    check.detail =
+                        "unrecognized keystore format (expected JKS or PKCS#12)".to_string()
                 }
             }
         }
@@ -747,7 +755,8 @@ pub fn verify_platform(
     secrets: &SigningSecrets,
     platform: &str,
 ) -> PlatformReport {
-    let registry = load_registry(project_root).unwrap_or_else(|_| Value::Object(Default::default()));
+    let registry =
+        load_registry(project_root).unwrap_or_else(|_| Value::Object(Default::default()));
     let mut checks = Vec::new();
     match platform {
         "macos" | "ios" => verify_apple(project_root, &registry, secrets, platform, &mut checks),

@@ -806,10 +806,7 @@ impl RawManifest {
             .native
             .map(|raw| build_native(raw, source))
             .transpose()?;
-        let capabilities = self
-            .capabilities
-            .map(|raw| raw.uses)
-            .unwrap_or_default();
+        let capabilities = self.capabilities.map(|raw| raw.uses).unwrap_or_default();
 
         if is_application {
             let project = build_project(self.project.unwrap(), source)?;

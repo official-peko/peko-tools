@@ -105,10 +105,20 @@ fn create_linux_squashfs(
             let slug: String = project
                 .name
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
             let slug = slug.trim_matches('-').to_string();
-            if slug.is_empty() { "peko-app".to_string() } else { slug }
+            if slug.is_empty() {
+                "peko-app".to_string()
+            } else {
+                slug
+            }
         });
     let binary_path = format!("/usr/bin/{app_id}");
 

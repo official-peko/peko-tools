@@ -389,8 +389,13 @@ pub trait AnalysisEngine: Send + Sync + 'static {
     /// Return the fully-formatted source text for the file, or `None` if the
     /// engine does not support formatting. `indent_size` and `use_spaces` carry
     /// the editor's indentation preference so the output matches it.
-    fn format(&self, path: &Path, text: &str, indent_size: usize, use_spaces: bool)
-    -> Option<String>;
+    fn format(
+        &self,
+        path: &Path,
+        text: &str,
+        indent_size: usize,
+        use_spaces: bool,
+    ) -> Option<String>;
 
     // ------------------------------------------------------------------
     // Semantic tokens (optional)

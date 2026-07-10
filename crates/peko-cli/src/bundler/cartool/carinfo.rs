@@ -323,7 +323,11 @@ mod celm_tests {
             let celm = CELMImageData::new(pixels, false, size);
 
             let slice_rows = (size / CHUNK_SLICE_COUNT).max(1);
-            let total: u32 = celm.kcbc_chunks.iter().map(|chunk| chunk.pixel_height).sum();
+            let total: u32 = celm
+                .kcbc_chunks
+                .iter()
+                .map(|chunk| chunk.pixel_height)
+                .sum();
             assert_eq!(total as usize, size, "chunk heights must cover {size} rows");
             for chunk in &celm.kcbc_chunks {
                 assert!(

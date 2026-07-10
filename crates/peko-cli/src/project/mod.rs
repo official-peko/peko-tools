@@ -568,7 +568,11 @@ impl ProjectIcon {
                     },
                 ],
                 asset_data: Box::new(carinfo::ValueBlock::CELMImageData(
-                    carinfo::CELMImageData::new(resized.get_rgba_pixels(), true, pixel_size as usize),
+                    carinfo::CELMImageData::new(
+                        resized.get_rgba_pixels(),
+                        true,
+                        pixel_size as usize,
+                    ),
                 )),
             });
             (key, value)
@@ -611,11 +615,31 @@ impl ProjectIcon {
                     },
                 ],
                 asset_data: Box::new(carinfo::ValueBlock::MultisizedImageList(vec![
-                    carinfo::MSISSizeEntry { width: 16, height: 16, index: 1 },
-                    carinfo::MSISSizeEntry { width: 32, height: 32, index: 2 },
-                    carinfo::MSISSizeEntry { width: 128, height: 128, index: 3 },
-                    carinfo::MSISSizeEntry { width: 256, height: 256, index: 4 },
-                    carinfo::MSISSizeEntry { width: 512, height: 512, index: 5 },
+                    carinfo::MSISSizeEntry {
+                        width: 16,
+                        height: 16,
+                        index: 1,
+                    },
+                    carinfo::MSISSizeEntry {
+                        width: 32,
+                        height: 32,
+                        index: 2,
+                    },
+                    carinfo::MSISSizeEntry {
+                        width: 128,
+                        height: 128,
+                        index: 3,
+                    },
+                    carinfo::MSISSizeEntry {
+                        width: 256,
+                        height: 256,
+                        index: 4,
+                    },
+                    carinfo::MSISSizeEntry {
+                        width: 512,
+                        height: 512,
+                        index: 5,
+                    },
                 ])),
             }),
         ));
@@ -944,9 +968,10 @@ impl PekoProject {
         // The bundle identifier and app id come from `[project]` and are
         // absent for a package manifest.
         let (identifier, app_id) = match &loaded.manifest {
-            Manifest::Application(app) => {
-                (app.project.bundle.clone().unwrap_or_default(), app.project.app_id.clone())
-            }
+            Manifest::Application(app) => (
+                app.project.bundle.clone().unwrap_or_default(),
+                app.project.app_id.clone(),
+            ),
             Manifest::Package(_) => (String::new(), None),
         };
 
@@ -1013,8 +1038,10 @@ fn build_ui_info(
 
     // Android adaptive layers, present only when the icon builder saved a
     // foreground/background split.
-    let android_foreground = load(icon_config.and_then(|config| config.android_foreground.as_ref()))?;
-    let android_background = load(icon_config.and_then(|config| config.android_background.as_ref()))?;
+    let android_foreground =
+        load(icon_config.and_then(|config| config.android_foreground.as_ref()))?;
+    let android_background =
+        load(icon_config.and_then(|config| config.android_background.as_ref()))?;
 
     Ok(UIProjectInfo::new(
         project.bundle.clone().unwrap_or_default(),
@@ -1093,6 +1120,10 @@ mod car_tests {
         // The BOM container magic marks a valid CAR, and the ten embedded
         // renditions make the catalog far larger than an empty header.
         assert_eq!(&bytes[..8], b"BOMStore");
-        assert!(bytes.len() > 100_000, "car unexpectedly small: {}", bytes.len());
+        assert!(
+            bytes.len() > 100_000,
+            "car unexpectedly small: {}",
+            bytes.len()
+        );
     }
 }

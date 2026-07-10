@@ -138,15 +138,19 @@ pub fn bundle(
         io_at(&drawable_directory, fs::create_dir_all(&drawable_directory))?;
 
         let background_path = drawable_directory.join("icon_background.png");
-        background
-            .resize(layer_px, layer_px)
-            .to_png(&mut io_at(&background_path, File::create(&background_path))?);
+        background.resize(layer_px, layer_px).to_png(&mut io_at(
+            &background_path,
+            File::create(&background_path),
+        )?);
 
         let foreground_path = drawable_directory.join("icon_foreground.png");
         foreground
             .shaped(crate::project::IconShape::Square, safe_inset)
             .resize(layer_px, layer_px)
-            .to_png(&mut io_at(&foreground_path, File::create(&foreground_path))?);
+            .to_png(&mut io_at(
+                &foreground_path,
+                File::create(&foreground_path),
+            )?);
 
         let anydpi_directory = app_directory.join("res/mipmap-anydpi-v26");
         io_at(&anydpi_directory, fs::create_dir_all(&anydpi_directory))?;

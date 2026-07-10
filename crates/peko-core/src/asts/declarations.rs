@@ -8,11 +8,11 @@
 use derive_new::new;
 use indexmap::IndexMap;
 
-use super::{CommentAST, PekoAST};
 use super::data_structures::{
     ClassAttributeData, ClassMethod, DeclarationArgumentData, DocInfo, PositionData,
     PositionedValue, Spanned, VisibilityData,
 };
+use super::{CommentAST, PekoAST};
 use crate::types;
 
 /// A variable declaration: `const x: int = 0`, `name := ...`, etc.

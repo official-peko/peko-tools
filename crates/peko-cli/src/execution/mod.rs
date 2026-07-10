@@ -154,8 +154,12 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
     let global_root = peko_root.join("global");
     if let Ok(Some(lockfile)) = peko_core::config::Lockfile::load_from_root(&global_root) {
         modules.extend(
-            peko_core::packages::PekoPackageIndex::from_lockfile(peko_root, &global_root, &lockfile)
-                .get_external_modules(),
+            peko_core::packages::PekoPackageIndex::from_lockfile(
+                peko_root,
+                &global_root,
+                &lockfile,
+            )
+            .get_external_modules(),
         );
     }
 

@@ -5,9 +5,7 @@
 //! the AST and re-escaped, so the printed form parses back to an equal value.
 
 use crate::asts::data_structures::StringChunkContent;
-use crate::asts::values::{
-    BooleanAST, CharAST, EncryptedStringAST, NullAST, NumberAST, StringAST,
-};
+use crate::asts::values::{BooleanAST, CharAST, EncryptedStringAST, NullAST, NumberAST, StringAST};
 
 use super::Format;
 use super::context::FormatContext;

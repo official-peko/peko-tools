@@ -153,13 +153,7 @@ impl Format for VariableReferenceAST {
 
 impl Format for ArrayAST {
     fn format(&self, ctx: &mut FormatContext) {
-        format_delimited_list(
-            &self.values,
-            "#[",
-            "]",
-            |value, ctx| value.format(ctx),
-            ctx,
-        );
+        format_delimited_list(&self.values, "#[", "]", |value, ctx| value.format(ctx), ctx);
     }
 }
 
@@ -276,7 +270,11 @@ impl Format for PekoXTagAST {
             // The parser stores the source attribute className under the key
             // class, which is a reserved word it cannot read back. Emit
             // className so the output parses to the same attribute.
-            let source_name = if name == "class" { "className" } else { name.as_str() };
+            let source_name = if name == "class" {
+                "className"
+            } else {
+                name.as_str()
+            };
             ctx.write(&format!(" {source_name}="));
             self.attributes[name].format(ctx);
         }
@@ -284,7 +282,7 @@ impl Format for PekoXTagAST {
         let mut event_names: Vec<&String> = self.events.keys().collect();
         event_names.sort();
         for name in event_names {
-            ctx.write(&format!(" {name}=closure {{", ));
+            ctx.write(&format!(" {name}=closure {{",));
             let body = &self.events[name];
             if !body.value.is_empty() {
                 ctx.write(" ");

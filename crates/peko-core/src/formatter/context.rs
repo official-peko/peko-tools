@@ -41,8 +41,7 @@ impl FormatContext {
     /// Drives blank-line preservation from the reliable start line of a
     /// construct rather than the parser's less reliable end positions.
     pub fn blank_line_precedes(&self, line: usize) -> bool {
-        line
-            .checked_sub(2)
+        line.checked_sub(2)
             .and_then(|index| self.source_lines.get(index))
             .is_some_and(|line| line.trim().is_empty())
     }

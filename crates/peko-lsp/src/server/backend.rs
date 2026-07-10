@@ -132,7 +132,10 @@ impl Backend {
         // the same text that produced them.
         let index = LineIndex::new(&text);
         let map = PosMapper::new(&index, self.encoding());
-        let lsp_diags: Vec<Diagnostic> = raw_diags.iter().map(|d| diagnostic_to_lsp(d, &map)).collect();
+        let lsp_diags: Vec<Diagnostic> = raw_diags
+            .iter()
+            .map(|d| diagnostic_to_lsp(d, &map))
+            .collect();
 
         self.client
             .publish_diagnostics(uri.clone(), lsp_diags, None)
@@ -178,11 +181,7 @@ impl LanguageServer for Backend {
             .map(|folder| uri_to_path(&folder.uri));
 
         if let Some(path) = &workspace_root {
-            self.analysis
-                .write()
-                .await
-                .engine
-                .update_project_root(path);
+            self.analysis.write().await.engine.update_project_root(path);
         }
 
         // Preload and memoize the project's packages on a background task so
@@ -241,23 +240,25 @@ impl LanguageServer for Backend {
                 // Whole-file semantic highlighting. The legend order matches the
                 // token-type ids the engine emits.
                 semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-                        legend: SemanticTokensLegend {
-                            token_types: analysis::SEMANTIC_TOKEN_TYPES
-                                .iter()
-                                .map(|t| SemanticTokenType::new(t))
-                                .collect(),
-                            token_modifiers: analysis::SEMANTIC_TOKEN_MODIFIERS
-                                .iter()
-                                .map(|m| SemanticTokenModifier::new(m))
-                                .collect(),
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: analysis::SEMANTIC_TOKEN_TYPES
+                                    .iter()
+                                    .map(|t| SemanticTokenType::new(t))
+                                    .collect(),
+                                token_modifiers: analysis::SEMANTIC_TOKEN_MODIFIERS
+                                    .iter()
+                                    .map(|m| SemanticTokenModifier::new(m))
+                                    .collect(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: Some(false),
+                            work_done_progress_options: WorkDoneProgressOptions {
+                                work_done_progress: None,
+                            },
                         },
-                        full: Some(SemanticTokensFullOptions::Bool(true)),
-                        range: Some(false),
-                        work_done_progress_options: WorkDoneProgressOptions {
-                            work_done_progress: None,
-                        },
-                    }),
+                    ),
                 ),
 
                 ..Default::default()
@@ -502,7 +503,12 @@ impl LanguageServer for Backend {
         }
         let index = LineIndex::new(&text);
         let map = PosMapper::new(&index, self.encoding());
-        let tokens = self.analysis.read().await.engine.semantic_tokens(&path, &text);
+        let tokens = self
+            .analysis
+            .read()
+            .await
+            .engine
+            .semantic_tokens(&path, &text);
         let data = semantic_tokens_to_lsp(&tokens, &map);
 
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {

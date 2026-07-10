@@ -584,7 +584,10 @@ fn write_template(
 ) -> BundleResult<()> {
     io_at(
         path,
-        fs::write(path, fill_template(template, name, bundle_id, version, scheme)),
+        fs::write(
+            path,
+            fill_template(template, name, bundle_id, version, scheme),
+        ),
     )
 }
 

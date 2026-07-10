@@ -101,10 +101,7 @@ fn parse_program(source: &str, file: &Path) -> Vec<PekoAST> {
         let had_pending = parser.has_pending();
         let index_before = parser.tokens.get_index();
         asts.push(parser.parse());
-        if !had_pending
-            && !parser.tokens.finished()
-            && parser.tokens.get_index() == index_before
-        {
+        if !had_pending && !parser.tokens.finished() && parser.tokens.get_index() == index_before {
             parser.tokens.increase_index();
         }
     }
@@ -183,9 +180,7 @@ pub(crate) fn format_delimited_list<T>(
     // A construct that already contains a newline (a nested wrap) never fits.
     let fits = match ctx.max_width() {
         None => true,
-        Some(max) => {
-            !inline.contains('\n') && ctx.current_column() + inline.chars().count() <= max
-        }
+        Some(max) => !inline.contains('\n') && ctx.current_column() + inline.chars().count() <= max,
     };
 
     if items.is_empty() || fits {
@@ -339,8 +334,15 @@ mod tests {
 
     #[test]
     fn wraps_long_parameter_list() {
-        let out = fmt_narrow("[public] fn compute(alpha: i32, beta: i32, gamma: i32) => i32 { return alpha }\n");
-        assert!(out.contains("fn compute(\n    alpha: i32,\n    beta: i32,\n    gamma: i32,\n) => i32 {"), "params did not wrap: {out:?}");
+        let out = fmt_narrow(
+            "[public] fn compute(alpha: i32, beta: i32, gamma: i32) => i32 { return alpha }\n",
+        );
+        assert!(
+            out.contains(
+                "fn compute(\n    alpha: i32,\n    beta: i32,\n    gamma: i32,\n) => i32 {"
+            ),
+            "params did not wrap: {out:?}"
+        );
     }
 
     #[test]
@@ -433,7 +435,10 @@ mod tests {
             fmt("fn add(a: i32, b: i32) => i32 { return a + b }"),
             "fn add(a: i32, b: i32) => i32 {\n    return a + b;\n}\n"
         );
-        assert_eq!(fmt("enum Color { Red, Green, Blue }"), "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n");
+        assert_eq!(
+            fmt("enum Color { Red, Green, Blue }"),
+            "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n"
+        );
         assert_eq!(
             fmt("class Point { x: i32; y: i32; }"),
             "class Point {\n    x: i32;\n    y: i32;\n}\n"
@@ -493,8 +498,7 @@ fn main() => i32 {
     fn idempotent_over_std_corpus() {
         // Format every real std source twice and require stability. Skips
         // cleanly when the corpus is not present (e.g. a minimal checkout).
-        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../toolkit/std");
+        let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../toolkit/std");
         let Ok(entries) = std::fs::read_dir(&corpus) else {
             return;
         };
@@ -506,15 +510,9 @@ fn main() => i32 {
             let Ok(source) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let once =
-                format_source(&source, &path, FormatConfig::default());
+            let once = format_source(&source, &path, FormatConfig::default());
             let twice = format_source(&once, &path, FormatConfig::default());
-            assert_eq!(
-                once,
-                twice,
-                "not idempotent for {}",
-                path.display()
-            );
+            assert_eq!(once, twice, "not idempotent for {}", path.display());
             // No comment or doc line may be dropped: the formatted output keeps
             // exactly as many `//` and `///` markers as the source.
             assert_eq!(
@@ -552,19 +550,28 @@ fn main() => i32 {
 
     #[test]
     fn preserves_leading_comment() {
-        assert_eq!(fmt("// a greeting\nfn main() {}\n"), "// a greeting\nfn main() {}\n");
+        assert_eq!(
+            fmt("// a greeting\nfn main() {}\n"),
+            "// a greeting\nfn main() {}\n"
+        );
     }
 
     #[test]
     fn preserves_comment_inside_body() {
         let out = fmt("fn main() {\n    // step one\n    let x: i32 = 1\n}\n");
-        assert!(out.contains("    // step one\n"), "body comment lost: {out:?}");
+        assert!(
+            out.contains("    // step one\n"),
+            "body comment lost: {out:?}"
+        );
         assert!(out.contains("let x: i32 = 1;"), "statement lost: {out:?}");
     }
 
     #[test]
     fn trailing_comment_stays_on_line() {
-        assert_eq!(fmt("let x: i32 = 5 // the count\n"), "let x: i32 = 5; // the count\n");
+        assert_eq!(
+            fmt("let x: i32 = 5 // the count\n"),
+            "let x: i32 = 5; // the count\n"
+        );
     }
 
     #[test]
@@ -577,20 +584,40 @@ fn main() => i32 {
 
     #[test]
     fn preserves_class_member_comments() {
-        let out = fmt("class C {\n    // a field\n    x: i32 // trailing\n    // a method\n    [public] fn f() {}\n}\n");
-        assert!(out.contains("    // a field\n"), "leading attr comment lost: {out:?}");
-        assert!(out.contains("x: i32; // trailing"), "trailing attr comment lost: {out:?}");
-        assert!(out.contains("    // a method\n"), "leading method comment lost: {out:?}");
+        let out = fmt(
+            "class C {\n    // a field\n    x: i32 // trailing\n    // a method\n    [public] fn f() {}\n}\n",
+        );
+        assert!(
+            out.contains("    // a field\n"),
+            "leading attr comment lost: {out:?}"
+        );
+        assert!(
+            out.contains("x: i32; // trailing"),
+            "trailing attr comment lost: {out:?}"
+        );
+        assert!(
+            out.contains("    // a method\n"),
+            "leading method comment lost: {out:?}"
+        );
     }
 
     #[test]
     fn preserves_enum_and_trait_member_comments() {
         let enum_out = fmt("enum E {\n    A, // first\n    // second one\n    B,\n}\n");
-        assert!(enum_out.contains("A, // first"), "enum trailing comment lost: {enum_out:?}");
-        assert!(enum_out.contains("    // second one\n"), "enum leading comment lost: {enum_out:?}");
+        assert!(
+            enum_out.contains("A, // first"),
+            "enum trailing comment lost: {enum_out:?}"
+        );
+        assert!(
+            enum_out.contains("    // second one\n"),
+            "enum leading comment lost: {enum_out:?}"
+        );
 
         let trait_out = fmt("trait T {\n    // a slot\n    fn area() => i32;\n}\n");
-        assert!(trait_out.contains("    // a slot\n"), "trait comment lost: {trait_out:?}");
+        assert!(
+            trait_out.contains("    // a slot\n"),
+            "trait comment lost: {trait_out:?}"
+        );
     }
 
     #[test]
@@ -618,11 +645,4 @@ fn main() => i32 {
             assert_eq!(once, twice, "not idempotent for {source:?}");
         }
     }
-
-
-
-
-
-
-
 }

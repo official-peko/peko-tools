@@ -92,9 +92,7 @@ mod highlight {
                 let mut token = String::new();
                 token.push(c);
                 i += 1;
-                while i < chars.len()
-                    && (chars[i].is_ascii_digit() || "+-.eE".contains(chars[i]))
-                {
+                while i < chars.len() && (chars[i].is_ascii_digit() || "+-.eE".contains(chars[i])) {
                     token.push(chars[i]);
                     i += 1;
                 }
@@ -293,7 +291,11 @@ pub enum DevEvent {
     Console(DevConsoleLine),
     /// The result of an interactive request: an evaluated console expression
     /// (kind "eval") or the page source (kind "source").
-    EvalResult { kind: String, ok: bool, text: String },
+    EvalResult {
+        kind: String,
+        ok: bool,
+        text: String,
+    },
     /// A piece of bridge traffic for the inspector: dir is call, reply, or
     /// event; label is the method or event name; data is the JSON payload.
     Trace {
@@ -396,7 +398,12 @@ impl DevChannel {
 
 /// Build the paired channel ends: the loop's `DevChannel`, and the window's
 /// event receiver, action sender, and shared shutdown flag.
-pub fn channel() -> (DevChannel, Receiver<DevEvent>, Sender<DevAction>, Arc<AtomicBool>) {
+pub fn channel() -> (
+    DevChannel,
+    Receiver<DevEvent>,
+    Sender<DevAction>,
+    Arc<AtomicBool>,
+) {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (action_tx, action_rx) = std::sync::mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));

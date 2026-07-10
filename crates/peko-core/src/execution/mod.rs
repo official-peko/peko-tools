@@ -37,11 +37,11 @@ use indexmap::IndexMap;
 
 use crate::asts::PekoAST;
 use crate::asts::data_structures::{PositionData, PositionedValue, StringChunk};
-use crate::diagnostics;
-use crate::types::TypeRestraint;
 use crate::asts::expressions::ObjectConstructionAST;
 use crate::asts::values::StringAST;
+use crate::diagnostics;
 use crate::types::PekoType;
+use crate::types::TypeRestraint;
 use crate::{ExternalModuleInfo, ExternalModuleVersion};
 
 /// One frame of the module-resolution stack.

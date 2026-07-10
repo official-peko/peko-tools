@@ -31,7 +31,7 @@ use peko_core::{
     simulator::{
         PekoValueSimulator,
         context::PekoSimulatorContext,
-        data_structures::{ScopeSymbol, ScopeMethodSignature, SimulatorModule},
+        data_structures::{ScopeMethodSignature, ScopeSymbol, SimulatorModule},
     },
     target::PekoTarget,
 };
@@ -152,9 +152,7 @@ fn class_clause_kind(line_prefix: &str) -> Option<bool> {
     let impl_position = last_keyword("impl");
 
     let (keyword_position, is_impl) = match (from_position, impl_position) {
-        (from, Some(implements)) if from.is_none_or(|from| implements > from) => {
-            (implements, true)
-        }
+        (from, Some(implements)) if from.is_none_or(|from| implements > from) => (implements, true),
         (Some(from), _) => (from, false),
         _ => return None,
     };
@@ -237,7 +235,6 @@ impl PekoAnalyzer {
         } else {
             None
         };
-
     }
 
     /// Look up a tracked document by path. Used as the early-exit guard in
@@ -345,9 +342,7 @@ impl PekoAnalyzer {
             // this is the only way pekoui and other path packages resolve
             // before the first build. Mirrors the compiler, which resolves a
             // path dependency from its directory rather than the source cache.
-            if let Ok(loaded) =
-                peko_core::config::Manifest::load(project_root.join("peko.toml"))
-            {
+            if let Ok(loaded) = peko_core::config::Manifest::load(project_root.join("peko.toml")) {
                 for dependency in loaded.manifest.dependencies().values() {
                     let peko_core::config::Dependency::Path { path } = dependency else {
                         continue;
@@ -402,7 +397,9 @@ impl PekoAnalyzer {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("peko") {
                     continue;
                 }
-                let Some(stem) = path.file_stem().map(|stem| stem.to_string_lossy().into_owned())
+                let Some(stem) = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
                 else {
                     continue;
                 };
@@ -499,8 +496,7 @@ impl PekoAnalyzer {
             return Some(cached_result.clone());
         }
 
-        let (parsed_asts, parser_diagnostics) =
-            helpers::parse_peko_source(document_path, source);
+        let (parsed_asts, parser_diagnostics) = helpers::parse_peko_source(document_path, source);
 
         let end_position = match parsed_asts.last() {
             Some(last_ast) => last_ast.get_end().clone(),
@@ -704,7 +700,10 @@ impl PekoAnalyzer {
         let generic_type_context = type_boundary_char == Some('<') && {
             let mut probe = back_search_offset_type.saturating_sub(1);
             while probe > 0
-                && doc.char_at(probe).map(|c| char_is_whitespace!(c)).unwrap_or(false)
+                && doc
+                    .char_at(probe)
+                    .map(|c| char_is_whitespace!(c))
+                    .unwrap_or(false)
             {
                 probe -= 1;
             }
@@ -717,7 +716,10 @@ impl PekoAnalyzer {
                 probe -= 1;
             }
             while probe > 0
-                && doc.char_at(probe).map(|c| char_is_whitespace!(c)).unwrap_or(false)
+                && doc
+                    .char_at(probe)
+                    .map(|c| char_is_whitespace!(c))
+                    .unwrap_or(false)
             {
                 probe -= 1;
             }
@@ -850,23 +852,23 @@ impl PekoAnalyzer {
         // parent module path (aliases included) and finds the enum among that
         // module's own declarations.
         if !module_full_name.is_empty() && available_symbols.is_empty() {
-            let (enum_name, candidates) = if let Some((parent, name)) =
-                module_full_name.rsplit_once("::")
-            {
-                (
-                    name.to_owned(),
-                    simulation_result
-                        .context
-                        .get_available_symbols_from_module(parent.to_owned(), peko_position.clone()),
-                )
-            } else {
-                (
-                    module_full_name.clone(),
-                    simulation_result
-                        .context
-                        .get_available_symbols_from_position(peko_position.clone()),
-                )
-            };
+            let (enum_name, candidates) =
+                if let Some((parent, name)) = module_full_name.rsplit_once("::") {
+                    (
+                        name.to_owned(),
+                        simulation_result.context.get_available_symbols_from_module(
+                            parent.to_owned(),
+                            peko_position.clone(),
+                        ),
+                    )
+                } else {
+                    (
+                        module_full_name.clone(),
+                        simulation_result
+                            .context
+                            .get_available_symbols_from_position(peko_position.clone()),
+                    )
+                };
             if let Some(variants) = candidates
                 .iter()
                 .find(|symbol| symbol.get_kind() == "enum" && symbol.get_name() == enum_name)
@@ -1133,7 +1135,10 @@ impl AnalysisEngine for PekoAnalyzer {
         // `mod::Enum::Variant`) resolves to the enum's variant list, not a
         // symbol. Render it as the qualified variant.
         if let SymbolSearchResult::EnumVariants(enum_name, variants) = &search {
-            if variants.iter().any(|variant| variant == &current_identifier) {
+            if variants
+                .iter()
+                .any(|variant| variant == &current_identifier)
+            {
                 return Some(HoverInfo {
                     contents: format!("```pekoscript\nenum {enum_name}::{current_identifier}\n```"),
                     range: None,
@@ -1380,9 +1385,7 @@ impl AnalysisEngine for PekoAnalyzer {
             accessing_symbols,
             module_replace,
         ) = match search {
-            SymbolSearchResult::Access(symbols, replace) => {
-                (symbols, false, false, true, replace)
-            }
+            SymbolSearchResult::Access(symbols, replace) => (symbols, false, false, true, replace),
             SymbolSearchResult::Symbols(symbols) => (symbols, false, false, false, None),
             SymbolSearchResult::Types(symbols) => (symbols, true, false, false, None),
             SymbolSearchResult::Visibilities => (Vec::new(), false, true, false, None),
@@ -1680,77 +1683,77 @@ impl AnalysisEngine for PekoAnalyzer {
         // not while completing a type, a visibility attribute, or a `mod::`
         // member access.
         if !list_builtin_types && !list_visibilities && !accessing_symbols {
-        // Language keywords that are not already offered as a block snippet.
-        // Sorted after symbols but before the snippets and XML tags.
-        for keyword in LANGUAGE_KEYWORDS {
-            completion_items.push(CompletionItem {
-                label: (*keyword).to_string(),
-                kind: CompletionKind::Keyword,
-                detail: None,
-                documentation: None,
-                insert_text: None,
-                sort_text: Some("0008".to_string()),
-                insert_text_format: None,
-                command: None,
-                additional_text_edits: Vec::new(),
-            });
-        }
+            // Language keywords that are not already offered as a block snippet.
+            // Sorted after symbols but before the snippets and XML tags.
+            for keyword in LANGUAGE_KEYWORDS {
+                completion_items.push(CompletionItem {
+                    label: (*keyword).to_string(),
+                    kind: CompletionKind::Keyword,
+                    detail: None,
+                    documentation: None,
+                    insert_text: None,
+                    sort_text: Some("0008".to_string()),
+                    insert_text_format: None,
+                    command: None,
+                    additional_text_edits: Vec::new(),
+                });
+            }
 
-        // Block-shaped snippets that all follow the same `keyword name { body }` form.
-        for simple_snip in ["if", "while", "class", "module", "trait", "enum"] {
+            // Block-shaped snippets that all follow the same `keyword name { body }` form.
+            for simple_snip in ["if", "while", "class", "module", "trait", "enum"] {
+                completion_items.push(CompletionItem {
+                    label: simple_snip.to_string(),
+                    kind: CompletionKind::Snippet,
+                    detail: None,
+                    documentation: None,
+                    insert_text: Some(format!("{simple_snip} ${{1}} {{\n\t${{0}}\n}}")),
+                    sort_text: Some("0009".to_string()),
+                    insert_text_format: Some(InsertTextFormat::Snippet),
+                    command: None,
+                    additional_text_edits: Vec::new(),
+                });
+            }
+
+            // Platform-statement snippets: `keyword "name" { body }`.
+            for platform_snip in ["platform", "arch"] {
+                completion_items.push(CompletionItem {
+                    label: platform_snip.to_string(),
+                    kind: CompletionKind::Snippet,
+                    detail: None,
+                    documentation: None,
+                    insert_text: Some(format!("{platform_snip} \"${{1}}\" {{\n\t${{0}}\n}}")),
+                    sort_text: Some("0009".to_string()),
+                    insert_text_format: Some(InsertTextFormat::Snippet),
+                    command: None,
+                    additional_text_edits: Vec::new(),
+                });
+            }
+
+            // `for x in y { body }`.
             completion_items.push(CompletionItem {
-                label: simple_snip.to_string(),
+                label: "for".to_string(),
                 kind: CompletionKind::Snippet,
                 detail: None,
                 documentation: None,
-                insert_text: Some(format!("{simple_snip} ${{1}} {{\n\t${{0}}\n}}")),
+                insert_text: Some("for ${1} in ${2} {\n\t${0}\n}".to_string()),
                 sort_text: Some("0009".to_string()),
                 insert_text_format: Some(InsertTextFormat::Snippet),
                 command: None,
                 additional_text_edits: Vec::new(),
             });
-        }
 
-        // Platform-statement snippets: `keyword "name" { body }`.
-        for platform_snip in ["platform", "arch"] {
+            // `fn name(args) { body }`.
             completion_items.push(CompletionItem {
-                label: platform_snip.to_string(),
+                label: "fn".to_string(),
                 kind: CompletionKind::Snippet,
                 detail: None,
                 documentation: None,
-                insert_text: Some(format!("{platform_snip} \"${{1}}\" {{\n\t${{0}}\n}}")),
+                insert_text: Some("fn ${1}(${2}) {\n\t${0}\n}".to_string()),
                 sort_text: Some("0009".to_string()),
                 insert_text_format: Some(InsertTextFormat::Snippet),
                 command: None,
                 additional_text_edits: Vec::new(),
             });
-        }
-
-        // `for x in y { body }`.
-        completion_items.push(CompletionItem {
-            label: "for".to_string(),
-            kind: CompletionKind::Snippet,
-            detail: None,
-            documentation: None,
-            insert_text: Some("for ${1} in ${2} {\n\t${0}\n}".to_string()),
-            sort_text: Some("0009".to_string()),
-            insert_text_format: Some(InsertTextFormat::Snippet),
-            command: None,
-            additional_text_edits: Vec::new(),
-        });
-
-        // `fn name(args) { body }`.
-        completion_items.push(CompletionItem {
-            label: "fn".to_string(),
-            kind: CompletionKind::Snippet,
-            detail: None,
-            documentation: None,
-            insert_text: Some("fn ${1}(${2}) {\n\t${0}\n}".to_string()),
-            sort_text: Some("0009".to_string()),
-            insert_text_format: Some(InsertTextFormat::Snippet),
-            command: None,
-            additional_text_edits: Vec::new(),
-        });
         }
 
         completion_items
@@ -2067,7 +2070,6 @@ mod tests {
         // `fn` must stand as its own word.
         assert!(!is_method_decl_position("    fnfoo"));
     }
-
 }
 
 #[cfg(test)]
@@ -2238,7 +2240,8 @@ mod generic_bound_tests {
             ),
         )
         .unwrap();
-        let main_source = "import pekoui as ui;\n\nfn on_start() {\n    ui::app::from_bundle().run()\n}\n";
+        let main_source =
+            "import pekoui as ui;\n\nfn on_start() {\n    ui::app::from_bundle().run()\n}\n";
         let main = project.join("source/main.peko");
         std::fs::write(&main, main_source).unwrap();
 
@@ -2320,7 +2323,13 @@ mod generic_bound_tests {
         analyzer.update_file(&main, main_source);
 
         let labels: Vec<String> = analyzer
-            .completions(&main, &Position { line: 3, character: 8 })
+            .completions(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 8,
+                },
+            )
             .into_iter()
             .map(|item| item.label)
             .collect();
@@ -2336,7 +2345,13 @@ mod generic_bound_tests {
         let deeper = "import pekoui as ui;\n\nfn on_start() {\n    ui::app::\n}\n";
         analyzer.update_file(&main, deeper);
         let deep_labels: Vec<String> = analyzer
-            .completions(&main, &Position { line: 3, character: 13 })
+            .completions(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 13,
+                },
+            )
             .into_iter()
             .map(|item| item.label)
             .collect();
@@ -2351,7 +2366,13 @@ mod generic_bound_tests {
         let bare = "import pekoui as ui;\n\nfn on_start() {\n    \n}\n";
         analyzer.update_file(&main, bare);
         let bare_labels: Vec<String> = analyzer
-            .completions(&main, &Position { line: 3, character: 4 })
+            .completions(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 4,
+                },
+            )
             .into_iter()
             .map(|item| item.label)
             .collect();
@@ -2362,8 +2383,7 @@ mod generic_bound_tests {
 
         // Resolving a class through the alias: `new ui::menu::Menu()` (and the
         // `ui::menu::Menu` type annotation) must not report "cannot find class".
-        let construct =
-            "import pekoui as ui;\n\nfn on_start() {\n    let bar: ui::menu::Menu = new ui::menu::Menu()\n}\n";
+        let construct = "import pekoui as ui;\n\nfn on_start() {\n    let bar: ui::menu::Menu = new ui::menu::Menu()\n}\n";
         analyzer.update_file(&main, construct);
         let construct_diagnostics: Vec<String> = analyzer
             .diagnostics(&main)
@@ -2399,7 +2419,13 @@ mod generic_bound_tests {
         let variants = "import pekoui as ui;\n\nfn on_start() {\n    ui::menu::MenuRole::\n}\n";
         analyzer.update_file(&main, variants);
         let variant_labels: Vec<String> = analyzer
-            .completions(&main, &Position { line: 3, character: 24 })
+            .completions(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 24,
+                },
+            )
             .into_iter()
             .map(|item| item.label)
             .collect();
@@ -2416,7 +2442,13 @@ mod generic_bound_tests {
         analyzer.update_file(&main, hover_source);
         // `MenuRole` in the `ui::menu::MenuRole` type annotation (column 21).
         let type_hover = analyzer
-            .hover(&main, &Position { line: 3, character: 21 })
+            .hover(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 21,
+                },
+            )
             .map(|h| h.contents)
             .unwrap_or_default();
         assert!(
@@ -2425,7 +2457,13 @@ mod generic_bound_tests {
         );
         // The `Close` variant in `ui::menu::MenuRole::Close` (column 52).
         let variant_hover = analyzer
-            .hover(&main, &Position { line: 3, character: 52 })
+            .hover(
+                &main,
+                &Position {
+                    line: 3,
+                    character: 52,
+                },
+            )
             .map(|h| h.contents)
             .unwrap_or_default();
         assert!(
@@ -2448,12 +2486,17 @@ mod generic_bound_tests {
     return item.|;
 }
 "#;
-        let Some(labels) = completions_at(source) else { return };
+        let Some(labels) = completions_at(source) else {
+            return;
+        };
         assert!(
             labels.iter().any(|l| l == "draw"),
             "expected `draw` from the impl Drawable bound; got {labels:?}"
         );
-        assert!(labels.iter().any(|l| l == "area"), "expected `area`; got {labels:?}");
+        assert!(
+            labels.iter().any(|l| l == "area"),
+            "expected `area`; got {labels:?}"
+        );
     }
 
     #[test]
@@ -2471,7 +2514,9 @@ mod generic_bound_tests {
     return item.|;
 }
 "#;
-        let Some(labels) = completions_at(source) else { return };
+        let Some(labels) = completions_at(source) else {
+            return;
+        };
         assert!(
             labels.iter().any(|l| l == "draw"),
             "expected `draw` from the first bound; got {labels:?}"
@@ -2501,7 +2546,9 @@ mod generic_bound_tests {
     }
 }
 "#;
-        let Some(labels) = completions_at(source) else { return };
+        let Some(labels) = completions_at(source) else {
+            return;
+        };
         assert!(
             labels.iter().any(|l| l == "increment"),
             "expected `increment` on `this.dat` (attribute of generic type T); got {labels:?}"
@@ -2528,7 +2575,9 @@ mod generic_bound_tests {
     return item.|;
 }
 "#;
-        let Some(labels) = completions_at(source) else { return };
+        let Some(labels) = completions_at(source) else {
+            return;
+        };
         assert!(
             labels.iter().any(|l| l == "describe"),
             "expected method `describe` from the from Shape bound; got {labels:?}"
@@ -2580,9 +2629,13 @@ mod generic_bound_tests {
     render<Widget>(w)
 }
 "#;
-        let Some(messages) = diagnostics_for(source) else { return };
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
         assert!(
-            messages.iter().any(|m| m.contains("does not satisfy the bound")),
+            messages
+                .iter()
+                .any(|m| m.contains("does not satisfy the bound")),
             "a type that does not implement the trait must fail the bound; got {messages:?}"
         );
     }
@@ -2613,9 +2666,13 @@ mod generic_bound_tests {
     render<Widget>(w)
 }
 "#;
-        let Some(messages) = diagnostics_for(source) else { return };
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
         assert!(
-            !messages.iter().any(|m| m.contains("does not satisfy the bound")),
+            !messages
+                .iter()
+                .any(|m| m.contains("does not satisfy the bound")),
             "a type that implements the trait must satisfy the bound; got {messages:?}"
         );
     }
@@ -2644,9 +2701,13 @@ mod generic_bound_tests {
     let h: Holder<Rock> = new Holder<Rock>(r)
 }
 "#;
-        let Some(messages) = diagnostics_for(source) else { return };
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
         assert!(
-            messages.iter().any(|m| m.contains("does not satisfy the bound")),
+            messages
+                .iter()
+                .any(|m| m.contains("does not satisfy the bound")),
             "a generic class argument that does not implement the trait must fail the bound; got {messages:?}"
         );
     }
@@ -2680,9 +2741,13 @@ mod generic_bound_tests {
     let h: Holder<Dog> = new Holder<Dog>(d)
 }
 "#;
-        let Some(messages) = diagnostics_for(source) else { return };
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
         assert!(
-            !messages.iter().any(|m| m.contains("does not satisfy the bound")),
+            !messages
+                .iter()
+                .any(|m| m.contains("does not satisfy the bound")),
             "a generic class argument that implements the trait must satisfy the bound; got {messages:?}"
         );
     }
@@ -2707,18 +2772,36 @@ mod format_tests {
 
         // Four-space indentation: members at four spaces, the body at eight.
         let four = analyzer.format(&path, messy, 4, true).expect("formats");
-        assert!(four.contains("\n    count: i64;"), "want 4-space member indent: {four:?}");
-        assert!(four.contains("\n        this.count"), "want 8-space body indent: {four:?}");
+        assert!(
+            four.contains("\n    count: i64;"),
+            "want 4-space member indent: {four:?}"
+        );
+        assert!(
+            four.contains("\n        this.count"),
+            "want 8-space body indent: {four:?}"
+        );
         // No indent may carry a stray extra space (the reported bug).
-        assert!(!four.contains("\n     count"), "unexpected 5-space indent: {four:?}");
-        assert!(!four.contains("\n         this.count"), "unexpected 9-space indent: {four:?}");
+        assert!(
+            !four.contains("\n     count"),
+            "unexpected 5-space indent: {four:?}"
+        );
+        assert!(
+            !four.contains("\n         this.count"),
+            "unexpected 9-space indent: {four:?}"
+        );
 
         // Two-space indentation, honoring the editor preference.
         let two = analyzer.format(&path, messy, 2, true).expect("formats");
-        assert!(two.contains("\n  count: i64;"), "want 2-space member indent: {two:?}");
+        assert!(
+            two.contains("\n  count: i64;"),
+            "want 2-space member indent: {two:?}"
+        );
 
         // Tab indentation when the editor does not insert spaces.
         let tabbed = analyzer.format(&path, messy, 4, false).expect("formats");
-        assert!(tabbed.contains("\n\tcount: i64;"), "want tab member indent: {tabbed:?}");
+        assert!(
+            tabbed.contains("\n\tcount: i64;"),
+            "want tab member indent: {tabbed:?}"
+        );
     }
 }

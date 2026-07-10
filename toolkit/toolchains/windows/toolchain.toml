@@ -1,7 +1,10 @@
 # Toolchain description for Windows on x86_64.
 #
-# Paths are relative to this file's directory. Windows has a single
-# architecture, so there is no arch subdirectory. The flags below build a
+# Paths are relative to this file's directory and follow the xwin splat layout:
+# the MSVC CRT under crt/ and the Windows SDK under sdk/, with the canonical
+# x86_64 arch folder name (xwin's default, not the MS "x64" notation). The
+# WebView2 SDK is placed alongside under webview2/; it is a separate NuGet
+# package, not part of the MSVC/SDK surface xwin provides. The flags build a
 # console program.
 
 [toolchain]
@@ -22,23 +25,20 @@ c_flags = [
 ]
 objc_flags = []
 include = [
-  "msvc-inc",
-  "msvc-inc/msclr",
-  "ucrt-inc",
-  "um-inc",
-  "shared-inc",
-  "winrt-inc",
+  "crt/include",
+  "sdk/include/ucrt",
+  "sdk/include/um",
+  "sdk/include/shared",
+  "sdk/include/winrt",
   "webview2/build/native/include",
 ]
 
 [link]
 driver = "lld-link"
 lib_paths = [
-  "msvc-lib",
-  "ucrt-lib",
-  "um-lib",
-  "atlmfc-lib",
-  "win-lib",
+  "crt/lib/x86_64",
+  "sdk/lib/ucrt/x86_64",
+  "sdk/lib/um/x86_64",
 ]
 libs = ["ucrt", "msvcrt", "shell32", "shlwapi", "user32", "ws2_32", "dcomp", "d3d11", "dxgi"]
 frameworks = []

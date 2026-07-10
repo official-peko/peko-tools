@@ -811,7 +811,9 @@ impl PekoParser {
                 }
 
                 if self.tokens.finished() {
-                    self.report_diagnostic("unterminated `\\u{...}` escape in string literal. Add a closing `}`");
+                    self.report_diagnostic(
+                        "unterminated `\\u{...}` escape in string literal. Add a closing `}`",
+                    );
                     return String::from(" ");
                 }
 
@@ -3442,8 +3444,7 @@ impl PekoParser {
             // `-` tokens, so a hyphenated run is re-joined into one key here.
             if !errd {
                 while self.tokens.get_token_forward(1).equals("-")
-                    && self.tokens.get_token_forward(2).get_type()
-                        == &lexer::TokenType::Identifier
+                    && self.tokens.get_token_forward(2).get_type() == &lexer::TokenType::Identifier
                 {
                     self.tokens.increase_index();
                     self.tokens.increase_index();
@@ -4130,9 +4131,7 @@ impl PekoParser {
         let mut docinfo: Option<DocInfo> = None;
 
         while (self.tokens.current_token().equals("[") && visibility.is_none())
-            || (self.tokens.current_token().equals("///")
-                && docinfo.is_none()
-                && !keep_comments)
+            || (self.tokens.current_token().equals("///") && docinfo.is_none() && !keep_comments)
         {
             if self.tokens.current_token().equals("[") {
                 visibility = Some(self.parse_visibility());
