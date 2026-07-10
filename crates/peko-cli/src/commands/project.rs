@@ -341,7 +341,16 @@ fn scaffold_ui_project(
     project_root: &Path,
 ) -> ExitCode {
     // The web framework is scaffolded by its own tool, so npm must be present.
-    if !command_succeeds("npm", &["--version"]) {
+    // npm is a batch script on Windows, so it launches as npm.cmd there.
+    let npm_present = crate::proc::npm()
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !npm_present {
         reporter.error("npm is required to scaffold a UI (web) project, but it was not found");
         reporter.help("install Node.js (which bundles npm) from https://nodejs.org, then re-run");
         return ExitCode::FAILURE;
@@ -353,7 +362,7 @@ fn scaffold_ui_project(
         "Scaffolding",
         format!("{framework} web app with create-vite"),
     );
-    let create = std::process::Command::new("npm")
+    let create = crate::proc::npm()
         .args([
             "create",
             "vite@latest",
@@ -629,19 +638,6 @@ fn patch_vite_config(project_root: &Path) -> std::io::Result<()> {
         1,
     );
     std::fs::write(&config_path, injected)
-}
-
-/// Whether running `program` with `args` exits successfully. Used to probe for
-/// an external tool (for example `npm --version`) before invoking it.
-fn command_succeeds(program: &str, args: &[&str]) -> bool {
-    std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 /// Normalize a typed version into bare semver, dropping a leading `v`.

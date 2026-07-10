@@ -113,7 +113,7 @@ fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), 
 
     if !root.join("node_modules").is_dir() {
         reporter.status("Installing", "web dependencies (npm install)");
-        match std::process::Command::new("npm")
+        match crate::proc::npm()
             .arg("install")
             .current_dir(root)
             .status()
@@ -131,7 +131,7 @@ fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), 
     }
 
     reporter.status("Building", "web app (npm run build)");
-    match std::process::Command::new("npm")
+    match crate::proc::npm()
         .args(["run", "build"])
         .current_dir(root)
         .status()

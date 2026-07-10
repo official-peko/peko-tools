@@ -499,7 +499,7 @@ async fn run_ui_project(
     // learn the URL it serves on.
     if !root.join("node_modules").is_dir() {
         reporter.status("Installing", "web dependencies (npm install)");
-        let status = Command::new("npm").arg("install").current_dir(&root).status();
+        let status = crate::proc::npm().arg("install").current_dir(&root).status();
         match status {
             Ok(s) if s.success() => {}
             Ok(_) => {
@@ -1004,7 +1004,7 @@ fn stop_dev_server(child: &mut Child) {
 fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
     use std::io::{BufRead, BufReader};
 
-    let mut command = Command::new("npm");
+    let mut command = crate::proc::npm();
     command
         .arg("run")
         .arg("dev")

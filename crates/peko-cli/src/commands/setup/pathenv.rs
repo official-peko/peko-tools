@@ -49,7 +49,7 @@ pub fn configure(layout: &Layout) -> Result<()> {
            [Environment]::SetEnvironmentVariable('PATH', $np, 'User') \
          }}"
     );
-    let output = std::process::Command::new("powershell")
+    let output = crate::proc::hidden("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| SetupError::io("run powershell to configure PATH", e))?;

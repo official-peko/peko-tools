@@ -142,7 +142,7 @@ pub fn global_packages_present(layout: &Layout) -> bool {
 pub fn install_packages(layout: &Layout) -> Result<()> {
     let peko = layout.bin_peko().join(peko_binary());
     for package in GLOBAL_PACKAGES {
-        let output = std::process::Command::new(&peko)
+        let output = crate::proc::hidden(&peko)
             .args(["add", package, "--global"])
             .env("PEKO_ROOT_PATH", layout.root())
             .env("PEKO_SKIP_ROOT_CHECKUP", "1")
@@ -162,7 +162,7 @@ pub fn install_packages(layout: &Layout) -> Result<()> {
 /// Re-hash the install so `peko check` reports it healthy.
 pub fn certify(layout: &Layout) -> Result<()> {
     let peko = layout.bin_peko().join(peko_binary());
-    let output = std::process::Command::new(&peko)
+    let output = crate::proc::hidden(&peko)
         .args(["check", "--rehash"])
         .env("PEKO_ROOT_PATH", layout.root())
         .output()

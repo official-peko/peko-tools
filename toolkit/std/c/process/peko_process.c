@@ -160,7 +160,10 @@ void *peko_process_spawn(const char *program, void *argv, const char *cwd)
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
-    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL,
+    // CREATE_NO_WINDOW keeps a console child from popping a console window when
+    // the parent is a GUI app (Peko Studio spawning curl, tar, the language
+    // server, and so on). Output is still captured through the redirected pipes.
+    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
                              (cwd && cwd[0]) ? cwd : NULL, &si, &pi);
     free(cmd);
     CloseHandle(in_r);
