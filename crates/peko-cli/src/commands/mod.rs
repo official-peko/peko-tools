@@ -82,6 +82,7 @@ commands! {
     remove     => "remove a dependency from peko.toml and re-resolve",
     run        => "build and run the project, with optional hot reload",
     search     => "search or replace text across the project (used by the IDE)",
+    setup      => "install or update the Peko development environment",
     test       => "type-check a Pekoscript file without producing output",
     toolchain  => "inspect and install build toolchains",
     update     => "re-resolve dependencies and refresh peko.lock",

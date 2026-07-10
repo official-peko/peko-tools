@@ -33,6 +33,8 @@ open = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 zstd = "0.13"
+lzma-rs = "0.3"
+dirs = "6"
 sha2 = "0.10"
 getrandom = "0.2"
 semver = "1"
@@ -62,6 +64,7 @@ app-store-connect = "0.7.0"
 # Project-wide search/replace for the IDE: regex matching over a recursive walk.
 regex = "1"
 walkdir = "2"
+xwin = { version = "0.9", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }

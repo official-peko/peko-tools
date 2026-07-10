@@ -22,6 +22,7 @@ c_flags = [
   "-Wno-pragma-pack",
   "-Wno-nonportable-include-path",
   "-D_DLL",
+  "-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH",
 ]
 objc_flags = []
 include = [

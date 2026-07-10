@@ -121,14 +121,16 @@ async fn main() -> ExitCode {
 
     // ---- Verify the Peko root looks healthy ------------------------------
     //
-    // Skip this check for `check` (which exists to report on it) and
-    // `version` (which never touches the root).
+    // Skip this check for `check` (which exists to report on it), `version`
+    // (which never touches the root), and `setup` (which creates the root and
+    // must run before it exists).
     if !cli_info.perform_root_checkup()
         && subcommand_name != "check"
         && subcommand_name != "version"
+        && subcommand_name != "setup"
     {
         reporter.error(format!(
-            "Peko toolchain installation looks corrupted. Run '{} check' for details.",
+            "Peko toolchain installation looks corrupted. Run '{} setup' to install it.",
             cli_info.executable
         ));
         return ExitCode::FAILURE;

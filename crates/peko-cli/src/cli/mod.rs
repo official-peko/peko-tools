@@ -160,21 +160,15 @@ impl CLIInfo {
             index += 1;
         }
 
-        // Resolve and validate the Peko root.
+        // Resolve the Peko root: the PEKO_ROOT_PATH env var when set, otherwise
+        // the default ~/.Peko. Existence and health are enforced per-command by
+        // perform_root_checkup, so `setup` (which creates the root) can run
+        // before it exists.
         let peko_root = match std::env::var("PEKO_ROOT_PATH") {
-            Err(_) => {
-                errors.push(CliError::PekoRootUnset);
-                PathBuf::new()
-            }
-            Ok(value) => {
-                let path = PathBuf::from(value);
-                if !path.exists() {
-                    errors.push(CliError::PekoRootMissing(path.clone()));
-                } else if !path.is_dir() {
-                    errors.push(CliError::PekoRootNotDirectory(path.clone()));
-                }
-                path
-            }
+            Ok(value) if !value.is_empty() => PathBuf::from(value),
+            _ => dirs::home_dir()
+                .map(|home| home.join(".Peko"))
+                .unwrap_or_else(|| PathBuf::from(".Peko")),
         };
 
         if !errors.is_empty() {

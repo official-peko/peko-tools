@@ -37,10 +37,13 @@ const char *peko_app_data_dir(const char *app_id)
 
     const char *id = (app_id != NULL && app_id[0] != '\0') ? app_id : "app";
 
-    /* Create the parent .peko directory, then the per-app directory under it. */
-    snprintf(g_data_dir, sizeof(g_data_dir), "%s/.peko", base);
+    /* Per-app data lives under the Peko root in a dedicated apps directory:
+       <base>/.Peko/apps/<app_id>. Each path segment is created in turn. */
+    snprintf(g_data_dir, sizeof(g_data_dir), "%s/.Peko", base);
     PEKO_MKDIR(g_data_dir);
-    snprintf(g_data_dir, sizeof(g_data_dir), "%s/.peko/%s", base, id);
+    snprintf(g_data_dir, sizeof(g_data_dir), "%s/.Peko/apps", base);
+    PEKO_MKDIR(g_data_dir);
+    snprintf(g_data_dir, sizeof(g_data_dir), "%s/.Peko/apps/%s", base, id);
     PEKO_MKDIR(g_data_dir);
 
     return g_data_dir;

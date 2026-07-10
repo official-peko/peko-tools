@@ -439,6 +439,55 @@ impl Reporter {
         self.write_status_stdout("Finished", Style::new().green().bold(), msg);
     }
 
+    /// Report download progress for a named component. In JSON mode this emits
+    /// one `download` event carrying the byte counts and percent, for a host
+    /// that renders a progress bar. In human mode it draws a carriage-returned
+    /// status line on stderr, and prints a trailing newline when the download
+    /// completes. Quiet mode suppresses the human line but still emits JSON.
+    pub fn download_progress(&self, label: &str, downloaded: u64, total: Option<u64>) {
+        if self.json {
+            let percent = total
+                .filter(|t| *t > 0)
+                .map(|t| (downloaded as f64 / t as f64 * 100.0).round() as u64);
+            let event = serde_json::json!({
+                "type": "download",
+                "component": label,
+                "downloaded": downloaded,
+                "total": total,
+                "percent": percent,
+            });
+            println!("{event}");
+            return;
+        }
+        if self.is_quiet() || !self.use_color {
+            return;
+        }
+        match total.filter(|t| *t > 0) {
+            Some(total) => {
+                let percent = (downloaded as f64 / total as f64 * 100.0).round() as u64;
+                let done = downloaded >= total;
+                let end = if done { "\n" } else { "" };
+                eprint!(
+                    "\r{:>width$} {label} {}% ({} / {} MiB){end}",
+                    "downloading",
+                    percent.min(100),
+                    downloaded / 1_048_576,
+                    total / 1_048_576,
+                    width = STATUS_VERB_WIDTH
+                );
+            }
+            None => {
+                eprint!(
+                    "\r{:>width$} {label} ({} MiB)",
+                    "downloading",
+                    downloaded / 1_048_576,
+                    width = STATUS_VERB_WIDTH
+                );
+            }
+        }
+        let _ = io::Write::flush(&mut io::stderr());
+    }
+
     /// Print a raw line to stdout with no verb prefix or styling.
     /// Intended for command output that's structured data (e.g.
     /// `peko clangflags` writing flags to stdout, or

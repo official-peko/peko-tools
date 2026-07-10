@@ -100,6 +100,17 @@ impl InstallManifest {
         serde_json::from_str(&text).map_err(|source| ToolchainError::VersionParse { path, source })
     }
 
+    /// Serialize the manifest under a Peko root.
+    pub fn save(&self, peko_root: &Path) -> Result<(), ToolchainError> {
+        let path = InstallManifest::path_in(peko_root);
+        let text =
+            serde_json::to_string_pretty(self).map_err(|source| ToolchainError::VersionParse {
+                path: path.clone(),
+                source,
+            })?;
+        std::fs::write(&path, text).map_err(|source| ToolchainError::Io { path, source })
+    }
+
     /// Whether a toolchain for the target is recorded as installed.
     ///
     /// The installed list mixes granularities (`macos/arm64` but a single
