@@ -278,10 +278,6 @@ pub fn sign(
         None => return Ok(signing::OptionalSignOutcome::NoKey),
     };
 
-    if !signing::osslsigncode_available() {
-        return Ok(signing::OptionalSignOutcome::ToolUnavailable);
-    }
-
     let exe = windows_build_directory.join(format!("{}.exe", project.name));
     if !exe.exists() {
         return Err(BundleError::Signing(format!(
@@ -290,6 +286,8 @@ pub fn sign(
         )));
     }
 
-    signing::osslsigncode_sign(&exe, &key)?;
+    // The pure-Rust Authenticode signer needs no external tool; osslsigncode is
+    // only a fallback inside sign_windows_exe.
+    signing::sign_windows_exe(&exe, &key)?;
     Ok(signing::OptionalSignOutcome::Signed)
 }

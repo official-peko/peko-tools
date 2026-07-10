@@ -35,6 +35,7 @@ use zip::{CompressionMethod, ZipWriter};
 use crate::project::PekoProject;
 
 pub mod android;
+pub mod authenticode_sign;
 pub mod cartool;
 pub mod ios;
 pub mod linux;

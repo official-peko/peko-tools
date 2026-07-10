@@ -1065,6 +1065,24 @@ pub fn jarsigner_sign_aab(
 // Windows signing (osslsigncode)
 // ---------------------------------------------------------------------------
 
+/// Sign a Windows executable in place.
+///
+/// The pure-Rust Authenticode signer is used first. If it fails and the system
+/// `osslsigncode` is available, that is tried as a fallback so an environment
+/// the pure-Rust path cannot handle still produces a signature.
+pub fn sign_windows_exe(exe: &Path, key: &WindowsSigningKey) -> BundleResult<()> {
+    match crate::bundler::authenticode_sign::sign_pe(exe, key) {
+        Ok(()) => Ok(()),
+        Err(primary) => {
+            if osslsigncode_available() {
+                osslsigncode_sign(exe, key)
+            } else {
+                Err(primary)
+            }
+        }
+    }
+}
+
 /// Report whether `osslsigncode` is available on the system PATH.
 pub fn osslsigncode_available() -> bool {
     Command::new("osslsigncode")
