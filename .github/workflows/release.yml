@@ -21,10 +21,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Bundle toolchain descriptors
+        # The toolchain.toml files are the source of truth for how each target's
+        # SDK is used. `peko setup` downloads this bundle and lays the descriptors
+        # into the installed toolchains. The SDK and the linux/android toolchain
+        # payloads themselves are published separately on peko-sdk-dist.
+        run: |
+          ver="${{ github.ref_name }}"; ver="${ver#v}"
+          tar -C toolkit -cJf "dist/peko-toolchain-descriptors-${ver}.tar.xz" toolchains
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

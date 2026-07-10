@@ -15,15 +15,15 @@ use super::pack;
 
 /// The registry base URL used until the platform ships a real one.
 // TODO(platform): point PEKO_REGISTRY_URL at the live R2/CDN base; this
-// placeholder is unreachable on purpose so offline behavior is exercised.
-const PLACEHOLDER_REGISTRY_URL: &str = "https://registry.pekoui.invalid";
+// The live registry read surface: a static index and blob store behind the CDN.
+const DEFAULT_REGISTRY_URL: &str = "https://registry.pekoui.com";
 
 /// The environment variable that overrides the registry base URL.
 const REGISTRY_URL_ENV: &str = "PEKO_REGISTRY_URL";
 
-/// Resolve the registry base URL from the environment or the placeholder.
+/// Resolve the registry base URL from the environment or the default.
 fn registry_base() -> String {
-    std::env::var(REGISTRY_URL_ENV).unwrap_or_else(|_| PLACEHOLDER_REGISTRY_URL.to_owned())
+    std::env::var(REGISTRY_URL_ENV).unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_owned())
 }
 
 /// A client for the static index and the blob store.
@@ -57,8 +57,8 @@ impl RegistryClient {
     /// Fetch a package's index entries, caching the body on success and
     /// falling back to the cached body when the network is unreachable.
     pub async fn fetch_index(&self, name: &str) -> Result<Vec<IndexEntry>, RegistryError> {
-        // TODO(platform): the index path layout is provisional.
-        let url = format!("{}/index/{name}.jsonl", self.base_url);
+        // The index file is served per package under a lowercased name.
+        let url = format!("{}/index/{}", self.base_url, name.to_lowercase());
 
         match self.http.get(&url).send().await {
             Ok(response) if response.status().is_success() => {
@@ -97,8 +97,8 @@ impl RegistryClient {
             }
         }
 
-        // TODO(platform): the blob URL points at the R2 bucket once it exists.
-        let url = format!("{}/blobs/{name}/{name}-{version}.pkpkg", self.base_url);
+        // Immutable blobs are served under packages/<name>/<name>-<version>.pkpkg.
+        let url = format!("{}/packages/{name}/{name}-{version}.pkpkg", self.base_url);
         let response = self
             .http
             .get(&url)

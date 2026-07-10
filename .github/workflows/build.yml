@@ -135,7 +135,7 @@ jobs:
           ver="${ver#v}"
           out="peko-${ver}-${{ matrix.target }}"
           mkdir "$out"
-          cp target/release/peko target/release/peko-ls "$out"/
+          cp target/release/peko "$out"/
           tar -C "$out" -cJf "${out}.tar.xz" .
           echo "ASSET=${out}.tar.xz" >> "$GITHUB_ENV"
 
@@ -146,7 +146,7 @@ jobs:
           $ver = "${{ inputs.version }}".TrimStart("v")
           $out = "peko-$ver-${{ matrix.target }}"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item target/release/peko.exe,target/release/peko-ls.exe $out
+          Copy-Item target/release/peko.exe $out
           Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
           "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
