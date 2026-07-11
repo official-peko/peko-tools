@@ -20,3 +20,11 @@ Thumbs.db
 *.log
 tmp/
 scratch/
+
+# Local sample apps used to exercise the demo/pekoshots system; never committed.
+examples/
+
+# Internal tooling, rules, and planning docs (kept locally, not published)
+/tools/llvm18/
+/.claude/rules/
+/docs/
