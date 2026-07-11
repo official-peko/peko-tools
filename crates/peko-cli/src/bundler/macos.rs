@@ -290,25 +290,8 @@ fn package_dmg(build_dir: &Path, name: &str, app: &Path) -> BundleResult<PathBuf
     Ok(dmg)
 }
 
-/// Resolve the `llvm-lipo` used to build the universal binary. Selects the
-/// host binary under the Peko compiler bin directory and falls back to the
-/// `llvm-lipo` on the system PATH.
+/// Resolve the `llvm-lipo` used to build the universal binary from the bundled
+/// LLVM 18 tools for the host, falling back to `llvm-lipo` on the system PATH.
 fn resolve_llvm_lipo(peko_root: &Path) -> PathBuf {
-    let host_binary = match std::env::consts::OS {
-        "linux" => match std::env::consts::ARCH {
-            "arm" | "aarch64" => "llvm-lipo-linux-arm",
-            _ => "llvm-lipo-linux-x86_64",
-        },
-        "macos" => match std::env::consts::ARCH {
-            "arm" | "aarch64" => "llvm-lipo-darwin-arm",
-            _ => "llvm-lipo-darwin-x86_64",
-        },
-        _ => "llvm-lipo.exe",
-    };
-    let bundled = peko_root.join("Compiler/bin/llvm-lipo").join(host_binary);
-    if bundled.exists() {
-        bundled
-    } else {
-        PathBuf::from("llvm-lipo")
-    }
+    crate::execution::native::llvm18_tool(peko_root, "llvm-lipo")
 }

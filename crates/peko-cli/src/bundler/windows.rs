@@ -5,11 +5,9 @@
 //! links it all together. Architectures other than x86_64 are not
 //! currently supported on Windows.
 //!
-//! The `llvm-rc` resource compiler is picked per host (linux-arm,
-//! linux-x86_64, darwin-arm, darwin-x86_64, or windows.exe). On Linux,
-//! `std::env::consts::ARCH` reports `"arm"` for 32-bit ARM and
-//! `"aarch64"` for 64-bit ARM - both are treated as "arm" here since
-//! the toolchain ships a single ARM build that covers both.
+//! The `llvm-rc` resource compiler is the one bundled for the host under
+//! `Compiler/llvm18/<host>/bin`, beside the clang it invokes to preprocess
+//! the `.rc`.
 
 use std::fs::{self, File};
 use std::path::PathBuf;
@@ -193,31 +191,10 @@ pub fn bundle(
     let resource_file = windows_build_directory.join("res.rc");
     io_at(&resource_file, fs::write(&resource_file, resource_code))?;
 
-    // Compile the .rc to a .res using the appropriate llvm-rc binary
-    // for the host (we're cross-compiling from this host to Windows).
-    // See the module doc for notes on the linux-arm / linux-aarch64
-    // collapse.
-    let rc_compiler = match std::env::consts::OS {
-        "linux" => match std::env::consts::ARCH {
-            "arm" | "aarch64" => cli_info
-                .get_peko_root()
-                .join("Compiler/bin/llvm-rc/llvm-rc-linux-arm"),
-            _ => cli_info
-                .get_peko_root()
-                .join("Compiler/bin/llvm-rc/llvm-rc-linux-x86_64"),
-        },
-        "macos" => match std::env::consts::ARCH {
-            "arm" | "aarch64" => cli_info
-                .get_peko_root()
-                .join("Compiler/bin/llvm-rc/llvm-rc-darwin-arm"),
-            _ => cli_info
-                .get_peko_root()
-                .join("Compiler/bin/llvm-rc/llvm-rc-darwin-x86_64"),
-        },
-        _ => cli_info
-            .get_peko_root()
-            .join("Compiler/bin/llvm-rc/llvm-rc.exe"),
-    };
+    // Compile the .rc to a .res with the bundled llvm-rc for the host (we cross
+    // compile from this host to Windows). llvm-rc preprocesses the .rc by
+    // invoking the clang that sits beside it in the same llvm18 bin directory.
+    let rc_compiler = execution::native::llvm18_tool(cli_info.get_peko_root(), "llvm-rc");
 
     run_tool(
         "llvm-rc",

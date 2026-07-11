@@ -91,6 +91,16 @@ pub(crate) fn compile_native_sources(
             command.arg("-c");
             command.arg("-target").arg(&toolchain.meta.triple);
 
+            // C++ sources get the toolchain C++ standard. C and Objective-C
+            // sources do not: -std=c++NN is rejected for those languages.
+            let is_cpp = matches!(
+                source_file.extension().and_then(|e| e.to_str()),
+                Some("cpp" | "cc" | "cxx" | "c++")
+            );
+            if is_cpp && let Some(cxx_std) = &toolchain.build.cxx_std {
+                command.arg(format!("-std={cxx_std}"));
+            }
+
             // Toolchain C flags, with any toolchain-relative paths resolved.
             for flag in &toolchain.build.c_flags {
                 command.arg(resolve_flag(toolchain_dir, flag));
@@ -242,25 +252,53 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
     roots
 }
 
+/// The os-arch key for the current host under `Compiler/llvm18`. The bundle
+/// directories are named for the running host: macos-arm64, macos-x86_64,
+/// linux-arm64, linux-x86_64, windows-x86_64.
+pub(crate) fn llvm18_host_key() -> String {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" | "arm" => "arm64",
+        other => other,
+    };
+    format!("{}-{}", std::env::consts::OS, arch)
+}
+
+/// The directory of the bundled LLVM 18 tools for the current host, inside the
+/// SDK at `Compiler/llvm18/<host-key>/bin`. The clang there resolves its builtin
+/// headers from the sibling `../lib/clang`, and llvm-rc finds clang beside it.
+pub(crate) fn llvm18_bin(peko_root: &Path) -> PathBuf {
+    peko_root
+        .join("Compiler")
+        .join("llvm18")
+        .join(llvm18_host_key())
+        .join("bin")
+}
+
+/// A bundled LLVM tool for the current host, with the `.exe` suffix added when
+/// Peko itself runs on Windows. Falls back to the bare tool name on PATH when
+/// the bundle is absent.
+pub(crate) fn llvm18_tool(peko_root: &Path, tool: &str) -> PathBuf {
+    let name = if cfg!(windows) {
+        format!("{tool}.exe")
+    } else {
+        tool.to_owned()
+    };
+    let bundled = llvm18_bin(peko_root).join(&name);
+    if bundled.is_file() {
+        bundled
+    } else {
+        PathBuf::from(tool)
+    }
+}
+
 /// The clang binary used to compile native C sources.
 ///
-/// On Windows a standard install has no system clang on PATH, so the bundled
-/// `clang.exe` is used together with its resource directory (its builtin
-/// headers such as stddef.h) shipped alongside it under `Compiler/bin/lib/clang`.
-/// On macOS and Linux the system clang on PATH compiles the native C. The
-/// bundled cross clang is not used there: it targets Windows from the host and
-/// produces an executable the Windows loader rejects, whereas the system clang
-/// cross-compiles correctly.
+/// The bundled LLVM 18 clang for the host is used on every platform. It ships
+/// with its resource directory (the builtin headers such as stddef.h) at the
+/// sibling `../lib/clang`, so it compiles for any target through `-target`. The
+/// bare `clang` on PATH is the fallback when the bundle is absent.
 fn host_clang(peko_root: &Path) -> PathBuf {
-    if cfg!(target_os = "windows") {
-        let clang_bin = peko_root.join("Compiler").join("bin");
-        let bundled = clang_bin.join("clang").join("clang.exe");
-        let resource_dir = clang_bin.join("lib").join("clang");
-        if bundled.is_file() && resource_dir.is_dir() {
-            return bundled;
-        }
-    }
-    PathBuf::from("clang")
+    llvm18_tool(peko_root, "clang")
 }
 
 /// A filesystem-safe, package-scoped object name for a native source. Two
