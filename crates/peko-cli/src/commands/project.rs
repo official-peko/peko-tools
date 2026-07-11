@@ -418,14 +418,15 @@ fn overlay_peko_host(
 ) -> bool {
     // Overlay the Peko host: a manifest that marks this a static UI project and
     // depends on the installed pekoui package, plus the one-line entry.
+    let pekoui_version = latest_pekoui_version(cli_info.get_peko_root());
     let pekoui_path = cli_info
         .get_peko_root()
-        .join("registry/src/pekoui/pekoui-0.1.0");
+        .join(format!("registry/src/pekoui/pekoui-{pekoui_version}"));
     let manifest = UI_MANIFEST_TEMPLATE
         .replace("{name}", project_name)
         .replace("{bundle}", bundle_id)
         .replace("{version}", version)
-        .replace("{pekoui_path}", &config_path_string(&pekoui_path));
+        .replace("{pekoui_version}", &pekoui_version);
 
     if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
         reporter.error(format!("could not create source directory: {e}"));
@@ -620,6 +621,32 @@ fn add_client_dependency(project_root: &Path, pekoui_path: &Path) -> std::io::Re
     std::fs::write(&package_path, rendered)
 }
 
+/// The newest pekoui version installed under `registry/src/pekoui`, so a
+/// scaffolded project depends on the current package rather than a pinned one.
+/// Matching the globally installed pekoui also keeps the project and the global
+/// auto-import on one version, so pekoui compiles once. Falls back to a known
+/// version when none is installed.
+fn latest_pekoui_version(peko_root: &Path) -> String {
+    let dir = peko_root.join("registry/src/pekoui");
+    let mut best: Option<semver::Version> = None;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(rest) = name.to_string_lossy().strip_prefix("pekoui-").map(str::to_owned)
+            else {
+                continue;
+            };
+            if let Ok(version) = semver::Version::parse(&rest)
+                && best.as_ref().is_none_or(|current| version > *current)
+            {
+                best = Some(version);
+            }
+        }
+    }
+    best.map(|version| version.to_string())
+        .unwrap_or_else(|| "0.1.0".to_string())
+}
+
 /// Prepend a side-effect import of `@peko/client` to the web entry so the
 /// client SDK's auto-connect block runs on load and opens the bridge. The entry
 /// is the module script named in index.html. A no-op when the import is already
@@ -766,7 +793,7 @@ const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     framework = \"static\"\n\
                                     \n\
                                     [dependencies]\n\
-                                    pekoui = { path = \"{pekoui_path}\" }\n";
+                                    pekoui = \"{pekoui_version}\"\n";
 
 /// The `src/main.peko` scaffolded for a UI project: a one-line host that
 /// serves the built web app in a native webview.
