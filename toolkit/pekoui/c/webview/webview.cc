@@ -2817,6 +2817,15 @@ private:
 } // namespace webview
 
 WEBVIEW_API webview_t webview_create(int debug, void *wnd) {
+  // The dev loop sets PEKO_DEVTOOLS. Enable the webview inspector then even when
+  // the app requests debug off, so the running app's web contents can be
+  // inspected during development.
+  if (!debug) {
+    const char *devtools = getenv("PEKO_DEVTOOLS");
+    if (devtools != nullptr && devtools[0] != '\0') {
+      debug = 1;
+    }
+  }
   auto w = new webview::webview(debug, wnd);
   if (!w->window()) {
     delete w;
