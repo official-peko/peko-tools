@@ -465,6 +465,16 @@ fn overlay_peko_host(
         ));
     }
 
+    // Import @peko/client from the web entry so the client SDK connects to the
+    // bridge on load. The dependency alone is inert: nothing runs until the
+    // module is imported.
+    if let Err(e) = inject_client_import(project_root) {
+        reporter.warning(format!(
+            "set up, but could not import @peko/client into the web entry automatically: {e}. \
+             Add `import '@peko/client'` to the top of your web entry (for example src/main.tsx)."
+        ));
+    }
+
     true
 }
 
@@ -608,6 +618,32 @@ fn add_client_dependency(project_root: &Path, pekoui_path: &Path) -> std::io::Re
     let mut rendered = serde_json::to_string_pretty(&package)?;
     rendered.push('\n');
     std::fs::write(&package_path, rendered)
+}
+
+/// Prepend a side-effect import of `@peko/client` to the web entry so the
+/// client SDK's auto-connect block runs on load and opens the bridge. The entry
+/// is the module script named in index.html. A no-op when the import is already
+/// present. A side-effect import is framework agnostic.
+fn inject_client_import(project_root: &Path) -> std::io::Result<()> {
+    let html = std::fs::read_to_string(project_root.join("index.html"))?;
+    let entry_rel = html
+        .split("type=\"module\"")
+        .nth(1)
+        .and_then(|rest| rest.split("src=\"").nth(1))
+        .and_then(|rest| rest.split('"').next())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no module script in index.html",
+            )
+        })?
+        .trim_start_matches('/');
+    let entry = project_root.join(entry_rel);
+    let source = std::fs::read_to_string(&entry)?;
+    if source.contains("@peko/client") {
+        return Ok(());
+    }
+    std::fs::write(&entry, format!("import '@peko/client'\n{source}"))
 }
 
 /// Inject `base` and `build.outDir` into the Vite config create-vite emitted,
