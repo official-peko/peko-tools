@@ -1,6 +1,6 @@
 [package]
 name = "pekoui"
-version = "0.1.0"
+version = "0.1.1"
 description = "The PekoUI framework: a native webview host and UI runtime."
 license = "MIT"
 repository = "https://github.com/official-peko/peko-tools"
