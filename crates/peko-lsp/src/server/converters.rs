@@ -348,22 +348,46 @@ fn markdown_string(s: &str) -> lsp::Documentation {
 /// Convert a filesystem path to an LSP `Uri`.
 ///
 /// Uses [`Uri::from_file_path`], which handles both Unix and Windows paths,
-/// including percent-encoding of special characters. If the path is not
-/// absolute, this function canonicalizes it first because `from_file_path`
-/// rejects relative paths and may also return `None` for non-existent
-/// paths. If all of that fails, falls back to a `file:///unknown` sentinel
-/// URI so the caller never has to deal with `Option` / `Result` plumbing.
+/// including percent-encoding of special characters. A relative path is
+/// canonicalized first because `from_file_path` rejects relative paths. The
+/// result is stripped of any Windows verbatim `\\?\` prefix, which
+/// `from_file_path` rejects. If all of that fails, falls back to a
+/// `file:///unknown` sentinel URI so the caller never has to deal with
+/// `Option` / `Result` plumbing.
 pub fn path_to_uri(path: &Path) -> Uri {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    Uri::from_file_path(&abs)
+    let clean = strip_verbatim_prefix(&abs);
+    Uri::from_file_path(&clean)
         .unwrap_or_else(|| Uri::from_str("file:///unknown").expect("fallback URI is valid"))
 }
 
+/// Remove a Windows verbatim path prefix so the path is in the plain form
+/// `Uri::from_file_path` accepts. `\\?\C:\dir` becomes `C:\dir` and
+/// `\\?\UNC\host\share` becomes `\\host\share`. A no-op on paths without the
+/// prefix, and on non-Windows paths.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Convert an LSP `Uri` to a filesystem `PathBuf`. If the URI is not a valid
-/// `file:` URL, falls back to interpreting the URI's path component as a
-/// filesystem path.
+/// `file:` URL, falls back to the URI's path component, dropping the spurious
+/// leading slash a Windows drive path carries (`/C:/dir` becomes `C:/dir`).
 pub fn uri_to_path(uri: &Uri) -> PathBuf {
     uri.to_file_path()
         .map(|p| p.into_owned())
-        .unwrap_or_else(|| PathBuf::from(uri.path().as_str()))
+        .unwrap_or_else(|| {
+            let path = uri.path().as_str();
+            let trimmed = path.strip_prefix('/').filter(|rest| {
+                let bytes = rest.as_bytes();
+                bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+            });
+            PathBuf::from(trimmed.unwrap_or(path))
+        })
 }

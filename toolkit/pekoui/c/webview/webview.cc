@@ -113,6 +113,11 @@ webview_dispatch(webview_t w, void (*fn)(webview_t w, void *arg), void *arg);
 // pointer, when using Win32 backend the pointer is HWND pointer.
 WEBVIEW_API void *webview_get_window(webview_t w);
 
+// Returns the native browser controller pointer. On the Win32 backend this is
+// an ICoreWebView2Controller pointer, from which the ICoreWebView2 is reached
+// for capture. Returns null on the GTK and Cocoa backends.
+WEBVIEW_API void *webview_get_controller(webview_t w);
+
 // Updates the title of the native window. Must be called from the UI thread.
 WEBVIEW_API void webview_set_title(webview_t w, const char *title);
 
@@ -2127,6 +2132,53 @@ private:
   std::atomic<ULONG> m_ref_count{1};
 };
 
+// Completion handler for AddScriptToExecuteOnDocumentCreated. It records when
+// the script registration finishes so init can pump the message loop until the
+// script is guaranteed to run on the next navigation.
+class peko_add_script_handler
+    : public ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler {
+public:
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppv) override {
+    if (!ppv) {
+      return E_POINTER;
+    }
+    if (riid == IID_IUnknown ||
+        riid ==
+            IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler) {
+      *ppv = static_cast<
+          ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler *>(
+          this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return ++m_ref_count;
+  }
+  ULONG STDMETHODCALLTYPE Release() override {
+    ULONG count = --m_ref_count;
+    if (count == 0) {
+      delete this;
+    }
+    return count;
+  }
+  HRESULT STDMETHODCALLTYPE Invoke(HRESULT error_code, LPCWSTR id) override {
+    (void)error_code;
+    (void)id;
+    m_done = true;
+    return S_OK;
+  }
+  bool done() const {
+    return m_done;
+  }
+
+private:
+  std::atomic<ULONG> m_ref_count{1};
+  std::atomic<bool> m_done{false};
+};
+
 class win32_edge_engine {
 public:
   win32_edge_engine(bool debug, void *window) {
@@ -2405,7 +2457,20 @@ public:
 
   void init(const std::string &js) {
     auto wjs = widen_string(js);
-    m_webview->AddScriptToExecuteOnDocumentCreated(wjs.c_str(), nullptr);
+    // Register the boot script and pump the message loop until registration
+    // finishes, so a Navigate that follows applies the script to the first
+    // document. This matches the synchronous WKUserScript path on macOS.
+    // Without the wait the async registration can lose the race, leaving
+    // window.__PEKO__ undefined when the page's own scripts run, which disables
+    // the devtools console and points the bridge socket at the wrong origin.
+    auto *handler = new peko_add_script_handler();
+    m_webview->AddScriptToExecuteOnDocumentCreated(wjs.c_str(), handler);
+    MSG msg = {};
+    while (!handler->done() && GetMessage(&msg, nullptr, 0, 0)) {
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
+    }
+    handler->Release();
   }
 
   void eval(const std::string &js) {
@@ -2779,6 +2844,15 @@ WEBVIEW_API void webview_dispatch(webview_t w, void (*fn)(webview_t, void *),
 
 WEBVIEW_API void *webview_get_window(webview_t w) {
   return static_cast<webview::webview *>(w)->window();
+}
+
+WEBVIEW_API void *webview_get_controller(webview_t w) {
+#if defined(_WIN32)
+  return static_cast<webview::webview *>(w)->controller();
+#else
+  (void)w;
+  return nullptr;
+#endif
 }
 
 WEBVIEW_API void webview_set_title(webview_t w, const char *title) {
