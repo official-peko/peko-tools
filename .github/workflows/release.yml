@@ -44,6 +44,9 @@ jobs:
           else
             PRE=""
           fi
+          # Replace any existing release for this tag so a re-published tag
+          # overrides it. The git tag itself is left in place.
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes || true
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
