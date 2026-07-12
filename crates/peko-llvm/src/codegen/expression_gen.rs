@@ -3172,6 +3172,14 @@ impl PekoValueBuilder for FunctionCallAST {
                     .map(|option| option.read().unwrap().clone())
                     .collect();
 
+            // Resolve the overload in the call module, matching the simulator.
+            // choose_function expands each argument type to compare it against
+            // the parameter, and a freshly built argument type (a closure
+            // literal, whose argument and return types are not yet expanded)
+            // only resolves in the module the call is written in. Without this
+            // step_back the expansion runs in the accessed module and fails, so
+            // a closure literal argument is wrongly rejected.
+            let post_stack = codegen_context.module_context.step_back();
             let function_choice = codegen_context.choose_function(
                 function_choices,
                 arguments
@@ -3190,6 +3198,7 @@ impl PekoValueBuilder for FunctionCallAST {
                 },
                 false,
             );
+            codegen_context.module_context.step_forward(post_stack);
 
             let function_choice = match function_choice {
                 Some(c) => c,
@@ -3289,9 +3298,10 @@ impl PekoValueBuilder for FunctionCallAST {
                         .build_value(codegen_context)
                 };
 
-                if let Some(boxed_argument) =
-                    codegen_context.box_value_to_type(&arg.argument_type, &argument_value)
-                {
+                let post_stack = codegen_context.module_context.step_back();
+                let boxed = codegen_context.box_value_to_type(&arg.argument_type, &argument_value);
+                codegen_context.module_context.step_forward(post_stack);
+                if let Some(boxed_argument) = boxed {
                     argument_values.push(boxed_argument);
                 } else {
                     arguments_errored = true;
@@ -3320,9 +3330,15 @@ impl PekoValueBuilder for FunctionCallAST {
                     break;
                 }
 
-                if let Some(boxed_argument) =
-                    codegen_context.box_value_to_type(argument_type, argument)
-                {
+                // Coerce in the call module, matching how the arguments were
+                // built. box_value_to_type expands the argument type to compare
+                // it against the parameter, and a closure literal's argument and
+                // return types only resolve in the module the call is written
+                // in.
+                let post_stack = codegen_context.module_context.step_back();
+                let boxed = codegen_context.box_value_to_type(argument_type, argument);
+                codegen_context.module_context.step_forward(post_stack);
+                if let Some(boxed_argument) = boxed {
                     argument_values.push(boxed_argument);
                 } else {
                     arguments_errored = true;
