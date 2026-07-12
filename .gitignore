@@ -28,3 +28,10 @@ examples/
 /tools/llvm18/
 /.claude/rules/
 /docs/
+
+# Proprietary gated package, kept local only.
+/toolkit/pekoshots/
+
+# Python bytecode
+__pycache__/
+*.pyc
