@@ -851,7 +851,7 @@ fn rebuild_and_relaunch(
 /// Reports diagnostics (to the terminal and, under devtools, to the window) and
 /// returns whether the build succeeded.
 #[allow(clippy::too_many_arguments)]
-fn compile_ui(
+pub(crate) fn compile_ui(
     peko_root: &Path,
     release: bool,
     project: &mut PekoProject,
@@ -985,7 +985,7 @@ fn touches_peko_source(event: &notify::Event) -> bool {
 }
 
 /// Whether the project's package.json declares a `dev` script.
-fn dev_script_present(root: &std::path::Path) -> bool {
+pub(crate) fn dev_script_present(root: &std::path::Path) -> bool {
     let Ok(text) = std::fs::read_to_string(root.join("package.json")) else {
         return false;
     };
@@ -1005,7 +1005,7 @@ fn dev_script_present(root: &std::path::Path) -> bool {
 /// it spawns (for example Vite) does not outlive it. The group gets a terminate
 /// signal first so the bundler can restore the terminal, then the server is
 /// reaped.
-fn stop_dev_server(child: &mut Child) {
+pub(crate) fn stop_dev_server(child: &mut Child) {
     #[cfg(unix)]
     {
         // The server leads its own group (see start_dev_server), so a negative
@@ -1030,7 +1030,7 @@ fn stop_dev_server(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
+pub(crate) fn start_dev_server(root: &std::path::Path) -> Result<(Child, String), String> {
     use std::io::{BufRead, BufReader};
 
     let mut command = crate::proc::npm();

@@ -1,0 +1,37 @@
+peko demo - run the app's demo shots to verify the automation flow
+
+USAGE
+    peko demo [name] [options]
+
+DESCRIPTION
+    Builds the current UI project in demo mode, launches it against the
+    framework dev server, and drives its demo shots through the in-page
+    automation agent. Each step is run in order and its result is printed.
+    No screenshots or recordings are produced; this verifies that the shot
+    scripts navigate, find elements, and interact as written.
+
+    With no name, every declared shot runs in turn. With a name, only that
+    shot runs.
+
+    The project's demo module (see the [demo] section of peko.toml) declares
+    the fixtures and shots. The app must depend on pekoshots and call
+    pekoshots::runtime::attach from its entry.
+
+OPTIONS
+    Value options take their value with an equals sign, for example --delay=1.
+
+    --from=<step>   Start from a step index (0-based) instead of the first.
+    --delay=<secs>  Pause between shots so a watcher can take each one in.
+                    Seconds, default 3. Use --delay=0 to run with no pause.
+                    Steps within a shot always run without pausing.
+    --shot=<name>   The shot to run, as an alternative to the positional name.
+    --ide           Open a control channel and step under IDE control, reading
+                    run, pause, step, skip <n>, and stop commands on stdin.
+    --release       Build in release mode instead of debug.
+
+EXAMPLES
+    peko demo
+    peko demo onboarding
+    peko demo dark-settings --from=2
+    peko demo login --delay=1
+    peko demo --ide

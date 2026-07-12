@@ -60,6 +60,9 @@ pub struct ApplicationManifest {
     /// The `[icon]` table: the app-icon source and its editable project. `None`
     /// falls back to `[ui].icon`.
     pub icon: Option<Icon>,
+    /// The `[demo]` table: the demo module for store-asset generation. `None`
+    /// means the app declares no demo module.
+    pub demo: Option<Demo>,
     /// The `[dependencies]` table.
     pub dependencies: BTreeMap<String, Dependency>,
     /// The `[platforms]` table.
@@ -146,6 +149,32 @@ impl Icon {
     /// The source PNG for a platform: its override, else the shared `source`.
     pub fn source_for(&self, platform: OperatingSystem) -> Option<&PathBuf> {
         self.overrides.get(&platform).or(self.source.as_ref())
+    }
+}
+
+/// The `[demo]` table: the demo module that drives store-asset generation. The
+/// demo module holds the fixtures (demo-auth, seed data, a frozen clock, quiet
+/// mode) and the shot scripts. It is authored in PekoScript and is meant to be
+/// present only in demo builds, never linked into a release binary.
+#[derive(Debug, Clone, Default)]
+pub struct Demo {
+    /// Whether the demo module is active by default. A demo build (the `--demo`
+    /// flag or `peko demo`) activates it regardless; this flag lets a debug run
+    /// opt in without that flag.
+    pub enabled: bool,
+    /// The demo module source file, relative to the project root. Absent uses
+    /// the default demo module path.
+    pub module: Option<PathBuf>,
+}
+
+impl Demo {
+    /// The demo module source file: the configured `module`, else the default
+    /// `src/demo.peko`. UI apps place their entry under `src`, so the demo
+    /// module defaults beside it.
+    pub fn module_path(&self) -> PathBuf {
+        self.module
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("src").join("demo.peko"))
     }
 }
 
@@ -664,6 +693,7 @@ struct RawManifest {
     project: Option<RawProject>,
     ui: Option<RawUi>,
     icon: Option<RawIcon>,
+    demo: Option<RawDemo>,
     package: Option<RawPackage>,
     lib: Option<RawLib>,
     #[serde(default)]
@@ -714,6 +744,14 @@ struct RawIcon {
     android: Option<String>,
     android_foreground: Option<String>,
     android_background: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDemo {
+    #[serde(default)]
+    enabled: bool,
+    module: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +854,7 @@ impl RawManifest {
             let project = build_project(self.project.unwrap(), source)?;
             let ui = self.ui.map(|raw| build_ui(raw, source)).transpose()?;
             let icon = self.icon.map(build_icon);
+            let demo = self.demo.map(build_demo);
 
             if self.lib.is_some() {
                 return Err(ConfigError::invalid(
@@ -828,6 +867,7 @@ impl RawManifest {
                 project,
                 ui,
                 icon,
+                demo,
                 dependencies,
                 platforms,
                 native,
@@ -930,6 +970,14 @@ fn build_icon(raw: RawIcon) -> Icon {
         overrides,
         android_foreground: raw.android_foreground.map(PathBuf::from),
         android_background: raw.android_background.map(PathBuf::from),
+    }
+}
+
+/// Build the `[demo]` table from its raw form.
+fn build_demo(raw: RawDemo) -> Demo {
+    Demo {
+        enabled: raw.enabled,
+        module: raw.module.map(PathBuf::from),
     }
 }
 

@@ -70,6 +70,7 @@ commands! {
     check      => "verify the Peko toolchain installation is healthy",
     clangflags => "print clang flags peko_core would pass to the C compiler",
     compile    => "compile a single Pekoscript file to an object or binary",
+    demo       => "run the app's demo shots to verify the automation flow",
     format     => "normalize the indentation and spacing of Pekoscript files",
     icon       => "generate the per-platform app icon set from the icon source",
     install    => "resolve, download, and lock the project's dependencies",
