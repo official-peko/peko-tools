@@ -17,7 +17,7 @@ use std::process::Command;
 
 use peko_core::config::{LockSource, Lockfile, Manifest, Toolchain, resolve_flag};
 use peko_core::packages::registry_source_dir;
-use peko_core::target::PekoTarget;
+use peko_core::target::{OperatingSystem, PekoTarget};
 
 /// The result of compiling the reachable packages' native C: the object and
 /// static-library paths for the linker, plus the per-OS `[native.link]`
@@ -87,7 +87,7 @@ pub(crate) fn compile_native_sources(
                 continue;
             }
 
-            let mut command = Command::new(host_clang(peko_root));
+            let mut command = Command::new(host_clang(peko_root, target.operating_system));
             command.arg("-c");
             command.arg("-target").arg(&toolchain.meta.triple);
 
@@ -104,6 +104,17 @@ pub(crate) fn compile_native_sources(
             // Toolchain C flags, with any toolchain-relative paths resolved.
             for flag in &toolchain.build.c_flags {
                 command.arg(resolve_flag(toolchain_dir, flag));
+            }
+            // Objective-C sources also get the toolchain's Objective-C flags,
+            // such as module support for SDKs whose frameworks are module-only.
+            let is_objc = matches!(
+                source_file.extension().and_then(|e| e.to_str()),
+                Some("m" | "mm")
+            );
+            if is_objc {
+                for flag in &toolchain.build.objc_flags {
+                    command.arg(resolve_flag(toolchain_dir, flag));
+                }
             }
             // Package compile flags: unconditional, then per-OS.
             for flag in &native.flags.all {
@@ -289,10 +300,20 @@ pub(crate) fn llvm18_tool(peko_root: &Path, tool: &str) -> PathBuf {
 
 /// The clang binary used to compile native C sources.
 ///
-/// The SDK's bundled LLVM 18 clang for the host is used on every platform. It
-/// ships with its resource directory (the builtin headers such as stddef.h) at
-/// the sibling `../lib/clang`, so it compiles for any target through `-target`.
-fn host_clang(peko_root: &Path) -> PathBuf {
+/// The bundled LLVM 18 clang for the host compiles for every non-Apple target
+/// through `-target`, shipping its resource directory (the builtin headers such
+/// as stddef.h) at the sibling `../lib/clang`.
+///
+/// Apple targets are the exception. Recent iOS SDKs ship module maps that
+/// `requires` Apple clang features (for example
+/// `found_incompatible_headers__check_search_paths`) which upstream LLVM lacks,
+/// and their frameworks are module-only, so the bundled clang cannot build
+/// them. The host's Apple clang, matched to the installed SDK, is used for iOS.
+/// The host is always macOS when an Apple target is built.
+fn host_clang(peko_root: &Path, operating_system: OperatingSystem) -> PathBuf {
+    if matches!(operating_system, OperatingSystem::IOS) {
+        return PathBuf::from("clang");
+    }
     llvm18_tool(peko_root, "clang")
 }
 

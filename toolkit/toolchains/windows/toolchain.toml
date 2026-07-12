@@ -14,7 +14,7 @@ arch = "x86_64"
 triple = "x86_64-pc-win32"
 
 [build]
-cxx_std = "c++17"
+cxx_std = "c++20"
 c_flags = [
   "-Wno-microsoft-anon-tag",
   "-Wno-ignored-pragma-intrinsic",
@@ -31,6 +31,7 @@ include = [
   "sdk/include/um",
   "sdk/include/shared",
   "sdk/include/winrt",
+  "sdk/include/cppwinrt",
   "webview2/build/native/include",
 ]
 

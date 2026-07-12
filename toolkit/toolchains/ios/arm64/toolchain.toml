@@ -12,7 +12,7 @@ triple = "arm64-apple-ios"
 [build]
 cxx_std = "c++17"
 c_flags = ["-fobjc-arc", "-isysroot", "iPhoneOS.sdk"]
-objc_flags = []
+objc_flags = ["-fmodules"]
 include = ["include/c++"]
 
 [link]
