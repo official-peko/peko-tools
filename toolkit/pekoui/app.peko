@@ -393,6 +393,25 @@ import std::json;
             this.channel.set_trace(true)
         }
 
+        // Whether the app runs under the demo system: peko demo for interactive
+        // driving, or a shots run producing assets. Either tells the client SDK
+        // and the pekoshots agent to wire the automation bridge.
+        let demo: string = "false"
+        if env::get("PEKO_DEMO").size() > 0 || env::get("PEKO_SHOTS").size() > 0 {
+            demo = "true"
+        }
+        // Whether this is a shots run (PEKO_SHOTS). The agent then drives itself
+        // and asks the host to capture, rather than waiting for a driver.
+        let shots: string = "false"
+        if env::get("PEKO_SHOTS").size() > 0 {
+            shots = "true"
+        }
+        // On a platform whose capture runs host-side (the iOS simulator), the
+        // host helper sets PEKO_SHOTS_HOST to its loopback endpoint. The agent
+        // posts capture and lifecycle requests there. Empty on self-capturing
+        // desktop builds.
+        let shots_host: string = env::get("PEKO_SHOTS_HOST")
+
         // The devtools window is a bridge client. Publish this run's bridge URL
         // and token to the file the dev loop named, so it can connect. Rewritten
         // on every relaunch with the new ephemeral port.
@@ -400,7 +419,7 @@ import std::json;
         if bridge_file.size() > 0 {
             fs::write_file(bridge_file, `{"url":"ws://127.0.0.1:${ws_port}/","token":"${token}"}`)
         }
-        let boot: string = `window.__PEKO__ = { url: "ws://127.0.0.1:${ws_port}/", token: "${token}", initialRoute: ${initial_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: ${html_menu}, devtools: ${devtools} };`
+        let boot: string = `window.__PEKO__ = { url: "ws://127.0.0.1:${ws_port}/", token: "${token}", initialRoute: ${initial_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: ${html_menu}, devtools: ${devtools}, demo: ${demo}, shots: ${shots}, shotsHost: "${shots_host}" };`
         this.view.init(boot)
 
         // Deep-link scheme registration is a production concern; the dev loop

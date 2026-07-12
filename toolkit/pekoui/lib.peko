@@ -14,3 +14,4 @@ export keychain;
 export menu;
 export bridge;
 export dialog;
+export env;
