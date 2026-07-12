@@ -275,28 +275,23 @@ pub(crate) fn llvm18_bin(peko_root: &Path) -> PathBuf {
 }
 
 /// A bundled LLVM tool for the current host, with the `.exe` suffix added when
-/// Peko itself runs on Windows. Falls back to the bare tool name on PATH when
-/// the bundle is absent.
+/// Peko itself runs on Windows. The SDK's shipped tool is always used, never a
+/// tool from PATH, so a build resolves to the same compiler and linker
+/// regardless of what is installed on the machine.
 pub(crate) fn llvm18_tool(peko_root: &Path, tool: &str) -> PathBuf {
     let name = if cfg!(windows) {
         format!("{tool}.exe")
     } else {
         tool.to_owned()
     };
-    let bundled = llvm18_bin(peko_root).join(&name);
-    if bundled.is_file() {
-        bundled
-    } else {
-        PathBuf::from(tool)
-    }
+    llvm18_bin(peko_root).join(name)
 }
 
 /// The clang binary used to compile native C sources.
 ///
-/// The bundled LLVM 18 clang for the host is used on every platform. It ships
-/// with its resource directory (the builtin headers such as stddef.h) at the
-/// sibling `../lib/clang`, so it compiles for any target through `-target`. The
-/// bare `clang` on PATH is the fallback when the bundle is absent.
+/// The SDK's bundled LLVM 18 clang for the host is used on every platform. It
+/// ships with its resource directory (the builtin headers such as stddef.h) at
+/// the sibling `../lib/clang`, so it compiles for any target through `-target`.
 fn host_clang(peko_root: &Path) -> PathBuf {
     llvm18_tool(peko_root, "clang")
 }
