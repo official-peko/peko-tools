@@ -146,6 +146,11 @@ impl Session {
 pub struct User {
     pub uid: String,
     pub email: Option<String>,
+    /// Whether the account's email is verified. Publishing requires this.
+    /// `None` when an older server omits the field, so callers should only act
+    /// on an explicit `Some(false)`.
+    #[serde(rename = "emailVerified")]
+    pub email_verified: Option<bool>,
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
     #[serde(rename = "photoURL")]

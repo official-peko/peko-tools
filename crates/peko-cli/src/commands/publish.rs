@@ -120,7 +120,29 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            reporter.error(format!("publish failed: {e}"));
+            use crate::registry::publish::PublishError;
+            match e {
+                // A 403 carries the server's own explanation (most often an
+                // unverified email). Email verification is a browser/email flow
+                // and cannot be done from the CLI, so show the message and stop.
+                PublishError::Forbidden(message) => {
+                    reporter.error(message);
+                    reporter.help(
+                        "email verification is a browser step and cannot be done from the CLI; \
+                         verify it from your account page on the Peko web app, then publish again",
+                    );
+                }
+                // A 401 now comes from the platform's verification gate; treat
+                // it as an invalid session and point at re-login.
+                PublishError::Unauthorized => {
+                    reporter.error("the platform could not verify this session");
+                    reporter.help(format!(
+                        "run '{} login' to authenticate again",
+                        cli_info.executable
+                    ));
+                }
+                other => reporter.error(format!("publish failed: {other}")),
+            }
             ExitCode::FAILURE
         }
     }

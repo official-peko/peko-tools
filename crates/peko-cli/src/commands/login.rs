@@ -24,7 +24,16 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     // The session is stored. Reading the identity is a courtesy confirmation, so
     // a failure here does not undo a successful login.
     match auth::current_user(&base, &session).await {
-        Ok(user) => reporter.success(format!("logged in as {}", describe_user(&user))),
+        Ok(user) => {
+            reporter.success(format!("logged in as {}", describe_user(&user)));
+            // Warn early so the user is not surprised by a 403 at publish time.
+            if user.email_verified == Some(false) {
+                reporter.warning(
+                    "your email is not verified; verify it from your account page \
+                     on the Peko web app before publishing packages",
+                );
+            }
+        }
         Err(_) => reporter.success("logged in"),
     }
     ExitCode::SUCCESS

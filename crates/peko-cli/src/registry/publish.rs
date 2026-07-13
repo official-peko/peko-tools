@@ -38,6 +38,12 @@ pub enum PublishError {
     #[error("the platform rejected this session")]
     Unauthorized,
 
+    /// The platform forbade the operation with a user-facing explanation, e.g.
+    /// an account whose email is not yet verified. The string is the server's
+    /// own message, already suitable to show the user.
+    #[error("{0}")]
+    Forbidden(String),
+
     /// Requesting the upload slot failed.
     #[error("could not start the upload (HTTP {0})")]
     Start(u16),
@@ -99,6 +105,17 @@ fn http_client() -> Result<reqwest::Client, PublishError> {
         .map_err(PublishError::HttpClient)
 }
 
+/// Read the `{ "error" }` explanation from a 403 response, falling back to a
+/// generic message. A 403 here means the account is not allowed to publish,
+/// most often because its email is not verified yet.
+async fn forbidden_message(response: reqwest::Response) -> String {
+    response
+        .json::<ErrorResponse>()
+        .await
+        .map(|e| e.error)
+        .unwrap_or_else(|_| "your account is not permitted to publish packages".to_owned())
+}
+
 /// Upload `bytes` to `base` as an authenticated publish. `id_token` is the
 /// bearer token from `peko login`.
 pub async fn publish(
@@ -125,6 +142,9 @@ pub async fn publish(
         .map_err(PublishError::Network)?;
     if start.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(PublishError::Unauthorized);
+    }
+    if start.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(PublishError::Forbidden(forbidden_message(start).await));
     }
     if !start.status().is_success() {
         return Err(PublishError::Start(start.status().as_u16()));
@@ -155,6 +175,9 @@ pub async fn publish(
         .map_err(PublishError::Network)?;
     if complete.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(PublishError::Unauthorized);
+    }
+    if complete.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(PublishError::Forbidden(forbidden_message(complete).await));
     }
     if complete.status() == reqwest::StatusCode::BAD_REQUEST {
         let message = complete

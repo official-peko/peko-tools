@@ -30,6 +30,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
                     "authenticated": true,
                     "uid": user.uid,
                     "email": user.email,
+                    "emailVerified": user.email_verified,
                     "name": user.display_name,
                     "photoUrl": user.photo_url,
                     "role": user.role,
@@ -40,6 +41,9 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             reporter.info(format!("uid:   {}", user.uid));
             if let Some(email) = &user.email {
                 reporter.info(format!("email: {email}"));
+            }
+            if user.email_verified == Some(false) {
+                reporter.warning("email not verified — required to publish packages");
             }
             if let Some(name) = &user.display_name {
                 reporter.info(format!("name:  {name}"));
