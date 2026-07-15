@@ -10,6 +10,7 @@ pub mod bridge;
 pub mod bundler;
 pub mod cli;
 pub mod deploy;
+pub mod deploy_app;
 pub mod execution;
 pub mod keychain;
 pub mod proc;

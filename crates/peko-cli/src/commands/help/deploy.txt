@@ -4,8 +4,34 @@ Publishes a package to the registry, or deploys the current app to Peko
 server hosting.
 
 TARGETS
+    app       build an app for its target platforms and submit it
     package   pack the enclosing library package and upload it to the registry
     server    build the app and deploy it to Peko server hosting
+
+DEPLOY APP
+
+Builds the app for every platform in [project].target_platforms and ships
+it to the platform as one bundle. For each platform it produces two
+builds: a generation build (peko build --demo: debug, demo fixtures and
+pekoshots included, unsigned) that the farm runs to generate store
+screenshots and recordings, and a submission build (peko build --release:
+release, demo and pekoshots stripped, signed) that is the store-ready
+binary.
+
+The flow confirms the target platforms, confirms a signing key is
+connected for each signable platform, runs both builds per platform,
+organizes the outputs, packs them into one compressed .pkdeploy bundle
+under build/deploy/, and uploads it to the platform.
+
+Non-Apple targets (Windows/Android/Linux) always build locally. Apple
+targets build locally on a Mac host; on a non-Mac host a remote Apple
+builder is required, which is not available yet (you are prompted, and
+declining skips those targets).
+
+OPTIONS (app)
+    --yes               skip the confirmation prompts (non-interactive)
+    --allow-unsigned    proceed even when a platform has no signing key
+    --no-upload         build the bundle but do not upload it
 
 DEPLOY PACKAGE
 
@@ -60,6 +86,8 @@ OPTIONS
 
 EXAMPLES
     peko login
+    peko deploy app
+    peko deploy app --yes --no-upload
     peko deploy package
     peko deploy server
     peko deploy server --app-id app_1a2b3c

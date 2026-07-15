@@ -51,6 +51,24 @@ pub fn platform_dir(project_root: &Path, platform: &str) -> PathBuf {
     keys_dir(project_root).join(platform)
 }
 
+/// `true` when the project has the primary signing key file registered for
+/// `platform` (its keystore/p12/pfx). A pre-flight check for `peko deploy app`;
+/// it does not read the keychain password (the signing build validates that).
+pub fn key_connected(project_root: &Path, platform: &str) -> bool {
+    let role = match platform {
+        "android" => "keystore",
+        "ios" | "macos" => "p12",
+        "windows" => "pfx",
+        _ => return false,
+    };
+    let Ok(registry) = load_registry(project_root) else {
+        return false;
+    };
+    registered_file(project_root, &registry, platform, role)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
 /// Path to the registry file that records non-secret key metadata.
 fn registry_path(project_root: &Path) -> PathBuf {
     keys_dir(project_root).join("registry.json")

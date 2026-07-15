@@ -31,12 +31,13 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     };
     match target.as_str() {
+        "app" => crate::deploy_app::run(cli_info, reporter).await,
         "server" => deploy_server(cli_info, reporter).await,
         "package" => deploy_package(cli_info, reporter).await,
         other => {
             reporter.error(format!("unknown deploy target '{other}'"));
             reporter.help(
-                "targets are 'package' (publish to the registry) and 'server' (Peko server hosting)",
+                "targets are 'app' (build and submit an app), 'package' (publish to the registry), and 'server' (Peko server hosting)",
             );
             ExitCode::FAILURE
         }
