@@ -124,7 +124,10 @@ pub fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             return ExitCode::FAILURE;
         }
         if let Err(error) = std::fs::write(&destination, stub.as_bytes()) {
-            reporter.error(format!("could not write {}: {error}", destination.display()));
+            reporter.error(format!(
+                "could not write {}: {error}",
+                destination.display()
+            ));
             return ExitCode::FAILURE;
         }
         stub_entries.push(relative.to_string_lossy().replace('\\', "/"));
@@ -293,7 +296,10 @@ pub fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let triples: Vec<&str> = per_triple.iter().map(|(triple, _)| triple.as_str()).collect();
+    let triples: Vec<&str> = per_triple
+        .iter()
+        .map(|(triple, _)| triple.as_str())
+        .collect();
     reporter.success(format!(
         "prebuilt {name} {version}: {} stub(s), {} target(s) [{}] → {}",
         stub_entries.len(),

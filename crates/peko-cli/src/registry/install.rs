@@ -297,8 +297,9 @@ fn lock_satisfies_manifest(lockfile: &Lockfile, loaded: &LoadedManifest) -> bool
             };
             match dependency {
                 Dependency::Registry { version, .. } => match entry.source {
-                    LockSource::Registry => Version::parse(&entry.version)
-                        .is_ok_and(|locked| version.matches(&locked)),
+                    LockSource::Registry => {
+                        Version::parse(&entry.version).is_ok_and(|locked| version.matches(&locked))
+                    }
                     // A gated package is pinned by toolchain, not the manifest
                     // version requirement, so a locked gated entry is always
                     // considered a valid pin for a registry-style dependency.

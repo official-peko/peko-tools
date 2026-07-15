@@ -12,7 +12,7 @@
 //!   - `prebuilt.toml`          — this manifest.
 //!   - `stubs/<relpath>.peko`   — one definition-only stub per source file.
 //!   - `objects/<triple>/*.o`   — the package's own compiled module + native
-//!                                objects, one tree per target triple.
+//!     objects, one tree per target triple.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

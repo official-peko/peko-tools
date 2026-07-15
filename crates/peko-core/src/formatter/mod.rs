@@ -412,7 +412,10 @@ mod tests {
         ] {
             let stub = fmt_defs(source);
             let again = fmt_defs(&stub);
-            assert_eq!(stub, again, "stub did not round-trip (parse issue?): {stub:?}");
+            assert_eq!(
+                stub, again,
+                "stub did not round-trip (parse issue?): {stub:?}"
+            );
         }
     }
 

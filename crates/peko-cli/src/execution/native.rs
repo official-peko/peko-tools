@@ -15,7 +15,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use peko_core::config::{LockSource, Lockfile, Manifest, PrebuiltManifest, Toolchain, resolve_flag};
+use peko_core::config::{
+    LockSource, Lockfile, Manifest, PrebuiltManifest, Toolchain, resolve_flag,
+};
 use peko_core::packages::registry_source_dir;
 use peko_core::target::{OperatingSystem, PekoTarget};
 

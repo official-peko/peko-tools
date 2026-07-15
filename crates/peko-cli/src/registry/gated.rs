@@ -145,7 +145,9 @@ pub async fn fetch_meta(
         // 404 -> no build for this package/toolchain (or not a gated package).
         404 => Ok(None),
         429 => Err(GatedError::RateLimited),
-        400 => Err(GatedError::BadRequest(response.text().await.unwrap_or_default())),
+        400 => Err(GatedError::BadRequest(
+            response.text().await.unwrap_or_default(),
+        )),
         other => Err(GatedError::Http(other)),
     }
 }
@@ -183,7 +185,11 @@ pub async fn download_bundle(
                 .and_then(|body| body.get("tier").and_then(|t| t.as_str()).map(str::to_owned));
             return Err(GatedError::NotPaid { tier });
         }
-        400 => return Err(GatedError::BadRequest(response.text().await.unwrap_or_default())),
+        400 => {
+            return Err(GatedError::BadRequest(
+                response.text().await.unwrap_or_default(),
+            ));
+        }
         404 => {
             return Err(GatedError::NoBundle {
                 toolchain: toolchain.to_owned(),
@@ -196,7 +202,11 @@ pub async fn download_bundle(
     let info: DownloadInfo = response.json().await.map_err(GatedError::Network)?;
 
     // The signed URL is self-authenticating; do NOT attach the bearer token.
-    let blob = http.get(&info.url).send().await.map_err(GatedError::Network)?;
+    let blob = http
+        .get(&info.url)
+        .send()
+        .await
+        .map_err(GatedError::Network)?;
     if !blob.status().is_success() {
         return Err(GatedError::Http(blob.status().as_u16()));
     }

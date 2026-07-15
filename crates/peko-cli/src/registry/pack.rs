@@ -33,7 +33,10 @@ pub fn pack(loaded: &LoadedManifest) -> Result<Vec<u8>, RegistryError> {
 /// the registry for a gated package — it carries every platform's objects for
 /// one toolchain, and unpacks (via [`unpack`]) into a resolvable prebuilt
 /// package (its `peko.toml` and `prebuilt/` tree).
-pub fn pack_prebuilt(loaded: &LoadedManifest, prebuilt_dir: &Path) -> Result<Vec<u8>, RegistryError> {
+pub fn pack_prebuilt(
+    loaded: &LoadedManifest,
+    prebuilt_dir: &Path,
+) -> Result<Vec<u8>, RegistryError> {
     let mut tar_buf = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
@@ -58,12 +61,11 @@ pub fn pack_prebuilt(loaded: &LoadedManifest, prebuilt_dir: &Path) -> Result<Vec
             source,
         })?;
     }
-    let payload = zstd::encode_all(Cursor::new(tar_buf), ZSTD_LEVEL).map_err(|source| {
-        RegistryError::Io {
+    let payload =
+        zstd::encode_all(Cursor::new(tar_buf), ZSTD_LEVEL).map_err(|source| RegistryError::Io {
             path: prebuilt_dir.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     loaded
         .to_container(Compression::Zstd, &payload, None)
         .map_err(RegistryError::Config)
