@@ -17,6 +17,7 @@ import env;
 import std::fs;
 import std::io;
 import std::process;
+import std::sockets as sockets;
 import c::menu::menu as c_menu;
 import c::deeplink::deeplink as c_deeplink;
 import std::runtime;
@@ -329,13 +330,95 @@ import std::json;
             c_deeplink::peko_deeplink_single_instance(bundle::scheme.to_raw())
         }
 
-        // A production build serves the bundled UI over the loopback asset
-        // server. In dev the framework dev server serves the UI.
-        if !is_dev {
-            assets::start()
-        }
-        let ws_port: number = this.channel.start()
         let token: string = this.token
+
+        // A deployed app (bundle::host set, not dev) loads its UI from the
+        // platform origin, so a loopback bridge is unreachable from the page.
+        // The native side instead dials the hosted /__peko__ as the device
+        // provider, and the webview page connects to the same endpoint as a
+        // consumer (both carry this token, so the hub pairs them). Otherwise the
+        // bridge is a local loopback server, and a production build also serves
+        // the bundled UI over the loopback asset server.
+        let hosted: bool = !is_dev && bundle::host.size() > 0
+        let bridge_endpoint: string = ""
+        // A coarse bridge health status, injected into the boot config so the page
+        // can show it even when the bridge cannot connect: "local" (loopback
+        // bridge, dev/static), "ok", or "mint-failed" (the app's backend could not
+        // vend a token — its bridge credential may be unprovisioned; see the
+        // [peko-bridge] log lines for the HTTP status).
+        let bridge_status: string = "local"
+        if hosted {
+            let host: string = bundle::host
+
+            // The token the webview page (consumer) presents on the /__peko__
+            // handshake. A dev run injects PEKO_BRIDGE_TOKEN; otherwise the app
+            // fetches one from its own backend token endpoint (which mints it with
+            // the app credential — no secret in this binary). Both bind to a device
+            // id the provider reuses, so the hub pairs the page with the native side.
+            let env_token: string = env::get("PEKO_BRIDGE_TOKEN")
+            let device_id: string = env::get("PEKO_BRIDGE_DEVICE")
+            let initial_token: string = env_token
+            if env_token.size() == 0 {
+                let minted: json::JsonObject? = mint_bridge_token(host, "")
+                if minted.is_value() {
+                    let obj: json::JsonObject = minted.unwrap()
+                    initial_token = string_field(obj, "token")
+                    device_id = string_field(obj, "deviceId")
+                }
+            }
+            // The page connects to the base endpoint; the client SDK appends the
+            // token (initial_token) as the query param the edge verifier reads,
+            // and refreshes it via bridge.token before expiry.
+            bridge_endpoint = `wss://${host}/__peko__`
+            token = initial_token
+
+            if initial_token.size() == 0 {
+                bridge_status = "mint-failed"
+            } else {
+                bridge_status = "ok"
+            }
+
+            // The provider refreshes its own token before each (re)connect: the
+            // static injected token in dev, or a freshly fetched one in prod (they
+            // expire ~15 min), always bound to the same device id so it keeps
+            // pairing with the page.
+            let url_provider: closure() => string = closure[host, device_id, env_token]() => string {
+                let endpoint: string = ""
+                if env_token.size() > 0 {
+                    endpoint = `wss://${host}/__peko__?token=${env_token}`
+                } else {
+                    let fresh: json::JsonObject? = mint_bridge_token(host, device_id)
+                    if fresh.is_value() {
+                        let fresh_token: string = string_field(fresh.unwrap(), "token")
+                        if fresh_token.size() > 0 {
+                            endpoint = `wss://${host}/__peko__?token=${fresh_token}`
+                        }
+                    }
+                }
+                return endpoint
+            }
+            this.channel.start_provider(url_provider)
+
+            // The page (consumer) calls bridge.token before its own token expires
+            // to keep reconnecting; the provider fetches a fresh one bound to the
+            // same device (or echoes the dev-injected token).
+            this.channel.on("bridge.token", closure[host, device_id, env_token](params: string) => string {
+                let value: string = env_token
+                if env_token.size() == 0 {
+                    let refreshed: json::JsonObject? = mint_bridge_token(host, device_id)
+                    if refreshed.is_value() {
+                        value = string_field(refreshed.unwrap(), "token")
+                    }
+                }
+                return `{"token":${new json::JsonString(value).to_string()}}`
+            })
+        } else {
+            if !is_dev {
+                assets::start()
+            }
+            let ws_port: number = this.channel.start()
+            bridge_endpoint = `ws://127.0.0.1:${ws_port}/`
+        }
 
         // Desktop opens a pop-up route as a second native window: a child
         // process running this same binary, pointed at the route and sharing
@@ -347,9 +430,13 @@ import std::json;
         if desktop {
             let origin: string = dev_server
             if !is_dev {
-                origin = origin_of(assets::get_asset_url("index.html"))
+                if bundle::host.size() > 0 {
+                    origin = `https://${bundle::host}`
+                } else {
+                    origin = origin_of(assets::get_asset_url("index.html"))
+                }
             }
-            this.register_window_handlers(`ws://127.0.0.1:${ws_port}/`, origin)
+            this.register_window_handlers(bridge_endpoint, origin)
         }
 
         // The launch route. In dev PEKO_INITIAL_ROUTE restores the route the
@@ -417,9 +504,9 @@ import std::json;
         // on every relaunch with the new ephemeral port.
         let bridge_file: string = env::get("PEKO_DEV_BRIDGE")
         if bridge_file.size() > 0 {
-            fs::write_file(bridge_file, `{"url":"ws://127.0.0.1:${ws_port}/","token":"${token}"}`)
+            fs::write_file(bridge_file, `{"url":"${bridge_endpoint}","token":"${token}"}`)
         }
-        let boot: string = `window.__PEKO__ = { url: "ws://127.0.0.1:${ws_port}/", token: "${token}", initialRoute: ${initial_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: ${html_menu}, devtools: ${devtools}, demo: ${demo}, shots: ${shots}, shotsHost: "${shots_host}" };`
+        let boot: string = `window.__PEKO__ = { url: "${bridge_endpoint}", token: "${token}", bridgeStatus: "${bridge_status}", initialRoute: ${initial_json}, frameless: ${frameless}, nativeControls: ${native_controls}, htmlMenu: ${html_menu}, devtools: ${devtools}, demo: ${demo}, shots: ${shots}, shotsHost: "${shots_host}" };`
         this.view.init(boot)
 
         // Deep-link scheme registration is a production concern; the dev loop
@@ -429,10 +516,15 @@ import std::json;
         }
 
         // In dev the webview loads the framework dev server so its hot reload
-        // drives the UI; a production build loads the bundled index.html.
+        // drives the UI. A deployed production build loads its platform host
+        // (bundle::host); otherwise it loads the bundled index.html locally.
         let url: string = dev_server
         if !is_dev {
-            url = assets::get_asset_url("index.html")
+            if bundle::host.size() > 0 {
+                url = `https://${bundle::host}`
+            } else {
+                url = assets::get_asset_url("index.html")
+            }
         }
         this.view.navigate(url)
         this.view.activate()
@@ -605,6 +697,40 @@ import std::json;
         }
     }
     return new App(title, width, height)
+}
+
+/// Fetches a short-lived bridge token from the app's OWN backend token endpoint
+/// (https://<host>/_peko/token), which mints it server-to-server with the app
+/// credential. No credential or personal session lives in this binary. Passing an
+/// already-assigned device id keeps the same device across fetches. Returns the
+/// parsed {token, deviceId, expiresIn} object, or None on failure.
+[private] fn mint_bridge_token(host: string, device_id: string) => json::JsonObject? {
+    if host.size() == 0 {
+        return None
+    }
+    let path: string = "/_peko/token"
+    if device_id.size() > 0 {
+        path = `/_peko/token?deviceId=${device_id}`
+    }
+    let request: sockets::Request = new sockets::Request()
+        .method("GET")
+        .path(path)
+        .tls()
+    let response: sockets::HttpResponse? = request.send_http(host, 443)
+    if !response.is_value() {
+        io::println("[peko-bridge] token fetch failed: no response (network/TLS)")
+        return None
+    }
+    let http: sockets::HttpResponse = response.unwrap()
+    if http.status_code() != 200 {
+        io::println(`[peko-bridge] token fetch failed: HTTP ${http.status_code()} (the app's bridge credential may not be provisioned)`)
+        return None
+    }
+    let value: json::JsonValue = json::parse(http.body())
+    if value.kind() != "object" {
+        return None
+    }
+    return danger_cast<json::JsonObject>(value)
 }
 
 /// Parses call params into a JSON object, or an empty object when the text is

@@ -20,6 +20,7 @@
 import std::sockets;
 import std::json;
 import std::threads;
+import std::io as io;
 
 /// The loopback WebSocket RPC server for native<->app interop. Handlers take
 /// the call params as a JSON string and return the result as a JSON string.
@@ -39,12 +40,29 @@ import std::threads;
     // Whether to mirror call, reply, and event traffic to clients as
     // devtools:trace events, for the devtools bridge inspector. Off by default.
     [private] trace: bool
+    // Provider mode: instead of a local server, the bridge dials a hosted
+    // /__peko__ and answers calls from there (a deployed app, whose UI loads
+    // from the platform origin, cannot reach a loopback server). `out` is the
+    // outbound connection, refreshed on reconnect and None while reconnecting;
+    // out_lock guards it because both the webview event-loop thread (emit) and
+    // the provider recv thread (replies) send on it. provider_mode is fixed once
+    // start_provider runs, so emit routes to `out` rather than local clients.
+    [private] provider_mode: bool
+    [private] out: sockets::WsClient?
+    [private] out_lock: threads::Mutex<bool>
+    // Retains the provider recv thread (and thus its captured Bridge) for the
+    // app's life, so the collector never reclaims the running closure.
+    [private] provider_thread: threads::Thread?
 
     /// A bridge that authenticates clients with the given per-run token.
     constructor(token: string) {
         this.token = token
         this.port = 0
         this.trace = false
+        this.provider_mode = false
+        this.out = None
+        this.out_lock = new threads::Mutex<bool>(true)
+        this.provider_thread = None
         this.handlers = new Map<string, closure(string) => string>()
         this.clients = new threads::Mutex<Map<number, sockets::WsConnection>>(
             new Map<number, sockets::WsConnection>())
@@ -110,22 +128,148 @@ import std::threads;
     /// JSON string.
     [public] fn emit(name: string, data: string) {
         let message: string = `{"t":"event","name":"${name}","data":${data}}`
-        let map: Map<number, sockets::WsConnection> = this.clients.lock()
-        let ids: Array<number> = map.key_list()
-        let count: number = ids.size()
-        let index: number = 0
-        let one: number = 1
-        while index < count {
-            map.get(ids[index]).unwrap().send(message)
-            index = index + one
+        if this.provider_mode {
+            // Hosted: push the event over the outbound connection; the hub fans
+            // it out to this device's consumers. Dropped if reconnecting.
+            this.send_out(message)
+        } else {
+            let map: Map<number, sockets::WsConnection> = this.clients.lock()
+            let ids: Array<number> = map.key_list()
+            let count: number = ids.size()
+            let index: number = 0
+            let one: number = 1
+            while index < count {
+                map.get(ids[index]).unwrap().send(message)
+                index = index + one
+            }
+            this.clients.release()
         }
-        this.clients.release()
 
         // Mirror app-initiated events to the inspector. The devtools:trace event
         // is itself excluded, so this does not recurse.
         if this.trace && !this.is_devtools_name(name) {
             this.trace_emit("event", name, data)
         }
+    }
+
+    /// Sends a raw message over the outbound provider connection, if one is up.
+    /// Guarded by out_lock: emit (event-loop thread) and replies (provider recv
+    /// thread) both call this. A no-op while reconnecting.
+    [public] fn send_out(message: string) {
+        this.out_lock.lock()
+        if this.out.is_value() {
+            this.out.unwrap().send(message)
+        }
+        this.out_lock.release()
+    }
+
+    /// Dials the hosted bridge as the device provider and serves calls from it on
+    /// a background thread. `url_provider` returns the full
+    /// `wss://<host>/__peko__?token=...` endpoint with a fresh token (bridge
+    /// tokens expire ~15 min, so it is called before every connect); returning ""
+    /// skips this attempt. Fixes the bridge into provider mode, so emit routes
+    /// outbound.
+    [mutates] fn start_provider(url_provider: closure() => string) {
+        this.provider_mode = true
+        let self: Bridge = this
+        let worker: threads::Thread = new threads::Thread(closure[self, url_provider]() => void {
+            self.provider_loop(url_provider)
+        })
+        this.provider_thread = worker
+        worker.start()
+    }
+
+    /// Fetch a fresh endpoint, connect, authenticate as the provider, serve calls
+    /// until the connection drops, then reconnect after a short backoff — forever.
+    /// Runs on its own thread; recv parks the collector while it waits, and
+    /// answers the hub's heartbeat pings internally.
+    [mutates] fn provider_loop(url_provider: closure() => string) {
+        let running: bool = true
+        while running {
+            let url: string = url_provider()
+            if url.size() > 0 {
+                let connected: sockets::WsClient? = sockets::ws_connect(url)
+                if connected.is_value() {
+                    let client: sockets::WsClient = connected.unwrap()
+                    client.send(`{"t":"auth","role":"provider"}`)
+                    this.set_out(client)
+                    io::println("[peko-bridge] provider connected to the hosted bridge")
+
+                    let serving: bool = true
+                    while serving {
+                        let incoming: string? = client.recv()
+                        if incoming.is_value() {
+                            this.handle_provider_message(incoming.unwrap())
+                        } else {
+                            serving = false
+                        }
+                    }
+
+                    // Connection dropped: stop routing emit to it, then reconnect.
+                    this.clear_out()
+                    client.close()
+                    io::println("[peko-bridge] provider disconnected; reconnecting")
+                } else {
+                    io::println("[peko-bridge] provider could not reach the hosted bridge; retrying")
+                }
+            }
+            threads::sleep_ms(2000)
+        }
+    }
+
+    /// Sets the live outbound connection under out_lock.
+    [mutates] fn set_out(client: sockets::WsClient) {
+        this.out_lock.lock()
+        this.out = client
+        this.out_lock.release()
+    }
+
+    /// Clears the outbound connection under out_lock.
+    [mutates] fn clear_out() {
+        this.out_lock.lock()
+        this.out = None
+        this.out_lock.release()
+    }
+
+    /// Routes one inbound message from the hub. Only `call` frames need action:
+    /// dispatch to the registered handler and reply over the connection.
+    [mutates] fn handle_provider_message(raw: string) {
+        let value: json::JsonValue = json::parse(raw)
+        if value.kind() != "object" {
+            return
+        }
+        let message: json::JsonObject = danger_cast<json::JsonObject>(value)
+        let kind: string = this.field_string(message, "t")
+        if kind != "call" {
+            return
+        }
+        let id: string = this.field_raw(message, "id")
+        let method: string = this.field_string(message, "method")
+        let params: string = this.field_raw(message, "params")
+
+        // Serialize handler dispatch across threads (see dispatch_lock).
+        this.dispatch_lock.lock()
+        let reply: string = this.build_reply(id, method, params)
+        this.dispatch_lock.release()
+        this.send_out(reply)
+    }
+
+    /// Builds the reply frame for one call: runs the handler when present, else a
+    /// method_not_found error. Mirrors handle_call for the outbound path.
+    [mutates] fn build_reply(id: string, method: string, params: string) => string {
+        if this.handlers.contains(method) {
+            let should_trace: bool = this.trace && !this.is_devtools_name(method)
+            if should_trace {
+                this.trace_emit("call", method, params)
+            }
+            let handler: closure(string) => string = this.handlers.get(method).unwrap()
+            let result: string = handler(params)
+            if should_trace {
+                this.trace_emit("reply", method, result)
+            }
+            return `{"t":"reply","id":${id},"ok":true,"result":${result}}`
+        }
+        return `{"t":"reply","id":${id},"ok":false,"error":{"code":"method_not_found","message":"no handler for this method"}}`
     }
 
     /// Routes one inbound message from a client.

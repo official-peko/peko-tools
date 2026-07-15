@@ -118,6 +118,11 @@ export interface PekoClient {
   connect(): void;
   /** What the app is running on. */
   readonly platform: PekoPlatform;
+  /** Coarse bridge health injected at boot, readable even when the bridge
+   *  cannot connect: 'local' (loopback bridge), 'ok', 'no-session' (the build
+   *  was not logged in), 'mint-failed' (token mint failed — see the
+   *  [peko-bridge] logs), or null in a plain browser. */
+  readonly bridgeStatus: string | null;
   /** Marks an element as the window drag region (data-peko-drag). */
   titlebar<T extends Element>(element: T): T;
   /** Enhance an existing element as the app toolbar (drag + optional controls). */
@@ -144,6 +149,7 @@ declare global {
     __PEKO__?: {
       url: string;
       token: string | null;
+      bridgeStatus?: string;
       initialRoute?: string;
       frameless?: boolean;
       nativeControls?: boolean;

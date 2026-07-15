@@ -50,14 +50,29 @@ const ready = new Promise((resolve, reject) => {
   rejectReady = reject;
 });
 
+// The bridge token most recently in hand. Starts as the one the native host
+// injected (or none for a plain same-origin page) and is replaced by refreshes
+// (see scheduleTokenRefresh), so a reconnect after the ~15-minute expiry uses a
+// fresh token rather than a dead one.
+let currentToken = null;
+let tokenInitialized = false;
+let refreshTimer = null;
+let firstReady = true;
+
 // Resolve the bridge endpoint: the injected config in a native webview, or a
-// same-origin socket for a server-rendered page in a plain browser.
+// same-origin socket for a server-rendered page in a plain browser. The URL is
+// the base (no token); connect() appends the current token as a query param,
+// which the hosted /__peko__ verifier reads (the local loopback bridge reads the
+// auth frame instead and ignores the query).
 function endpoint() {
   // injectedConfig also returns the opener's config for a pop-up iframe, so the
   // pop-up connects to the same bridge as the window that opened it.
   const injected = injectedConfig();
   if (injected && injected.url) {
-    return { url: injected.url, token: injected.token || null };
+    // Strip any token baked into the injected URL; connect() re-appends the
+    // current (possibly refreshed) one.
+    const base = injected.url.split('?')[0];
+    return { url: base, token: injected.token || null };
   }
   if (typeof location !== 'undefined' && location.host) {
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -66,75 +81,130 @@ function endpoint() {
   return null;
 }
 
+// Compose the connect URL, carrying the token in the query for the hosted edge
+// verifier. A tokenless page (same-origin browser) connects to the bare URL.
+function connectUrl(base, token) {
+  if (!token) {
+    return base;
+  }
+  return base + (base.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(token);
+}
+
+function handleMessage(event) {
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch (error) {
+    return;
+  }
+
+  if (message.t === 'ready') {
+    resolveReady();
+    if (firstReady) {
+      firstReady = false;
+      // Fetch a launch route the platform delivers after connect (iOS). On the
+      // platforms that injected it into the boot config, take_initial is already
+      // consumed, so this resolves empty and delivers nothing.
+      invoke('deeplink.initial').then(deliverInitialRoute).catch(function () {});
+      scheduleTokenRefresh();
+    }
+    return;
+  }
+
+  if (message.t === 'reply') {
+    const waiter = pending.get(message.id);
+    if (!waiter) {
+      return;
+    }
+    pending.delete(message.id);
+    if (message.ok) {
+      waiter.resolve(message.result);
+    } else {
+      const info = message.error || {};
+      const failure = new Error(info.message || 'call failed');
+      failure.code = info.code;
+      waiter.reject(failure);
+    }
+    return;
+  }
+
+  if (message.t === 'event') {
+    const set = listeners.get(message.name);
+    if (set) {
+      set.forEach(function (callback) {
+        try {
+          callback(message.data);
+        } catch (error) {
+          // A listener throwing must not break dispatch to the others.
+        }
+      });
+    }
+    return;
+  }
+
+  if (message.t === 'error') {
+    // A protocol/auth error on the very first connect is fatal (nothing to fall
+    // back to); on a later reconnect the close handler just retries.
+    if (firstReady) {
+      rejectReady(new Error(message.error || 'bridge error'));
+    }
+  }
+}
+
+let reconnectDelay = 500;
+
 function connect() {
   const target = endpoint();
   if (!target) {
     rejectReady(new Error('no Peko bridge endpoint'));
     return;
   }
+  if (!tokenInitialized) {
+    currentToken = target.token;
+    tokenInitialized = true;
+  }
 
-  socket = new WebSocket(target.url);
+  socket = new WebSocket(connectUrl(target.url, currentToken));
 
   socket.addEventListener('open', function () {
-    socket.send(JSON.stringify({ t: 'auth', token: target.token }));
+    reconnectDelay = 500;
+    socket.send(JSON.stringify({ t: 'auth', token: currentToken }));
   });
 
-  socket.addEventListener('message', function (event) {
-    let message;
-    try {
-      message = JSON.parse(event.data);
-    } catch (error) {
-      return;
-    }
-
-    if (message.t === 'ready') {
-      resolveReady();
-      // Fetch a launch route the platform delivers after connect (iOS). On the
-      // platforms that injected it into the boot config, take_initial is already
-      // consumed, so this resolves empty and delivers nothing.
-      invoke('deeplink.initial').then(deliverInitialRoute).catch(function () {});
-      return;
-    }
-
-    if (message.t === 'reply') {
-      const waiter = pending.get(message.id);
-      if (!waiter) {
-        return;
-      }
-      pending.delete(message.id);
-      if (message.ok) {
-        waiter.resolve(message.result);
-      } else {
-        const info = message.error || {};
-        const failure = new Error(info.message || 'call failed');
-        failure.code = info.code;
-        waiter.reject(failure);
-      }
-      return;
-    }
-
-    if (message.t === 'event') {
-      const set = listeners.get(message.name);
-      if (set) {
-        set.forEach(function (callback) {
-          try {
-            callback(message.data);
-          } catch (error) {
-            // A listener throwing must not break dispatch to the others.
-          }
-        });
-      }
-      return;
-    }
-
-    if (message.t === 'error') {
-      rejectReady(new Error(message.error || 'bridge error'));
-    }
-  });
+  socket.addEventListener('message', handleMessage);
 
   socket.addEventListener('close', function () {
     socket = null;
+    // Reconnect with capped backoff so a network blip, a provider restart, or a
+    // token rotation recovers on its own. A plain page with no bridge keeps
+    // retrying cheaply; the app never sees the churn.
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
   });
+
+  socket.addEventListener('error', function () {
+    // 'close' fires next and owns the reconnect.
+  });
+}
+
+// Ask the native provider for a fresh bridge token before the current one
+// expires (~15 min), so the next reconnect authenticates. The provider mints it
+// via the CLI; a plain page (no provider) just gets method_not_found, ignored.
+function scheduleTokenRefresh() {
+  if (refreshTimer || typeof setInterval === 'undefined') {
+    return;
+  }
+  refreshTimer = setInterval(function () {
+    invoke('bridge.token')
+      .then(function (result) {
+        if (result && typeof result.token === 'string' && result.token) {
+          currentToken = result.token;
+        }
+      })
+      .catch(function () {
+        // No provider / not hosted: nothing to refresh.
+      });
+  }, 12 * 60 * 1000);
 }
 
 // Call a native handler by "namespace.method" name. Resolves with the handler
@@ -143,6 +213,12 @@ function invoke(method, params) {
   return ready.then(function () {
     const id = nextId++;
     return new Promise(function (resolve, reject) {
+      // The socket may be briefly down mid-reconnect; fail fast so the caller can
+      // retry rather than throwing on a null/closing socket.
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        reject(new Error('bridge not connected'));
+        return;
+      }
       pending.set(id, { resolve: resolve, reject: reject });
       socket.send(JSON.stringify({
         t: 'call',
@@ -1366,6 +1442,11 @@ const core = {
   ready: ready,
   connect: connect,
   platform: platform,
+  // Coarse bridge health the native host injected at boot: 'local' (loopback
+  // bridge), 'ok', 'no-session' (the build was not logged in), 'mint-failed'
+  // (token mint failed — check the [peko-bridge] logs), or null in a plain
+  // browser. Readable even when the bridge itself cannot connect.
+  bridgeStatus: (injectedConfig() && injectedConfig().bridgeStatus) || null,
   titlebar: titlebar,
   toolbar: toolbar,
   menu: menu,
