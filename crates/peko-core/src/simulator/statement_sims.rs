@@ -1874,3 +1874,18 @@ impl PekoValueSimulator for PlatformStatementAST {
         SimulatorValue::Value(types::PekoType::simple_type("default"))
     }
 }
+
+impl PekoValueSimulator for DemoStatementAST {
+    fn simulate(&self, simulator_context: &mut PekoSimulatorContext) -> SimulatorValue {
+        // The body is analyzed only in demo mode. Analysis tools (the LSP,
+        // `peko test`/`check`) set `demo` so demo code is type-checked in the
+        // editor; a release build leaves it false and the block is skipped.
+        if simulator_context.demo {
+            for ast in &self.body.value {
+                ast.simulate(simulator_context);
+            }
+        }
+
+        SimulatorValue::Value(types::PekoType::simple_type("default"))
+    }
+}

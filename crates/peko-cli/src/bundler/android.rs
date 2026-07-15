@@ -118,6 +118,7 @@ pub fn bundle(
         None,
         None,
         !cli_info.flags.has_flag("release"),
+        cli_info.flags.has_flag("demo"),
         progress,
     )?;
     if let Some(diagnostics) = diagnostics {
@@ -365,6 +366,7 @@ fn build_app_bundle(
     let dex_files = crate::execution::native::collect_android_dex_files(
         cli_info.get_peko_root(),
         project.get_root(),
+        cli_info.flags.has_flag("demo"),
     );
     for (index, dex) in dex_files.iter().enumerate() {
         let name = if index == 0 {

@@ -411,6 +411,7 @@ impl Ctx {
                 self.walk_body(&f.body.value);
             }
             PekoAST::PlatformStatement(p) => self.walk_body(&p.body.value),
+            PekoAST::DemoStatement(d) => self.walk_body(&d.body.value),
             PekoAST::ImportStatement(imp) => {
                 for segment in &imp.module_path {
                     self.push_name(segment, sem::NAMESPACE, 0);

@@ -133,6 +133,7 @@ impl PekoValueBuilder for PekoAST {
                 LinkStatement,
                 StyleStatement,
                 PlatformStatement,
+                DemoStatement,
                 Unwrap,
                 Cast,
                 PekoXTag,

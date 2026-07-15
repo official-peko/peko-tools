@@ -175,6 +175,7 @@ pub enum PekoAST {
     LinkStatement(statements::LinkStatementAST),
     StyleStatement(statements::StyleStatementAST),
     PlatformStatement(statements::PlatformStatementAST),
+    DemoStatement(statements::DemoStatementAST),
 
     // Declaration ASTs
     NewVariable(declarations::NewVariableAST),
@@ -235,6 +236,7 @@ impl Spanned for PekoAST {
             Self::LinkStatement(ast) => ast.get_start(),
             Self::StyleStatement(ast) => ast.get_start(),
             Self::PlatformStatement(ast) => ast.get_start(),
+            Self::DemoStatement(ast) => ast.get_start(),
 
             // Declarations
             Self::NewVariable(ast) => ast.get_start(),
@@ -295,6 +297,7 @@ impl Spanned for PekoAST {
             Self::LinkStatement(ast) => ast.get_end(),
             Self::StyleStatement(ast) => ast.get_end(),
             Self::PlatformStatement(ast) => ast.get_end(),
+            Self::DemoStatement(ast) => ast.get_end(),
 
             // Declarations
             Self::NewVariable(ast) => ast.get_end(),

@@ -300,7 +300,7 @@ fn verify_manifest(manifest_text: &str, report: &mut PackageReport) -> Option<St
 /// A one-line description of a dependency's source.
 fn describe_dependency(dependency: &peko_core::config::Dependency) -> String {
     match dependency {
-        peko_core::config::Dependency::Registry { version } => version.to_string(),
+        peko_core::config::Dependency::Registry { version, .. } => version.to_string(),
         peko_core::config::Dependency::Path { path } => {
             format!("path: {}", path.display())
         }

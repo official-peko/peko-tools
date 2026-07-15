@@ -10,8 +10,8 @@ use llvm_sys_180::prelude::{LLVMBasicBlockRef, LLVMValueRef};
 use peko_core::asts::PekoAST;
 use peko_core::asts::data_structures::VisibilityData;
 use peko_core::asts::statements::{
-    BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
-    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
+    BreakAST, ContinueAST, DemoStatementAST, ForLoopAST, IfStatementAST, ImportStatementAST,
+    LinkStatementAST, PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
     VariableReassignmentAST, WhileLoopAST,
 };
 use peko_core::diagnostics;
@@ -47,6 +47,21 @@ impl PekoValueBuilder for PlatformStatementAST {
                 && codegen_context.target.operating_system.to_string() == "windows"
                 && codegen_context.windowsgui)
         {
+            for ast in &self.body.value {
+                ast.build_value(codegen_context);
+            }
+        }
+
+        codegen_context.create_null_pointer()
+    }
+}
+
+impl PekoValueBuilder for DemoStatementAST {
+    fn build_value(&self, codegen_context: &mut PekoCodegenContext) -> CodegenValue {
+        // The body is emitted only in demo mode. In a normal / release build
+        // `demo` is false, so the block — including any `import` it holds — is
+        // never followed, and its modules (e.g. pekoshots) never link.
+        if codegen_context.demo {
             for ast in &self.body.value {
                 ast.build_value(codegen_context);
             }

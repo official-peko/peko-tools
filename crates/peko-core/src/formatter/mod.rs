@@ -236,6 +236,7 @@ fn needs_semicolon(ast: &PekoAST, definitions_only: bool) -> bool {
             | PekoAST::WhileLoop(_)
             | PekoAST::ForLoop(_)
             | PekoAST::PlatformStatement(_)
+            | PekoAST::DemoStatement(_)
             | PekoAST::Comment(_)
     )
 }
@@ -280,6 +281,7 @@ impl Format for PekoAST {
             PekoAST::LinkStatement(node) => node.format(ctx),
             PekoAST::StyleStatement(node) => node.format(ctx),
             PekoAST::PlatformStatement(node) => node.format(ctx),
+            PekoAST::DemoStatement(node) => node.format(ctx),
 
             // Declarations.
             PekoAST::NewVariable(node) => node.format(ctx),

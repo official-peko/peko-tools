@@ -23,8 +23,10 @@ OPTIONS
                           ios, linux, macos, windows)
     --regenconfig         regenerate the per-platform configuration
                           file templates (overwrites any local edits)
-    --clean               wipe the project's incremental build cache
-                          and exit without building
+    --demo                build in demo mode: include `demo { ... }`
+                          blocks and demo-scoped dependencies (for
+                          store-asset generation). Omitted from a normal
+                          or release build. Use `peko clean` to wipe caches.
     --prebuild            prebuild the enclosing library package for all
                           platforms into a single uploadable .pkbundle
     --target <LIST>       with --prebuild, a comma-separated os-arch list
@@ -36,6 +38,6 @@ EXAMPLES
     peko build --platform android
     peko build --release --platform ios
     peko build --regenconfig
-    peko build --clean
+    peko build --demo
     peko build --prebuild
     peko build --prebuild --target macos-arm,linux-x86_64

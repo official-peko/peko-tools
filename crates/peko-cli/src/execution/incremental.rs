@@ -859,6 +859,7 @@ fn initialize_incremental_for_target(
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
     prebuilt_stub_roots: &[PathBuf],
     debug: bool,
+    demo: bool,
     progress: &dyn ProgressSink,
 ) -> PekoResult<(PekoCodegenContext, DiagnosticList)> {
     progress.message("Compiling entrypoint");
@@ -878,6 +879,7 @@ fn initialize_incremental_for_target(
 
     super::load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
+    codegen_context.demo = demo;
 
     // Declare class and function signatures before building bodies, so a body
     // (or a closure in it) can reference a class or function defined later in
@@ -1042,6 +1044,7 @@ fn compile_component(
     compilation_root: PathBuf,
     objects_directory: PathBuf,
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
+    demo: bool,
 ) -> PekoResult<(PekoCodegenContext, DiagnosticList)> {
     let (asts, mut diagnostics) = super::parse_component_source(component_file.get_path());
 
@@ -1057,6 +1060,7 @@ fn compile_component(
 
     super::load_external_modules!(codegen_context, peko_root, Some(&compilation_root));
     codegen_context.windowsgui = !target.console;
+    codegen_context.demo = demo;
 
     // The "Big 3" import asts (runtime / standard / console) live at the
     // front of the parsed list
@@ -1145,6 +1149,7 @@ pub fn compile_project(
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
     entitlements: Option<PathBuf>,
     debug: bool,
+    demo: bool,
     progress: &dyn ProgressSink,
 ) -> PekoResult<Option<DiagnosticList>> {
     let mut file_diagnostics = DiagnosticList::new();
@@ -1153,7 +1158,8 @@ pub fn compile_project(
     // Prebuilt (source-hidden) dependencies for this target: their stub roots
     // mark which codegen-ed modules are shipped rather than emitted, and their
     // objects are linked in place of a from-source compile.
-    let prebuilt_deps = super::native::prebuilt_dependencies(peko_root, &project_root, target);
+    let prebuilt_deps =
+        super::native::prebuilt_dependencies(peko_root, &project_root, target, demo);
     let prebuilt_stub_roots: Vec<PathBuf> = prebuilt_deps
         .iter()
         .map(|dep| dep.stub_root.clone())
@@ -1163,6 +1169,25 @@ pub fn compile_project(
         .join("objects")
         .join(target.operating_system.to_string())
         .join(target.architecture.to_string());
+
+    // A demo build emits different code than a normal build (`demo { ... }`
+    // blocks are included or stripped), so a cache produced in the other mode
+    // must not be reused. A marker records the mode the cache was built in; on a
+    // mismatch, the incremental map and objects are discarded so the build
+    // starts fresh. The marker is written once the mode is known, so subsequent
+    // targets in the same invocation reuse the freshly-built cache.
+    let mode_marker = incremental_directory.join(".build_mode");
+    let current_mode = if demo { "demo" } else { "normal" };
+    if std::fs::read_to_string(&mode_marker).ok().as_deref() != Some(current_mode) {
+        // Wipe the whole cache (every target's objects and the file map), not
+        // just this target's, so a multi-target UI build can't reuse another
+        // target's stale objects from the previous mode. The marker is rewritten
+        // so the remaining targets in this invocation reuse the fresh cache.
+        let _ = std::fs::remove_dir_all(&incremental_directory);
+        project.incremental_info = None;
+        std::fs::create_dir_all(&incremental_directory).ok();
+        let _ = std::fs::write(&mode_marker, current_mode);
+    }
 
     if project.incremental_info.is_none() || !objects_directory.exists() {
         // First build: spinner mode (file count not yet known).
@@ -1178,6 +1203,7 @@ pub fn compile_project(
             preloaded_modules.clone(),
             &prebuilt_stub_roots,
             debug,
+            demo,
             progress,
         )?;
 
@@ -1286,6 +1312,7 @@ pub fn compile_project(
                         project_root.clone(),
                         objects_directory.clone(),
                         preloaded_modules.clone(),
+                        demo,
                     )?;
 
                     // Walk the module's "imported_by" list to extend this
@@ -1476,6 +1503,7 @@ pub fn compile_project(
         &objects_directory,
         &resolved.toolchain,
         &resolved.dir,
+        demo,
     ) {
         Ok(native_build) => {
             linked_files.extend(native_build.objects);

@@ -222,6 +222,12 @@ pub struct PekoParser {
     /// Recursion depth of `parse`. The pending queue is drained only at the top
     /// level (depth 0), never in the middle of an expression or block.
     parse_depth: usize,
+
+    /// Set while parsing a condition/subject expression (an `if`/`while`/`switch`
+    /// test or a `for` iterable), where a `demo` token is an ordinary identifier
+    /// rather than the leader of a `demo { ... }` block. Keeps `if demo { ... }`
+    /// (a bare variable condition) parsing correctly. Block bodies clear it.
+    suppress_demo: bool,
 }
 
 type FunctionArgumentsInfo = (
@@ -249,6 +255,7 @@ impl PekoParser {
             file: file.as_ref().to_path_buf(),
             pending: std::collections::VecDeque::new(),
             parse_depth: 0,
+            suppress_demo: false,
         }
     }
 
@@ -890,6 +897,12 @@ impl PekoParser {
 
         let mut block_body = Vec::new();
 
+        // A block body is statement position: `demo { ... }` blocks are allowed
+        // even inside a closure that appears within a condition (where demo
+        // detection is otherwise suppressed). Restore the flag after the body.
+        let previous_suppress_demo = self.suppress_demo;
+        self.suppress_demo = false;
+
         while !self.tokens.finished() && !self.tokens.current_token().equals("}") {
             // Eat comments and stray semicolons before each statement.
             loop {
@@ -950,6 +963,8 @@ impl PekoParser {
                 }
             }
         }
+
+        self.suppress_demo = previous_suppress_demo;
 
         let block_end = self.tokens.current_token().get_end().clone();
 
@@ -2944,7 +2959,7 @@ impl PekoParser {
                     previous_was_else = false;
 
                     self.tokens.increase_index();
-                    let condition = self.parse();
+                    let condition = self.parse_condition();
                     let body = self.parse_block("if statement body");
 
                     conditional_bodies.push(ConditionBody::new(Box::new(condition), body));
@@ -2979,7 +2994,7 @@ impl PekoParser {
         let starting_position = self.get_current_position();
 
         self.tokens.increase_index();
-        let condition = self.parse();
+        let condition = self.parse_condition();
         let body = self.parse_block("while loop body");
 
         WhileLoopAST::new(
@@ -3029,7 +3044,7 @@ impl PekoParser {
             self.tokens.increase_index();
         }
 
-        let iterator = self.parse();
+        let iterator = self.parse_condition();
         let mut loop_body = self.parse_block("for loop body");
 
         if is_destructure {
@@ -3346,6 +3361,17 @@ impl PekoParser {
             platforms,
             body,
         )
+    }
+
+    /// Parses a `demo { ... }` conditional-compilation block. The body is
+    /// compiled only in demo mode; a normal/release build strips it entirely.
+    pub fn parse_demo(&mut self) -> DemoStatementAST {
+        let starting_position = self.get_current_position();
+        self.tokens.increase_index(); // eat 'demo'
+
+        let body = self.parse_block("demo body");
+
+        DemoStatementAST::new(starting_position, body.end.clone(), body)
     }
 
     /// Parses an array literal: `#[a, b, ...]`.
@@ -4124,6 +4150,19 @@ impl PekoParser {
         result
     }
 
+    /// Parse a condition / iterable expression (an `if`/`while` test or a `for`
+    /// iterable). A bare `demo` here is an ordinary identifier, so `demo { ... }`
+    /// block detection is suppressed for the duration — keeping `if demo { ... }`
+    /// working. The body that follows is parsed normally, so demo blocks inside
+    /// it are still recognized.
+    fn parse_condition(&mut self) -> PekoAST {
+        let previous = self.suppress_demo;
+        self.suppress_demo = true;
+        let result = self.parse();
+        self.suppress_demo = previous;
+        result
+    }
+
     fn parse_inner(&mut self) -> PekoAST {
         // Comment capture (formatting) records comments and doc lines in the
         // enclosing statement sequence before this runs, so leave them in place
@@ -4140,6 +4179,18 @@ impl PekoParser {
             } else {
                 self.skip_comment();
             }
+        }
+
+        // `demo` is a contextual keyword: it leads a `demo { ... }`
+        // conditional-compilation block only at statement position (a `demo`
+        // identifier immediately followed by `{`), and stays an ordinary
+        // identifier everywhere else — including as a bare condition, where
+        // `suppress_demo` is set (so `if demo { ... }` keeps working).
+        if !self.suppress_demo
+            && self.tokens.current_token().equals("demo")
+            && self.tokens.get_token_forward(1).equals("{")
+        {
+            return PekoAST::DemoStatement(self.parse_demo());
         }
 
         // Consume any leading visibility block and / or doc-info comment.

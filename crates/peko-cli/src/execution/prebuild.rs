@@ -433,6 +433,7 @@ fn prebuild_objects(
         None,
         None,
         true,
+        false,
         progress,
     )
     .map_err(|error| format!("harness compile failed: {error}"))?;

@@ -262,6 +262,9 @@ impl PekoAnalyzer {
         simulator_context.external_modules = self.external_modules();
 
         simulator_context.windowsgui = !target.console;
+        // Analyze demo blocks so demo code is type-checked and highlighted in
+        // the editor, even though a release build strips them.
+        simulator_context.demo = true;
 
         for ast in asts {
             ast.simulate(&mut simulator_context);
@@ -1742,6 +1745,19 @@ impl AnalysisEngine for PekoAnalyzer {
                     additional_text_edits: Vec::new(),
                 });
             }
+
+            // `demo { body }`: a demo-mode conditional-compilation block.
+            completion_items.push(CompletionItem {
+                label: "demo".to_string(),
+                kind: CompletionKind::Snippet,
+                detail: None,
+                documentation: None,
+                insert_text: Some("demo {\n\t${0}\n}".to_string()),
+                sort_text: Some("0009".to_string()),
+                insert_text_format: Some(InsertTextFormat::Snippet),
+                command: None,
+                additional_text_edits: Vec::new(),
+            });
 
             // `for x in y { body }`.
             completion_items.push(CompletionItem {

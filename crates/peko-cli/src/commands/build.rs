@@ -46,15 +46,14 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         "build/debug"
     });
 
-    // Clean-mode short-circuit.
-    //
-    // TODO(bug?): the original cli also triggers a clean when
-    // `.peko/incremental/run` exists, meaning every `peko build` after
-    // a `peko run` wipes the incremental cache. That behavior is
-    // preserved here pending confirmation that it is intentional.
+    // A build following a `peko run` must discard the run's hot-reload
+    // incremental cache (marked by `.peko/incremental/run`) so the distributable
+    // build does not reuse run-instrumented objects. A standalone `peko clean`
+    // handles explicit cleaning.
     let force_clean_marker = project.get_root().join(".peko/incremental/run");
-    if cli_info.flags.has_flag("clean") || force_clean_marker.exists() {
-        return handle_clean(project, reporter);
+    if force_clean_marker.exists() {
+        let incremental_dir = project.get_root().join(".peko/incremental");
+        let _ = std::fs::remove_dir_all(&incremental_dir);
     }
 
     // Resolve, download, and lock declared dependencies before compiling.
@@ -77,32 +76,6 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     } else {
         build_ui_project(cli_info, project, build_directory, release, reporter)
     }
-}
-
-/// Wipe the project's incremental build directory.
-fn handle_clean(project: PekoProject, reporter: &Reporter) -> ExitCode {
-    let incremental_dir = project.get_root().join(".peko/incremental");
-
-    if !incremental_dir.exists() {
-        reporter.info(format!(
-            "nothing to clean for {} (no incremental build cache present)",
-            project.name
-        ));
-        return ExitCode::SUCCESS;
-    }
-
-    reporter.status(
-        "Cleaning",
-        format!("incremental build cache for {}", project.name),
-    );
-    if let Err(e) = std::fs::remove_dir_all(&incremental_dir) {
-        reporter.warning(format!(
-            "could not remove {}: {e}",
-            incremental_dir.display()
-        ));
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
 }
 
 /// Build the web frontend of a static UI project into `assets/`.
@@ -219,6 +192,7 @@ fn build_cli_project(
         None,
         None,
         !cli_info.flags.has_flag("release"),
+        cli_info.flags.has_flag("demo"),
         progress,
     );
 

@@ -340,12 +340,26 @@ pub enum Dependency {
     Registry {
         /// The accepted version range.
         version: VersionReq,
+        /// A demo-scoped dependency (`demo = true`): installed and available,
+        /// but linked into the binary only in demo builds. Its prebuilt objects
+        /// and native sources are excluded from a normal/release link, so a
+        /// demo-only package (e.g. pekoshots) leaves no trace in the shipped
+        /// binary. Reached only from `demo { ... }` blocks.
+        demo: bool,
     },
     /// A dependency resolved from a local path for in-tree development.
     Path {
         /// The dependency directory, relative to the project root.
         path: PathBuf,
     },
+}
+
+impl Dependency {
+    /// `true` for a demo-scoped registry dependency (`demo = true`): available
+    /// to `demo { ... }` blocks but excluded from a normal/release link.
+    pub fn is_demo(&self) -> bool {
+        matches!(self, Dependency::Registry { demo: true, .. })
+    }
 }
 
 /// A dependency value written into `[dependencies]` by an edit.
@@ -927,6 +941,8 @@ enum RawDependency {
 struct RawDependencyTable {
     version: Option<String>,
     path: Option<String>,
+    #[serde(default)]
+    demo: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1183,7 +1199,10 @@ fn build_dependency(
     match raw {
         RawDependency::Simple(req) => {
             let version = parse_version_req(&req, &format!("dependencies.{name}"), source)?;
-            Ok(Dependency::Registry { version })
+            Ok(Dependency::Registry {
+                version,
+                demo: false,
+            })
         }
         RawDependency::Detailed(table) => match (table.version, table.path) {
             (Some(_), Some(_)) => Err(ConfigError::invalid(
@@ -1193,7 +1212,10 @@ fn build_dependency(
             (Some(req), None) => {
                 let version =
                     parse_version_req(&req, &format!("dependencies.{name}.version"), source)?;
-                Ok(Dependency::Registry { version })
+                Ok(Dependency::Registry {
+                    version,
+                    demo: table.demo,
+                })
             }
             (None, Some(path)) => Ok(Dependency::Path {
                 path: PathBuf::from(path),

@@ -427,6 +427,7 @@ fn run_cli_project(
         None,
         None,
         !cli_info.flags.has_flag("release"),
+        cli_info.flags.has_flag("demo"),
         progress,
     );
 
@@ -580,6 +581,7 @@ async fn run_ui_project(
     if compile_ui(
         peko_root,
         release,
+        false,
         &mut project,
         default_target,
         &incremental_dir,
@@ -830,6 +832,7 @@ fn rebuild_and_relaunch(
         compile_ui(
             peko_root,
             release,
+            false,
             project,
             target,
             incremental_dir,
@@ -877,6 +880,7 @@ fn rebuild_and_relaunch(
 pub(crate) fn compile_ui(
     peko_root: &Path,
     release: bool,
+    demo: bool,
     project: &mut PekoProject,
     target: PekoTarget,
     incremental_dir: &Path,
@@ -897,6 +901,7 @@ pub(crate) fn compile_ui(
         None,
         None,
         !release,
+        demo,
         progress,
     );
     progress.finish_phase();

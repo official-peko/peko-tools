@@ -143,6 +143,7 @@ impl PekoValueSimulator for PekoAST {
             LinkStatement,
             StyleStatement,
             PlatformStatement,
+            DemoStatement,
             // Declarations
             NewVariable,
             Destructure,

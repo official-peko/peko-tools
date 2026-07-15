@@ -6,8 +6,8 @@
 
 use crate::asts::data_structures::UnpackItem;
 use crate::asts::statements::{
-    BreakAST, ContinueAST, ForLoopAST, IfStatementAST, ImportStatementAST, LinkStatementAST,
-    PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
+    BreakAST, ContinueAST, DemoStatementAST, ForLoopAST, IfStatementAST, ImportStatementAST,
+    LinkStatementAST, PlatformStatementAST, ReturnAST, StyleStatementAST, SwitchStatementAST,
     VariableReassignmentAST, WhileLoopAST,
 };
 
@@ -196,6 +196,13 @@ impl Format for PlatformStatementAST {
             .collect();
         ctx.write(&targets.join(", "));
         ctx.write(" ");
+        format_block(&self.body.value, ctx);
+    }
+}
+
+impl Format for DemoStatementAST {
+    fn format(&self, ctx: &mut FormatContext) {
+        ctx.write("demo ");
         format_block(&self.body.value, ctx);
     }
 }

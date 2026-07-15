@@ -118,6 +118,7 @@ pub fn bundle(
         None,
         None,
         !cli_info.flags.has_flag("release"),
+        cli_info.flags.has_flag("demo"),
         progress,
     )?;
     if let Some(diagnostics) = arm_diagnostics {
@@ -137,6 +138,7 @@ pub fn bundle(
         None,
         None,
         !cli_info.flags.has_flag("release"),
+        cli_info.flags.has_flag("demo"),
         progress,
     )?;
     if let Some(diagnostics) = x86_64_diagnostics {

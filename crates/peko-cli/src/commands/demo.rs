@@ -140,6 +140,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     if !run::compile_ui(
         cli_info.get_peko_root(),
         release,
+        true,
         &mut project,
         target,
         &incremental_dir,

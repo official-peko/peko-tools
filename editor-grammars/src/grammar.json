@@ -4254,6 +4254,19 @@
         }
       ]
     },
+    "demo_statement": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "demo"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "block"
+        }
+      ]
+    },
     "break_statement": {
       "type": "STRING",
       "value": "break"
@@ -4737,6 +4750,10 @@
         {
           "type": "SYMBOL",
           "name": "arch_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "demo_statement"
         },
         {
           "type": "SYMBOL",

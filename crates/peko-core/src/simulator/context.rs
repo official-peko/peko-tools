@@ -114,6 +114,11 @@ pub struct PekoSimulatorContext {
     /// `true` if the program is being compiled as a Windows GUI app.
     pub windowsgui: bool,
 
+    /// `true` when analyzing in demo mode, so `demo { ... }` blocks are
+    /// type-checked. Analysis tools (LSP, `peko test`/`check`) set this; a
+    /// release build leaves it false and demo blocks are skipped.
+    pub demo: bool,
+
     /// All modules discoverable in the Peko packages directory, keyed by
     /// module name.
     pub external_modules: IndexMap<String, ExternalModuleInfo>,
@@ -348,6 +353,7 @@ impl PekoSimulatorContext {
             global_symbols: IndexMap::new(),
             defined_objects: Vec::new(),
             windowsgui: false,
+            demo: false,
             function_calls: Vec::new(),
             current_function_call: None,
             root_folder,

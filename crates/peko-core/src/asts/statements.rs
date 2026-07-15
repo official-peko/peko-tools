@@ -35,6 +35,28 @@ impl Spanned for PlatformStatementAST {
     }
 }
 
+/// A `demo { ... }` conditional-compilation block. Its body is compiled and run
+/// only in demo mode (`peko demo` / `peko build --demo`); a normal or release
+/// build omits it entirely — the body is never simulated, codegen'd, or linked,
+/// so any `import` it holds (and that import's transitive dependencies, e.g.
+/// pekoshots) never reaches the binary. Modeled on [`PlatformStatementAST`].
+#[derive(Clone, new)]
+pub struct DemoStatementAST {
+    pub start: PositionData,
+    pub end: PositionData,
+    pub body: PositionedValue<Vec<PekoAST>>,
+}
+
+impl Spanned for DemoStatementAST {
+    fn get_start(&self) -> &PositionData {
+        &self.start
+    }
+
+    fn get_end(&self) -> &PositionData {
+        &self.end
+    }
+}
+
 /// A variable reassignment: `x = value`, `x += value`, etc.
 ///
 /// `assignment_operator` is `None` for plain `=`, and `Some("+")`,

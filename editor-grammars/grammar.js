@@ -824,6 +824,10 @@ module.exports = grammar({
     platform_statement: ($) =>
       seq("platform", field("name", $.identifier), $.block),
     arch_statement: ($) => seq("arch", field("name", $.identifier), $.block),
+    // `demo { ... }`: a demo-mode conditional-compilation block. `demo` is a
+    // contextual keyword (only here, before a block); elsewhere it is an
+    // ordinary identifier, resolved by the context-aware lexer.
+    demo_statement: ($) => seq("demo", $.block),
 
     break_statement: (_) => "break",
     continue_statement: (_) => "continue",
@@ -909,6 +913,7 @@ module.exports = grammar({
         $.module_declaration,
         $.platform_statement,
         $.arch_statement,
+        $.demo_statement,
         $.break_statement,
         $.continue_statement,
         $.return_statement,

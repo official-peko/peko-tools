@@ -416,6 +416,11 @@
               "name": "entity.name.namespace.peko"
             }
           }
+        },
+        {
+          "comment": "demo is a contextual keyword: only a conditional-compilation block when it leads a `{`",
+          "match": "\\bdemo\\b(?=\\s*\\{)",
+          "name": "keyword.control.peko"
         }
       ]
     },

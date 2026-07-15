@@ -192,6 +192,10 @@ pub struct PekoCodegenContext {
 
     pub in_constructor: bool,
     pub windowsgui: bool,
+    /// `true` in demo builds (`peko demo` / `peko build --demo`); gates whether
+    /// `demo { ... }` blocks emit their body. False in normal/release builds, so
+    /// demo code and its imports (e.g. pekoshots) are stripped from the binary.
+    pub demo: bool,
 
     pub llvm_builder: LLVMBuilderRef,
     pub llvm_context: LLVMContextRef,
@@ -287,6 +291,7 @@ impl PekoCodegenContext {
 
             in_constructor: false,
             windowsgui: false,
+            demo: false,
 
             llvm_builder: unsafe { core::LLVMCreateBuilder() },
             llvm_context,

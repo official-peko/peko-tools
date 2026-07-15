@@ -46,6 +46,7 @@ pub(crate) fn compile_native_sources(
     objects_directory: &Path,
     toolchain: &Toolchain,
     toolchain_dir: &Path,
+    demo: bool,
 ) -> Result<NativeBuild, String> {
     let native_directory = objects_directory.join("native");
     std::fs::create_dir_all(&native_directory).ok();
@@ -53,7 +54,7 @@ pub(crate) fn compile_native_sources(
     let mut objects = Vec::new();
     let mut link_args = Vec::new();
 
-    for package_root in reachable_package_roots(peko_root, project_root) {
+    for package_root in reachable_package_roots(peko_root, project_root, demo) {
         let loaded = match Manifest::load(package_root.join("peko.toml")) {
             Ok(loaded) => loaded,
             Err(_) => continue,
@@ -194,9 +195,13 @@ pub(crate) fn compile_native_sources(
 /// prebuilt static libraries, so no user Java build is needed. The bundler
 /// merges these into the APK and the manifest is marked `hasCode`. Returned in
 /// package order with duplicates removed.
-pub(crate) fn collect_android_dex_files(peko_root: &Path, project_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_android_dex_files(
+    peko_root: &Path,
+    project_root: &Path,
+    demo: bool,
+) -> Vec<PathBuf> {
     let mut dex_files = Vec::new();
-    for package_root in reachable_package_roots(peko_root, project_root) {
+    for package_root in reachable_package_roots(peko_root, project_root, demo) {
         let loaded = match Manifest::load(package_root.join("peko.toml")) {
             Ok(loaded) => loaded,
             Err(_) => continue,
@@ -233,10 +238,11 @@ pub(crate) fn prebuilt_dependencies(
     peko_root: &Path,
     project_root: &Path,
     target: PekoTarget,
+    demo: bool,
 ) -> Vec<PrebuiltDependency> {
     let triple = target.to_triple();
     let mut deps = Vec::new();
-    for package_root in reachable_package_roots(peko_root, project_root) {
+    for package_root in reachable_package_roots(peko_root, project_root, demo) {
         let Some(prebuilt) = PrebuiltManifest::load(&package_root) else {
             continue;
         };
@@ -253,10 +259,29 @@ pub(crate) fn prebuilt_dependencies(
 /// The roots of every package whose native sources the build links: the
 /// project, the in-repo `std` override, and each locked dependency. Duplicate
 /// roots are removed.
-fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf> {
+fn reachable_package_roots(peko_root: &Path, project_root: &Path, demo: bool) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     let mut std_resolved = false;
+
+    // Demo-scoped project dependencies (`demo = true`) are linked only in demo
+    // builds. In a normal/release build their packages are dropped here, so
+    // their native sources and prebuilt objects never reach the link.
+    let demo_scoped: HashSet<String> = if demo {
+        HashSet::new()
+    } else {
+        Manifest::discover(project_root)
+            .map(|loaded| {
+                loaded
+                    .manifest
+                    .dependencies()
+                    .iter()
+                    .filter(|(_, dep)| dep.is_demo())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
     let add = |root: PathBuf, roots: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>| {
         let key = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -301,6 +326,10 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
 
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {
         for package in &lockfile.packages {
+            // A demo-scoped dependency is excluded from a non-demo build.
+            if demo_scoped.contains(&package.name) {
+                continue;
+            }
             let root = match package.source {
                 LockSource::Registry | LockSource::Gated => {
                     registry_source_dir(peko_root, &package.name, &package.version)
