@@ -892,3 +892,78 @@ void peko_stream_abort_tls(void *handle)
         peko_close_socket(st->sock);
     free(st);
 }
+
+/* =========================================================================
+ * WebSocket client TLS transport
+ *
+ * Provides the wss:// byte transport for peko_websocket_client.c. The BearSSL
+ * contexts must outlive the handshake, so they live in one heap struct that is
+ * never moved (the engine and sslio hold interior pointers into it). Trust
+ * matches the rest of this file: the insecure client engine above.
+ * ====================================================================== */
+
+typedef struct {
+    peko_socket_t         sock;
+    br_ssl_client_context sc;
+    insecure_x509_context xc;
+    br_sslio_context      ioc;
+    unsigned char         iobuf[BR_SSL_BUFSIZE_BIDI];
+} ws_tls_ctx;
+
+static int ws_tls_read(void *ctx, unsigned char *buf, size_t len)
+{
+    ws_tls_ctx *t = (ws_tls_ctx *)ctx;
+    int n = br_sslio_read(&t->ioc, buf, len);
+    return n; /* >0 bytes, <0 on close/error */
+}
+
+static int ws_tls_write_all(void *ctx, const unsigned char *buf, size_t len)
+{
+    ws_tls_ctx *t = (ws_tls_ctx *)ctx;
+    if (tls_write_all_stable(&t->ioc, (const char *)buf, len) != 0)
+        return -1;
+    br_sslio_flush(&t->ioc);
+    return 0;
+}
+
+static void ws_tls_close(void *ctx)
+{
+    ws_tls_ctx *t = (ws_tls_ctx *)ctx;
+    if (!t)
+        return;
+    if (t->sock != PEKO_INVALID_SOCKET)
+        peko_close_socket(t->sock);
+    free(t);
+}
+
+int peko_ws_tls_transport_connect(const char *host, int port, ws_transport_t *out)
+{
+    ws_tls_ctx *t = (ws_tls_ctx *)malloc(sizeof(*t));
+    if (!t)
+        return -1;
+
+    t->sock = tcp_connect(host, port);
+    if (t->sock == PEKO_INVALID_SOCKET) {
+        free(t);
+        return -1;
+    }
+
+    br_ssl_client_init_full(&t->sc, &t->xc.inner, NULL, 0);
+    t->xc.vtable = &insecure_x509_vtable;
+    br_ssl_engine_set_x509(&t->sc.eng, &t->xc.vtable);
+    br_ssl_engine_set_buffer(&t->sc.eng, t->iobuf, sizeof(t->iobuf), 1);
+    if (!br_ssl_client_reset(&t->sc, host, 0)) {
+        peko_close_socket(t->sock);
+        free(t);
+        return -1;
+    }
+    /* The read/write callbacks take a peko_socket_t*; &t->sock is stable for the
+     * life of this heap struct. */
+    br_sslio_init(&t->ioc, &t->sc.eng, sock_read, &t->sock, sock_write, &t->sock);
+
+    out->ctx = t;
+    out->read = ws_tls_read;
+    out->write_all = ws_tls_write_all;
+    out->close = ws_tls_close;
+    return 0;
+}

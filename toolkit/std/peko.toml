@@ -1,6 +1,6 @@
 [package]
 name = "std"
-version = "0.1.2"
+version = "0.1.3"
 description = "The Pekoscript standard library."
 license = "MIT"
 repository = "https://github.com/official-peko/peko-tools"
@@ -59,6 +59,7 @@ sources = [
     "c/sockets/peko_sockets.c",
     "c/sockets/peko_sockets_tls.c",
     "c/sockets/peko_websocket.c",
+    "c/sockets/peko_websocket_client.c",
 ]
 include = ["c/runtime/include", "c/io", "c/random", "c/fs", "c/crypto/vendor", "c/threads", "c/process", "c/sockets", "c/sockets/inc"]
 
@@ -75,7 +76,8 @@ linux-arm = ["c/crypto/vendor/linux/arm/libsodium.a", "c/sockets/vendor/linux/ar
 linux-x86_64 = ["c/crypto/vendor/linux/x86_64/libsodium.a", "c/sockets/vendor/linux/x86_64/libbearssl.a"]
 ios-arm = ["c/crypto/vendor/ios/arm/libsodium.a", "c/sockets/vendor/ios/arm/libbearssl.a"]
 ios-x86_64 = ["c/crypto/vendor/ios/x86_64/libsodium.a", "c/sockets/vendor/ios/x86_64/libbearssl.a"]
-android = ["c/crypto/vendor/android/libsodium.a", "c/sockets/vendor/android/libbearssl.a"]
+android-arm = ["c/crypto/vendor/android/arm/libsodium.a", "c/sockets/vendor/android/arm/libbearssl.a"]
+android-x86_64 = ["c/crypto/vendor/android/x86_64/libsodium.a", "c/sockets/vendor/android/x86_64/libbearssl.a"]
 windows = ["c/crypto/vendor/windows/libsodium.lib", "c/sockets/vendor/windows/bearssl.lib"]
 
 # System libraries the runtime and standard library link on each platform.

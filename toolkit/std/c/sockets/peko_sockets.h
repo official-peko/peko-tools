@@ -267,6 +267,61 @@ int peko_ws_accept_connection(peko_socket_t   listen_socket,
  */
 int peko_ws_send_text(peko_socket_t socket, const char *text);
 
+/* -------------------------------------------------------------------------
+ * Function declarations - peko_websocket_client.c (outbound WS client)
+ *
+ * A client that dials a WebSocket server (the pekoui native bridge dials the
+ * hosted `/__peko__`). Both `ws://` (plain) and `wss://` (TLS) are supported;
+ * the TLS transport lives in peko_sockets_tls.c and is reached through the
+ * factory below so the framing code carries no BearSSL dependency.
+ * ---------------------------------------------------------------------- */
+
+/*
+ * A byte transport under the WebSocket framing: either a plain socket or a TLS
+ * session. read returns >0 bytes read, or <=0 on close/error; write_all returns
+ * 0 on success, -1 on error; close tears the transport down and frees ctx.
+ */
+typedef struct {
+    void *ctx;
+    int  (*read)(void *ctx, unsigned char *buf, size_t len);
+    int  (*write_all)(void *ctx, const unsigned char *buf, size_t len);
+    void (*close)(void *ctx);
+} ws_transport_t;
+
+/*
+ * Open a TLS byte transport to host:port (implemented in peko_sockets_tls.c).
+ * Returns 0 and fills *out on success, -1 on failure. Certificate trust matches
+ * the rest of the std TLS layer (the documented BearSSL insecure client engine).
+ */
+int peko_ws_tls_transport_connect(const char *host, int port, ws_transport_t *out);
+
+/*
+ * Connect to a WebSocket URL (ws:// or wss://) and complete the upgrade
+ * handshake. `subprotocol` and `extra_headers` may be NULL; `extra_headers`, if
+ * given, is inserted verbatim into the handshake (each line CRLF-terminated),
+ * for the bridge token cookie. Returns an opaque client handle, or NULL on
+ * failure. Free with peko_ws_client_close.
+ */
+void *peko_ws_client_connect(const char *url, const char *subprotocol,
+                             const char *extra_headers);
+
+/* Send text as a masked text frame. Returns 0 on success, -1 on error. */
+int peko_ws_client_send(void *client, const char *text);
+
+/*
+ * Block for the next text message, answering ping/pong internally. Returns a
+ * malloc'd, NUL-terminated string the caller owns, or NULL when the connection
+ * closes or errors.
+ */
+char *peko_ws_client_recv(void *client);
+
+/* Free a message returned by peko_ws_client_recv, after the caller has copied it
+ * into a managed string. */
+void peko_ws_client_free_message(char *msg);
+
+/* Send a close frame (best effort), tear down the transport, and free. */
+void peko_ws_client_close(void *client);
+
 
 /*
  * Connects to host:port, sends request, then streams the response body

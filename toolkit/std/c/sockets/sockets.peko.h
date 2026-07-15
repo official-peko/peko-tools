@@ -83,4 +83,17 @@ p_fn p_gcsafe p_i32 peko_ws_serve(p_i32 client, p_opaque handler, p_gc_opaque da
 p_fn p_gcsafe p_i32 peko_ws_accept_connection(p_i32 listen_socket, p_opaque handler, p_gc_opaque data);
 p_fn p_gcsafe p_i32 peko_ws_send_text(p_i32 socket, p_gc(p_i8) text);
 
+/* WebSocket client (outbound). connect dials a ws:// or wss:// URL and completes
+   the upgrade handshake, returning an opaque client handle (or null on failure);
+   subprotocol and extra_headers are passed as strings ("" for none), the latter
+   inserted verbatim into the handshake for a bridge-token cookie. send sends text
+   as a masked frame (0 on success, -1 on error). recv blocks for the next text
+   message, answering ping/pong internally, and returns it as a string the Peko
+   side copies (null on close/error). close sends a close frame and frees. */
+p_fn p_gcsafe p_opaque peko_ws_client_connect(p_gc(p_i8) url, p_gc(p_i8) subprotocol, p_gc(p_i8) extra_headers);
+p_fn p_gcsafe p_i32 peko_ws_client_send(p_opaque client, p_gc(p_i8) text);
+p_fn p_gcsafe p_cstr peko_ws_client_recv(p_opaque client);
+p_fn void peko_ws_client_free_message(p_cstr msg);
+p_fn p_gcsafe void peko_ws_client_close(p_opaque client);
+
 PEKO_END

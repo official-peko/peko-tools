@@ -1341,6 +1341,64 @@ import runtime;
 }
 
 // ---------------------------------------------------------------------------
+// --- WebSocket client (outbound) ---
+// ---------------------------------------------------------------------------
+
+/// An outbound WebSocket connection to a `ws://` or `wss://` server. The pekoui
+/// native bridge dials the hosted `/__peko__` with it as the device provider.
+/// Every blocking call is bracketed in the C layer, so the collector runs while
+/// a thread waits on the network.
+[public] class WsClient {
+    [private] handle: opaque
+
+    /// Wraps a connected handle. Obtain one through ws_connect / ws_connect_with.
+    constructor(handle: opaque) {
+        this.handle = handle
+    }
+
+    /// Sends a text message as a masked frame. False on a write error.
+    [public] fn send(text: string) => bool {
+        return c_sockets::peko_ws_client_send(this.handle, text.to_raw()) == constant<i32>(0)
+    }
+
+    /// Blocks for the next text message, answering ping/pong internally. None
+    /// when the connection closes or errors.
+    [public] fn recv() => string? {
+        let raw: cstr = c_sockets::peko_ws_client_recv(this.handle)
+        if raw == null {
+            return None
+        }
+        // Copy into a managed string, then free the C buffer to avoid a per
+        // message leak (create_managed copies but does not take ownership).
+        let message: string = runtime::create_managed(raw)
+        c_sockets::peko_ws_client_free_message(raw)
+        return message
+    }
+
+    /// Sends a close frame and tears the connection down.
+    [public] fn close() {
+        c_sockets::peko_ws_client_close(this.handle)
+    }
+}
+
+/// Connects to a `ws://` or `wss://` URL and completes the upgrade handshake.
+/// None on failure.
+[public] fn ws_connect(url: string) => WsClient? {
+    return ws_connect_with(url, "", "")
+}
+
+/// Connects with an optional subprotocol and extra handshake header lines (each
+/// CRLF-terminated), used to carry a bridge-token cookie. None on failure.
+[public] fn ws_connect_with(url: string, subprotocol: string, extra_headers: string) => WsClient? {
+    let handle: opaque = c_sockets::peko_ws_client_connect(
+        url.to_raw(), subprotocol.to_raw(), extra_headers.to_raw())
+    if handle == null {
+        return None
+    }
+    return new WsClient(handle)
+}
+
+// ---------------------------------------------------------------------------
 // --- Servers ---
 // ---------------------------------------------------------------------------
 

@@ -19,6 +19,10 @@ import { * } from core;
 /// The platform-assigned app id. Empty when unassigned.
 [public constant] let app_id: string = ""
 
+/// The platform serving host, `<slug>.serve.pekoui.com`. Empty until the app is
+/// deployed; when set, a built app loads its UI from it.
+[public constant] let host: string = ""
+
 /// The application version string.
 [public constant] let version: string = ""
 

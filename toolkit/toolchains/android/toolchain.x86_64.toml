@@ -1,0 +1,54 @@
+# Toolchain description for Android on x86_64 (API 22) — the emulator ABI.
+#
+# Shares the multi-arch NDK sysroot/include/linux dirs with the arm64
+# toolchain.toml in this same directory; only the target triple, the
+# x86_64-linux-android lib/include paths, the clang_rt/crt objects, and the ELF
+# machine (`-m elf_x86_64`) differ. Paths are relative to this file's directory.
+
+[toolchain]
+id = "android-x86_64"
+target = "android"
+arch = "x86_64"
+triple = "x86_64-unknown-linux-android22"
+
+[build]
+cxx_std = "c++17"
+c_flags = ["-fPIC"]
+objc_flags = []
+include = [
+  "sysroot/usr/include/c++/v1",
+  "include",
+  "sysroot/usr/include/x86_64-linux-android",
+  "sysroot/usr/include",
+]
+
+[link]
+driver = "ld.lld"
+lib_paths = [
+  "linux/x86_64",
+  "sysroot/usr/lib/x86_64-linux-android/22",
+  "sysroot/usr/lib/x86_64-linux-android",
+  "sysroot/usr/lib",
+]
+# ":libunwind.a" links that exact file by name.
+libs = [
+  ":libunwind.a", "dl", "c", "m", "c++_static", "c++abi",
+  "log", "android", "EGL", "GLESv3", "OpenSLES",
+]
+frameworks = []
+# The crt objects for an executable link.
+objects = [
+  "linux/libclang_rt.builtins-x86_64-android.a",
+  "sysroot/usr/lib/x86_64-linux-android/22/crtbegin_dynamic.o",
+  "sysroot/usr/lib/x86_64-linux-android/22/crtend_android.o",
+]
+# -z max-page-size=16384 aligns loadable segments to 16 KB so the binary loads
+# on both 4 KB and 16 KB page-size devices.
+flags = [
+  "-pie",
+  "-uANativeActivity_onCreate",
+  "-dynamic-linker", "/system/bin/linker64",
+  "--sysroot=sysroot",
+  "-m", "elf_x86_64",
+  "-z", "max-page-size=16384",
+]
