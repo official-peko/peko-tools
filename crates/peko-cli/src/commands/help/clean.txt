@@ -1,0 +1,17 @@
+peko clean
+
+Removes the current project's build artifacts:
+
+  - the incremental build cache (.peko/incremental)
+  - the build output directory (build/)
+  - for a UI project whose framework defines a "clean" script in
+    package.json, the framework's own clean (npm run clean)
+
+Use this to force a fully fresh build or to reclaim disk space. It
+replaces the old `peko build --clean` flag.
+
+USAGE
+    peko clean
+
+EXAMPLES
+    peko clean

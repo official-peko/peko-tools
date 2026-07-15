@@ -74,6 +74,7 @@ commands! {
     bridge     => "mint a native-bridge token for the current app" [ "app-id", "device-id", "base" ],
     build      => "build the project for one or more target platforms" [ "platform", "target", "arch", "output" ],
     check      => "verify the Peko toolchain installation is healthy",
+    clean      => "remove the project's build cache and output",
     clangflags => "print clang flags peko_core would pass to the C compiler" [ "os", "arch" ],
     compile    => "compile a single Pekoscript file to an object or binary" [ "os", "arch", "output" ],
     demo       => "run the app's demo shots to verify the automation flow" [ "from", "delay", "shot" ],
