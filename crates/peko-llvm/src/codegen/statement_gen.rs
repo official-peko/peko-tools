@@ -984,6 +984,14 @@ impl PekoValueBuilder for ImportStatementAST {
         };
 
         let module_entry_file_path = resolved.entry_file.clone();
+
+        // Note: a prebuilt package may be imported under an alias. Its symbols
+        // are mangled by each module's own name (a submodule's symbols are
+        // `catalog::…`, not `alias::catalog::…`; FFI symbols are raw C names), so
+        // aliasing is safe for submodule and FFI access — which is how packages
+        // like pekoshots are designed to be used (`import pekoshots as shots`).
+        // Only a top-level symbol defined directly in an aliased module would
+        // mismatch, which the canonical-id mangling work (deferred) would fix.
         let is_ffi = peko_core::ffi::is_ffi_header(&module_entry_file_path);
 
         // Whether this import has an unpack list (`import { ... } from x`).
@@ -1100,11 +1108,28 @@ impl PekoValueBuilder for ImportStatementAST {
                 codegen_context.diagnostics.report_diagnostic(error.clone());
             }
 
+            // A prebuilt (source-hidden) dependency's objects were compiled under
+            // the module's canonical name (its import path's last segment:
+            // `pekoshots`, `demo`), NOT any local alias. So name a prebuilt
+            // module canonically regardless of the alias, so its
+            // globals-initializer and other name-mangled symbols match the
+            // prebuilt objects at link. The alias still resolves through
+            // module_aliases. (Otherwise `import pekoshots as shots` would emit a
+            // `shots::set_globals` reference the prebuilt never defines.)
+            let is_prebuilt_module = module_entry_file_path
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] == "prebuilt" && pair[1] == "stubs");
+
             // When the local alias is already taken by a different file, name
             // this module by its canonical id so its globals-initializer and
             // other name-mangled symbols stay unique. The alias resolves
             // through module_aliases regardless of this name.
-            let module_local_name = if codegen_context
+            let module_local_name = if is_prebuilt_module {
+                module_name.clone()
+            } else if codegen_context
                 .module_context
                 .top_level_modules
                 .contains_key(&import_as_module_name)

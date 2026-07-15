@@ -16,6 +16,15 @@ pub struct FormatConfig {
     /// constructs wrap when a single line would exceed this. A value of zero
     /// disables width-based wrapping.
     pub max_width: usize,
+
+    /// Emit definition-only stubs: function, method, and constructor bodies are
+    /// omitted (each becomes a `signature;` declaration), while signatures,
+    /// visibility, attributes, fields, enum variants, and trait slots are kept.
+    /// Used by `peko package build` to ship a package's public interface without
+    /// its implementation; the bodies live in prebuilt objects the consumer
+    /// links against. Relies on the erasure model, so no body ever needs to cross
+    /// the module boundary for the consumer to typecheck or link.
+    pub definitions_only: bool,
 }
 
 impl Default for FormatConfig {
@@ -23,6 +32,7 @@ impl Default for FormatConfig {
         Self {
             indent_unit: "    ".to_string(),
             max_width: 100,
+            definitions_only: false,
         }
     }
 }

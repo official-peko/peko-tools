@@ -796,6 +796,21 @@ impl ProjectIncrementalMap {
 // Orchestrators
 // ---------------------------------------------------------------------------
 
+/// `true` when `module` belongs to a prebuilt (source-hidden) dependency,
+/// i.e. its source file resolves under one of the prebuilt stub roots. Such a
+/// module is codegen-ed for typechecking and call-site resolution, but its
+/// object is neither emitted nor linked: the package's prebuilt object supplies
+/// the definitions instead. Its `set_globals` is still registered so the
+/// globals aggregator invokes the prebuilt initializer.
+fn module_is_prebuilt(module: &Arc<RwLock<CodegenModule>>, stub_roots: &[PathBuf]) -> bool {
+    if stub_roots.is_empty() {
+        return false;
+    }
+    let file = module.read().unwrap().get_file().to_path_buf();
+    let canonical = file.canonicalize().unwrap_or(file);
+    stub_roots.iter().any(|root| canonical.starts_with(root))
+}
+
 /// Build the compile-time `bundle` metadata for a project. A UI project
 /// draws its identifier, version, app id, and framework from the manifest.
 /// A command-line project reports the `cli` framework with empty UI fields.
@@ -804,6 +819,7 @@ fn bundle_info_for(project: &PekoProject, debug: bool) -> BundleInfo {
         name: project.name.clone(),
         identifier: project.identifier.clone(),
         app_id: project.app_id.clone().unwrap_or_default(),
+        host: project.host.clone().unwrap_or_default(),
         version: project.version.clone(),
         framework: project
             .ui_project_info
@@ -841,6 +857,7 @@ fn initialize_incremental_for_target(
     main_file: PathBuf,
     compilation_root: PathBuf,
     preloaded_modules: Option<IndexMap<String, Arc<RwLock<CodegenModule>>>>,
+    prebuilt_stub_roots: &[PathBuf],
     debug: bool,
     progress: &dyn ProgressSink,
 ) -> PekoResult<(PekoCodegenContext, DiagnosticList)> {
@@ -908,6 +925,12 @@ fn initialize_incremental_for_target(
                 continue;
             }
 
+            // A prebuilt dependency's module is codegen-ed above (so consumer
+            // call sites resolve) but its object is shipped, not emitted here.
+            if module_is_prebuilt(&top_level_module, prebuilt_stub_roots) {
+                continue;
+            }
+
             let project_file =
                 ProjectFile::from_top_level_module(Arc::clone(&top_level_module), true, true);
             if !diagnostics.has_errors() {
@@ -961,6 +984,14 @@ fn initialize_incremental_for_target(
     let modules = codegen_context.module_context.top_level_modules.clone();
     for (modname, top_level_module) in modules {
         if modname == "extern" {
+            continue;
+        }
+
+        // A prebuilt dependency's module is not tracked, emitted, or linked
+        // from the consumer: its object is shipped and linked separately, and
+        // its `set_globals` (registered above) is resolved from that object. It
+        // is still codegen-ed so consumer references to it resolve.
+        if module_is_prebuilt(&top_level_module, prebuilt_stub_roots) {
             continue;
         }
 
@@ -1119,6 +1150,15 @@ pub fn compile_project(
     let mut file_diagnostics = DiagnosticList::new();
     let project_root = project.get_root().to_path_buf();
 
+    // Prebuilt (source-hidden) dependencies for this target: their stub roots
+    // mark which codegen-ed modules are shipped rather than emitted, and their
+    // objects are linked in place of a from-source compile.
+    let prebuilt_deps = super::native::prebuilt_dependencies(peko_root, &project_root, target);
+    let prebuilt_stub_roots: Vec<PathBuf> = prebuilt_deps
+        .iter()
+        .map(|dep| dep.stub_root.clone())
+        .collect();
+
     let objects_directory = incremental_directory
         .join("objects")
         .join(target.operating_system.to_string())
@@ -1136,6 +1176,7 @@ pub fn compile_project(
             entry_file,
             project_root.clone(),
             preloaded_modules.clone(),
+            &prebuilt_stub_roots,
             debug,
             progress,
         )?;
@@ -1322,6 +1363,13 @@ pub fn compile_project(
                             continue;
                         }
 
+                        // A prebuilt dependency's module is never tracked or
+                        // linked from the consumer (its object is shipped), so
+                        // do not queue it for recompilation.
+                        if module_is_prebuilt(top_level_module, &prebuilt_stub_roots) {
+                            continue;
+                        }
+
                         let module_project_file = ProjectFile::from_top_level_module(
                             Arc::clone(top_level_module),
                             true,
@@ -1438,6 +1486,14 @@ pub fn compile_project(
             return Ok(None);
         }
     };
+
+    // Link each prebuilt dependency's shipped objects. These carry the
+    // definitions (class descriptors, type info, method bodies, and the
+    // module `set_globals` the aggregator calls) for modules the consumer
+    // codegen-ed from stubs but did not emit.
+    for dep in &prebuilt_deps {
+        linked_files.extend(dep.objects.iter().cloned());
+    }
 
     // Drop any object that resolved to the same path through more than one
     // source (tracked files, package link objects, native objects). The linker

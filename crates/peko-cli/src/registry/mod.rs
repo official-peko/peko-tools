@@ -11,6 +11,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod gated;
 pub mod index;
 pub mod install;
 pub mod pack;
@@ -70,6 +71,37 @@ pub enum RegistryError {
     /// A request returned a non-success HTTP status.
     #[error("registry request failed ({status}): {url}")]
     Http { status: u16, url: String },
+
+    /// The platform refused to serve a proprietary, entitlement-gated package.
+    #[error(
+        "access to `{package}` was denied: it is a proprietary package that requires an active paid Peko account. Run `peko login`, and make sure your subscription is active"
+    )]
+    Forbidden { package: String },
+
+    /// A gated package requires signing in.
+    #[error("`{package}` is a proprietary package. Run `peko login` to download it")]
+    SignInRequired { package: String },
+
+    /// A gated package requires a paid account.
+    #[error(
+        "`{package}` requires an active paid Peko account (tier `{tier}`). Upgrade your plan to download it"
+    )]
+    EntitlementRequired { package: String, tier: String },
+
+    /// No gated bundle serves the requested toolchain (the package may not be
+    /// gated, or is not built for this CLI version).
+    #[error(
+        "no prebuilt build of `{package}` available for toolchain `{toolchain}`. It may not be a gated package, or not built for your CLI version"
+    )]
+    NoPrebuiltBundle { package: String, toolchain: String },
+
+    /// The gated download was rate-limited.
+    #[error("download of `{package}` was rate-limited; try again in a moment")]
+    RateLimited { package: String },
+
+    /// The gated download request was rejected.
+    #[error("could not download gated package `{package}`: {detail}")]
+    GatedRequest { package: String, detail: String },
 
     /// A package is not published.
     #[error("package `{0}` not found in the registry")]

@@ -6,14 +6,14 @@
 //!   {"replaced":<count>,"files":<count>}
 //!
 //! Flags:
-//!   --query=<text>       the search text or regex (required)
+//!   --query <text>       the search text or regex (required)
 //!   --regex              treat query as a regular expression
 //!   --case               case-sensitive (default is case-insensitive)
 //!   --word               match whole words only
-//!   --include=<globs>    comma-separated globs; only matching files are searched
-//!   --exclude=<globs>    comma-separated globs; matching files are skipped
-//!   --replace=<text>     replace mode: substitute this for every match
-//!   --root=<dir>         search root (defaults to the working directory)
+//!   --include <globs>    comma-separated globs; only matching files are searched
+//!   --exclude <globs>    comma-separated globs; matching files are skipped
+//!   --replace <text>     replace mode: substitute this for every match
+//!   --root <dir>         search root (defaults to the working directory)
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

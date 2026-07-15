@@ -29,8 +29,17 @@ fn registry_base() -> String {
 /// A client for the static index and the blob store.
 pub struct RegistryClient {
     base_url: String,
+    /// The platform API base (e.g. `https://app.pekoui.com`), used for the
+    /// gated `/api/packages/*` endpoints. Distinct from `base_url`, which is
+    /// the static index/blob CDN.
+    platform_base: String,
     http: reqwest::Client,
     cache: Cache,
+    /// The session bearer token, when the cli is logged in. Sent on requests so
+    /// the platform can enforce entitlement: proprietary packages (e.g.
+    /// pekoshots) are served only to an authenticated, paid account and return
+    /// `403 Forbidden` otherwise. Public packages ignore it.
+    id_token: Option<String>,
 }
 
 impl RegistryClient {
@@ -44,9 +53,38 @@ impl RegistryClient {
 
         Ok(RegistryClient {
             base_url: registry_base(),
+            platform_base: crate::auth::platform_base(None),
             http,
             cache,
+            id_token: None,
         })
+    }
+
+    /// Fetch a gated package's public metadata for this CLI's toolchain.
+    ///
+    /// Used by the resolver when the public index has no entry for a package:
+    /// the package may be a proprietary, toolchain-pinned one served through the
+    /// platform. `Ok(None)` means the platform has no such build (so the caller
+    /// keeps the original not-found error); `Ok(Some(meta))` carries the
+    /// concrete toolchain and checksum to lock. Requires no auth.
+    pub async fn fetch_gated_meta(
+        &self,
+        name: &str,
+    ) -> Result<Option<super::gated::GatedMeta>, RegistryError> {
+        let toolchain = super::gated::toolchain_version();
+        match super::gated::fetch_meta(&self.platform_base, name, toolchain).await {
+            Ok(meta) => Ok(meta),
+            // A transport-level failure is treated as "no gated meta" so the
+            // resolver reports the public-index error rather than a network one.
+            Err(super::gated::GatedError::Network(_)) => Ok(None),
+            Err(other) => Err(other.into_registry(name)),
+        }
+    }
+
+    /// Attach a session bearer token so entitlement-gated packages can be
+    /// fetched. `None` leaves requests anonymous (public packages only).
+    pub fn set_id_token(&mut self, token: Option<String>) {
+        self.id_token = token;
     }
 
     /// The cache this client downloads into.
@@ -99,12 +137,21 @@ impl RegistryClient {
 
         // Immutable blobs are served under packages/<name>/<name>-<version>.pkpkg.
         let url = format!("{}/packages/{name}/{name}-{version}.pkpkg", self.base_url);
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(RegistryError::Network)?;
+        let mut request = self.http.get(&url);
+        if let Some(token) = &self.id_token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.map_err(RegistryError::Network)?;
+        // The platform gates proprietary packages: an unauthenticated or
+        // unentitled request is refused so the source-hidden package is never
+        // served to a non-paying account.
+        if response.status() == reqwest::StatusCode::FORBIDDEN
+            || response.status() == reqwest::StatusCode::UNAUTHORIZED
+        {
+            return Err(RegistryError::Forbidden {
+                package: name.to_owned(),
+            });
+        }
         if !response.status().is_success() {
             return Err(RegistryError::Http {
                 status: response.status().as_u16(),

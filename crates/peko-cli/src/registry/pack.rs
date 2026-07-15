@@ -27,6 +27,48 @@ pub fn pack(loaded: &LoadedManifest) -> Result<Vec<u8>, RegistryError> {
         .map_err(RegistryError::Config)
 }
 
+/// Pack a prebuilt package's all-platforms `prebuilt/` tree into a single
+/// distributable bundle: the verbatim `peko.toml` header plus
+/// `zstd(tar(peko.toml + prebuilt/))`. This is the one file an admin uploads to
+/// the registry for a gated package — it carries every platform's objects for
+/// one toolchain, and unpacks (via [`unpack`]) into a resolvable prebuilt
+/// package (its `peko.toml` and `prebuilt/` tree).
+pub fn pack_prebuilt(loaded: &LoadedManifest, prebuilt_dir: &Path) -> Result<Vec<u8>, RegistryError> {
+    let mut tar_buf = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_buf);
+        // The manifest, so the unpacked bundle is a resolvable package.
+        let manifest_path = loaded.root.join("peko.toml");
+        builder
+            .append_path_with_name(&manifest_path, "peko.toml")
+            .map_err(|source| RegistryError::Io {
+                path: manifest_path.clone(),
+                source,
+            })?;
+        // The whole all-platforms prebuilt tree (stubs + every triple's objects
+        // + prebuilt.toml).
+        builder
+            .append_dir_all("prebuilt", prebuilt_dir)
+            .map_err(|source| RegistryError::Io {
+                path: prebuilt_dir.to_path_buf(),
+                source,
+            })?;
+        builder.finish().map_err(|source| RegistryError::Io {
+            path: prebuilt_dir.to_path_buf(),
+            source,
+        })?;
+    }
+    let payload = zstd::encode_all(Cursor::new(tar_buf), ZSTD_LEVEL).map_err(|source| {
+        RegistryError::Io {
+            path: prebuilt_dir.to_path_buf(),
+            source,
+        }
+    })?;
+    loaded
+        .to_container(Compression::Zstd, &payload, None)
+        .map_err(RegistryError::Config)
+}
+
 /// Unpack a `.pkpkg` container's source tree into `dest`.
 pub fn unpack(bytes: &[u8], dest: &Path) -> Result<(), RegistryError> {
     let container = decode_container(bytes).map_err(RegistryError::Container)?;

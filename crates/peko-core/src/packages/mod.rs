@@ -12,7 +12,7 @@
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::{LockSource, Lockfile, MANIFEST_FILE, Manifest};
+use crate::config::{LockSource, Lockfile, MANIFEST_FILE, Manifest, PrebuiltManifest};
 use crate::error::PekoResult;
 use crate::{ExternalModuleInfo, ExternalModuleVersion};
 
@@ -83,7 +83,7 @@ impl PekoPackageIndex {
         let mut modules = IndexMap::new();
         for package in &lockfile.packages {
             let version_dir = match package.source {
-                LockSource::Registry => {
+                LockSource::Registry | LockSource::Gated => {
                     registry_source_dir(peko_root, &package.name, &package.version)
                 }
                 LockSource::Path => match &package.path {
@@ -177,10 +177,16 @@ fn read_version_dir(version_dir: &Path) -> Option<(String, ExternalModuleVersion
     let loaded = Manifest::load(version_dir.join(MANIFEST_FILE)).ok()?;
 
     let entry_path = loaded.entry();
-    let source_root = entry_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| version_dir.to_path_buf());
+    let source_root = if PrebuiltManifest::is_prebuilt(version_dir) {
+        // A prebuilt (source-hidden) package resolves against its stub tree;
+        // the implementation source is absent. The entry keeps its file name.
+        PrebuiltManifest::stubs_dir(version_dir)
+    } else {
+        entry_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| version_dir.to_path_buf())
+    };
     let entry_file = entry_path
         .file_name()
         .and_then(|file| file.to_str())

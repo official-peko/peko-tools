@@ -88,14 +88,24 @@ pub fn bundle(
     // open assets from.
     crate::bundler::copy_project_assets(project, &assets_dir)?;
 
-    let lib_directory = app_directory.join("lib/arm64-v8a");
+    // Select the ABI to build. arm64-v8a is the default (real devices); x86_64
+    // is for emulators (fast under KVM on an x86 host). `--arch x86_64` picks it;
+    // anything else falls back to arm64. Each ABI's `.so` goes in its own
+    // `lib/<abi>/` dir, which is exactly what the universal APK packages.
+    let architecture = match cli_info.flags.get_flag("arch").as_deref() {
+        Some("x86_64") => Architecture::X86_64,
+        _ => Architecture::Arm,
+    };
+    let abi = match architecture {
+        Architecture::X86_64 => "x86_64",
+        _ => "arm64-v8a",
+    };
+    let lib_directory = app_directory.join("lib").join(abi);
     io_at(&lib_directory, fs::create_dir_all(&lib_directory))?;
 
-    // Android always means arm64-v8a (the only architecture currently
-    // supported), and we always link as a shared library so the Android
-    // app's NativeActivity can dlopen it.
-    progress.tick("Android: compiling native library");
-    let android_target = PekoTarget::new(OperatingSystem::Android, Architecture::Arm, false);
+    // Link as a shared library so the Android app's NativeActivity can dlopen it.
+    progress.tick(&format!("Android: compiling native library ({abi})"));
+    let android_target = PekoTarget::new(OperatingSystem::Android, architecture, false);
     let diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,

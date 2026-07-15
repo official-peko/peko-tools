@@ -107,7 +107,7 @@ fn generate(cli_info: &CLIInfo, reporter: &Reporter, ui: &UIProjectInfo) -> Exit
         None => ui.platforms.iter().filter_map(|p| platform_name(*p)).collect(),
     };
     if platforms.is_empty() {
-        reporter.error("no target platforms; declare target_platforms or pass --platform=<os>");
+        reporter.error("no target platforms; declare target_platforms or pass --platform <os>");
         return ExitCode::FAILURE;
     }
 

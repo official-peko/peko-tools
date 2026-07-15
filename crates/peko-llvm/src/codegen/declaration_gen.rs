@@ -2289,6 +2289,17 @@ impl PekoValueBuilder for ClassAST {
                     break;
                 }
 
+                // A declaration-only (external) method or constructor, parsed
+                // from a definition stub, has no body: its definition is linked
+                // from a prebuilt object. Emit only the declaration (already made
+                // above) and skip body generation. Unlike the coarse
+                // `outside_declarations_only` flag, this is per-method, so a build
+                // mixing prebuilt and from-source dependencies handles each
+                // correctly.
+                if class_method.get_info().is_external {
+                    continue;
+                }
+
                 // Bind the method's own generic parameters as bare carriers, on top
                 // of the class parameters, so its body resolves references to them
                 // while erased. Restored at the end of this method's body.

@@ -13,12 +13,12 @@ SUBCOMMANDS
     show        print the resolved icon source and target platforms
 
 OPTIONS
-    --platform=<OS>   generate only this platform (macos, ios, android,
+    --platform <OS>   generate only this platform (macos, ios, android,
                       windows, linux); default is the project's targets
-    --out=<DIR>       output directory; default build/icons
+    --out <DIR>       output directory; default build/icons
 
 EXAMPLES
     peko icon show
     peko icon generate
-    peko icon generate --platform=ios
-    peko icon generate --out=dist/icons
+    peko icon generate --platform ios
+    peko icon generate --out dist/icons

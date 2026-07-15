@@ -19,6 +19,12 @@ pub fn npm() -> Command {
     hidden(if cfg!(windows) { "npm.cmd" } else { "npm" })
 }
 
+/// A hidden [`Command`] for npx, used to run a framework's own scaffolder. Like
+/// npm, it is a batch script on Windows (`npx.cmd`).
+pub fn npx() -> Command {
+    hidden(if cfg!(windows) { "npx.cmd" } else { "npx" })
+}
+
 /// Apply the no-console-window creation flag on Windows. A no-op elsewhere.
 pub fn hide_window(command: &mut Command) {
     #[cfg(windows)]

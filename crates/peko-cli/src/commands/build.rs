@@ -24,6 +24,13 @@ enum PlatformFailure {
 
 /// Execute the `build` subcommand.
 pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    // `--prebuild` runs the library-package prebuild flow (cross-compile every
+    // platform, generate stubs + FFI headers, write prebuilt.toml, and pack the
+    // all-platforms `.pkbundle`) instead of an ordinary project build.
+    if cli_info.flags.has_flag("prebuild") {
+        return crate::execution::prebuild::run(cli_info, reporter);
+    }
+
     let project = match PekoProject::from_current_directory() {
         Ok(project) => project,
         Err(e) => {
@@ -105,7 +112,7 @@ fn handle_clean(project: PekoProject, reporter: &Reporter) -> ExitCode {
 /// Vite config writes into `assets/`, which the platform bundlers then embed.
 /// A project without a `package.json` is left as-is, so a hand-authored
 /// `assets/` still works.
-fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), ExitCode> {
+pub(crate) fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), ExitCode> {
     let root = project.get_root();
     if !root.join("package.json").is_file() {
         return Ok(());

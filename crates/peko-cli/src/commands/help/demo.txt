@@ -18,13 +18,13 @@ DESCRIPTION
     pekoshots::runtime::attach from its entry.
 
 OPTIONS
-    Value options take their value with an equals sign, for example --delay=1.
+    Value options take their value as the next argument, for example --delay 1.
 
-    --from=<step>   Start from a step index (0-based) instead of the first.
-    --delay=<secs>  Pause between shots so a watcher can take each one in.
-                    Seconds, default 3. Use --delay=0 to run with no pause.
+    --from <step>   Start from a step index (0-based) instead of the first.
+    --delay <secs>  Pause between shots so a watcher can take each one in.
+                    Seconds, default 3. Use --delay 0 to run with no pause.
                     Steps within a shot always run without pausing.
-    --shot=<name>   The shot to run, as an alternative to the positional name.
+    --shot <name>   The shot to run, as an alternative to the positional name.
     --ide           Open a control channel and step under IDE control, reading
                     run, pause, step, skip <n>, and stop commands on stdin.
     --release       Build in release mode instead of debug.
@@ -32,6 +32,6 @@ OPTIONS
 EXAMPLES
     peko demo
     peko demo onboarding
-    peko demo dark-settings --from=2
-    peko demo login --delay=1
+    peko demo dark-settings --from 2
+    peko demo login --delay 1
     peko demo --ide

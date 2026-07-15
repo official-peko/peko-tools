@@ -17,6 +17,7 @@ use semver::{Version, VersionReq};
 
 use super::RegistryError;
 use super::client::RegistryClient;
+use super::gated::GatedMeta;
 use super::index::IndexEntry;
 
 /// An upper bound on resolution passes, a backstop against a non-converging
@@ -51,6 +52,9 @@ struct ResolveState {
     chosen: BTreeMap<String, IndexEntry>,
     /// Fetched index entries, cached per package.
     indices: BTreeMap<String, Vec<IndexEntry>>,
+    /// Packages resolved as proprietary, entitlement-gated ones (absent from the
+    /// public index, pinned by toolchain via the platform `/meta` endpoint).
+    gated: BTreeMap<String, GatedMeta>,
 }
 
 /// Resolves a project's dependency graph against a registry client.
@@ -93,12 +97,29 @@ impl<'a> Resolver<'a> {
         let names: Vec<String> = state.requirements.keys().cloned().collect();
 
         for name in names {
-            if state.paths.contains_key(&name) {
+            if state.paths.contains_key(&name) || state.gated.contains_key(&name) {
                 continue;
             }
 
             let requirements = state.requirements[&name].clone();
-            let entries = self.ensure_index(&name, state).await?;
+            let entries = match self.ensure_index(&name, state).await {
+                Ok(entries) => entries,
+                // No public index entry. The package may be a proprietary,
+                // toolchain-pinned one served through the platform. Resolve it
+                // via the public `/meta` endpoint (no auth); the gated
+                // `/download` is only reached later, at fetch time.
+                Err(RegistryError::NotFound(missing)) => {
+                    match self.client.fetch_gated_meta(&name).await? {
+                        Some(meta) if meta.gated && meta.available => {
+                            state.gated.insert(name.clone(), meta);
+                            changed = true;
+                            continue;
+                        }
+                        _ => return Err(RegistryError::NotFound(missing)),
+                    }
+                }
+                Err(other) => return Err(other),
+            };
             let entry = pick_version(&name, &entries, &requirements, &self.compiler)?;
 
             let is_new = state
@@ -147,7 +168,27 @@ impl<'a> Resolver<'a> {
 impl ResolveState {
     /// Flatten the resolved state into a package list.
     fn into_resolved(self) -> Vec<ResolvedPackage> {
-        let mut resolved = Vec::with_capacity(self.paths.len() + self.chosen.len());
+        let mut resolved =
+            Vec::with_capacity(self.paths.len() + self.chosen.len() + self.gated.len());
+        for (name, meta) in self.gated {
+            // A gated package is pinned by the toolchain it was built for, not a
+            // sparse-index version. The checksum is normalized to `sha256:<hex>`
+            // to line up with registry checksums.
+            let checksum = meta.sha256.map(|hex| {
+                if hex.contains(':') {
+                    hex
+                } else {
+                    format!("sha256:{hex}")
+                }
+            });
+            resolved.push(ResolvedPackage {
+                name,
+                version: meta.toolchain.unwrap_or_default(),
+                checksum,
+                source: LockSource::Gated,
+                path: None,
+            });
+        }
         for (name, dir) in self.paths {
             let version = self.path_versions.get(&name).cloned().unwrap_or_default();
             resolved.push(ResolvedPackage {

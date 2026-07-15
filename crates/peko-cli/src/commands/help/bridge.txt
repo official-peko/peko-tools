@@ -1,0 +1,29 @@
+peko bridge token [OPTIONS]
+
+Mints a short-lived native-bridge token for the current app.
+
+The token is an ES256 JWT the device presents on the hosted
+<slug>.serve.pekoui.com/__peko__ WebSocket. This owner-authed form is for
+manual use and the dev device. A shipped app does NOT use this: its server
+mints tokens with the app's bridge credential, which the platform
+auto-provisions and injects as the PEKO_BRIDGE_KEY secret env var on every
+`peko deploy server` — nothing for the CLI to manage.
+
+The app must be linked to a platform app id ([project].app_id, set by
+`peko link`, or --app-id for a one-off). Minting requires a session (run
+`peko login` first) and a verified email; the account must own the app.
+
+OPTIONS
+    --app-id <id>        mint for this platform app id, overriding
+                         [project].app_id in peko.toml
+    --device-id <id>     refresh for an already-assigned device id (kept
+                         stable across refreshes); omit on first pair to
+                         be assigned one
+    --json               print {token, deviceId, expiresIn} as one line of
+                         JSON on stdout, for the runtime to parse
+    --base <url>         override the platform base URL for this run
+
+EXAMPLES
+    peko login
+    peko bridge token
+    peko bridge token --app-id app_1a2b3c --json

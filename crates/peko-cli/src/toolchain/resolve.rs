@@ -40,7 +40,15 @@ pub fn resolve_toolchain(
     }
 
     let dir = toolchains_root(peko_root).join(dir_id);
-    let toolchain_toml = dir.join("toolchain.toml");
+    // Android ships one shared (multi-arch) toolchain directory; the arm64 and
+    // x86_64 variants differ only in their toolchain.toml (triple, lib/include
+    // paths, ELF machine), so x86_64 loads a sibling file rather than a whole
+    // second directory (which would duplicate the large shared sysroot).
+    let toolchain_toml = if os == OperatingSystem::Android && arch == Architecture::X86_64 {
+        dir.join("toolchain.x86_64.toml")
+    } else {
+        dir.join("toolchain.toml")
+    };
     let toolchain = Toolchain::load(&toolchain_toml).map_err(|source| ToolchainError::Load {
         path: toolchain_toml,
         source: Box::new(source),

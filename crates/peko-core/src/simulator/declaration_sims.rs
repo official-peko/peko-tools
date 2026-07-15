@@ -2738,7 +2738,13 @@ impl PekoValueSimulator for ClassAST {
             // `this.attr = ...` removes one, and any left over after the body
             // is an uninitialized attribute.
             let is_constructor = matches!(class_method, ClassMethod::Constructor(_, _));
-            if is_constructor {
+            // A declaration-only method or constructor (from a definition stub)
+            // has no body to check: its implementation is linked from a prebuilt
+            // object. Its signature is already registered above, so the
+            // body-dependent checks below (attribute init, return-on-all-paths)
+            // must be skipped or they would fire against the empty body.
+            let is_external = class_method.get_info().is_external;
+            if is_constructor && !is_external {
                 simulator_context.attributes_to_set = self
                     .attributes
                     .keys()
@@ -2775,7 +2781,7 @@ impl PekoValueSimulator for ClassAST {
             }
 
             // A constructor that leaves attributes unset is an error.
-            if is_constructor && !simulator_context.attributes_to_set.is_empty() {
+            if is_constructor && !is_external && !simulator_context.attributes_to_set.is_empty() {
                 let uninitialized = simulator_context.attributes_to_set.join(", ");
                 simulator_context
                     .diagnostics
@@ -2792,8 +2798,12 @@ impl PekoValueSimulator for ClassAST {
             }
             simulator_context.attributes_to_set = Vec::new();
 
-            // Non-void methods must return on all paths.
-            if !branch_returns && class_method.get_return_type().to_string() != "void" {
+            // Non-void methods must return on all paths (external methods have no
+            // body to check).
+            if !is_external
+                && !branch_returns
+                && class_method.get_return_type().to_string() != "void"
+            {
                 simulator_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(

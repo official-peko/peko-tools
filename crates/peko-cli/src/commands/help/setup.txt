@@ -15,9 +15,9 @@ installed only when requested with --windows and the license is accepted
 with --accept-microsoft-license.
 
 OPTIONS
-    --peko-version=<TAG>  install a specific peko CLI release (default:
+    --peko-version <TAG>  install a specific peko CLI release (default:
                           the latest release)
-    --sdk-version=<TAG>   install a specific SDK / toolchain release
+    --sdk-version <TAG>   install a specific SDK / toolchain release
                           (default: the latest release)
     --windows             also install the Windows toolchain via xwin
     --accept-microsoft-license
@@ -25,10 +25,12 @@ OPTIONS
                           toolchain (required with --windows)
     --force               reinstall every component even when its release
                           is already current
+    --check               report whether a newer release is available
+                          without installing anything, then exit
     --json                emit newline-delimited JSON progress events for
                           tooling (used by Peko Studio)
 
 EXAMPLES
     peko setup
-    peko setup --sdk-version=v2.0.0
+    peko setup --sdk-version v2.0.0
     peko setup --windows --accept-microsoft-license

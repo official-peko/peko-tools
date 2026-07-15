@@ -551,6 +551,29 @@ async fn run_ui_project(
         dev.status(format!("dev server ready at {dev_url}"));
     }
 
+    // A server (SSR) app with no native shell (no main.peko) is a pure web app
+    // with no Peko host to launch. Open the dev URL in a browser and keep the dev
+    // server up until Ctrl-C. A server app that DOES have a native shell falls
+    // through to the native window below: it loads the framework dev server over
+    // the local loopback bridge, so the native APIs (and the /__peko__ bridge in
+    // its dev form) can be exercised in dev just like a deployed build.
+    let is_server = project
+        .ui_project_info
+        .as_ref()
+        .is_some_and(|ui| ui.framework == "server");
+    let has_native_shell = project.get_entrypoint().exists();
+    if is_server && !has_native_shell {
+        reporter.success(format!("your app is running at {dev_url}"));
+        let _ = open::that(dev_url.as_str());
+        if let Some(dev) = &dev {
+            dev.status(format!("running at {dev_url}"));
+        }
+        reporter.info("press Ctrl-C to stop the dev server");
+        let _ = tokio::signal::ctrl_c().await;
+        stop_dev_server(&mut dev_server);
+        return ExitCode::SUCCESS;
+    }
+
     // First build, then launch the window pointed at the dev server. A failed
     // build still enters the watch loop, so the next save can fix it.
     let mut app_child: Option<Child> = None;

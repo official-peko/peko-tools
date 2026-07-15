@@ -51,6 +51,11 @@ pub struct LockedPackage {
 pub enum LockSource {
     /// Resolved through the registry.
     Registry,
+    /// Resolved as a proprietary, entitlement-gated package: pinned by the
+    /// toolchain version it was built for (via the platform `/meta` endpoint)
+    /// rather than a sparse-index version, and downloaded as a prebuilt bundle.
+    /// Unpacks into the same source cache as a registry package.
+    Gated,
     /// Resolved from a local path.
     Path,
 }

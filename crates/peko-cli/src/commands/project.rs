@@ -104,7 +104,16 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         }
     }
 
-    let project_is_ui = confirmation_prompt(&mut rl, "* UI project (Y/n) => ", true);
+    // Choose the project type: a UI (native app), a plain CLI program, or a
+    // distributable library package.
+    let project_type = match prompt_project_type() {
+        Some(project_type) => project_type,
+        None => {
+            reporter.error("no project type was selected");
+            return ExitCode::FAILURE;
+        }
+    };
+    let project_is_ui = matches!(project_type, ProjectType::Ui);
 
     let project_name = match rl.readline("* Project name     => ") {
         Ok(name) => name.trim().to_owned(),
@@ -166,7 +175,7 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     finish_new_project(
         cli_info,
         reporter,
-        project_is_ui,
+        project_type,
         &project_name,
         &bundle_id,
         &version,
@@ -175,9 +184,50 @@ fn execute_new(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     )
 }
 
-/// `peko project new --name <name> [flags]`: scaffold without prompts. UI is the
-/// default (opt out with --no-ui); --bundle, --version, --framework, and --dir
-/// fill the remaining details, with the same defaults the prompts offer.
+/// The kind of project `project new` scaffolds.
+#[derive(Clone, Copy)]
+enum ProjectType {
+    /// A native app with a web frontend (static SSG or server SSR).
+    Ui,
+    /// A plain command-line program.
+    Cli,
+    /// A distributable library package (`[package]` + `[lib]`).
+    Package,
+}
+
+/// Present a menu of project types and return the selection, or `None` if it
+/// was aborted.
+fn prompt_project_type() -> Option<ProjectType> {
+    const CHOICES: [(&str, ProjectType); 3] = [
+        ("UI project (native app with a web frontend)", ProjectType::Ui),
+        ("CLI project (a command-line program)", ProjectType::Cli),
+        ("Package (a library for distribution)", ProjectType::Package),
+    ];
+    let labels: Vec<&str> = CHOICES.iter().map(|(label, _)| *label).collect();
+    let selection = dialoguer::Select::new()
+        .with_prompt("Project type")
+        .items(&labels)
+        .default(0)
+        .interact_opt()
+        .ok()
+        .flatten()?;
+    Some(CHOICES[selection].1)
+}
+
+/// Parse the `--type <ui|cli|package>` flag.
+fn parse_project_type(value: &str) -> Option<ProjectType> {
+    match value.trim().to_lowercase().as_str() {
+        "ui" => Some(ProjectType::Ui),
+        "cli" => Some(ProjectType::Cli),
+        "package" | "pkg" | "lib" | "library" => Some(ProjectType::Package),
+        _ => None,
+    }
+}
+
+/// `peko project new --name <name> [flags]`: scaffold without prompts. The type
+/// is chosen with `--type ui|cli|package` (UI is the default, or opt out with
+/// --no-ui for a CLI project); --bundle, --version, --framework, and --dir fill
+/// the remaining details, with the same defaults the prompts offer.
 fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let project_name = cli_info
         .flags
@@ -190,7 +240,22 @@ fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCo
         return ExitCode::FAILURE;
     }
 
-    let project_is_ui = !cli_info.flags.has_flag("no-ui");
+    // `--type` selects the kind explicitly; without it, `--no-ui` picks a CLI
+    // project and the default is a UI project (preserving prior behavior).
+    let project_type = match cli_info.flags.get_flag("type") {
+        Some(value) => match parse_project_type(&value) {
+            Some(project_type) => project_type,
+            None => {
+                reporter.error(format!(
+                    "unknown project type '{value}'; expected ui, cli, or package"
+                ));
+                return ExitCode::FAILURE;
+            }
+        },
+        None if cli_info.flags.has_flag("no-ui") => ProjectType::Cli,
+        None => ProjectType::Ui,
+    };
+    let project_is_ui = matches!(project_type, ProjectType::Ui);
 
     let bundle_id = if project_is_ui {
         cli_info.flags.get_flag("bundle").unwrap_or_default()
@@ -236,7 +301,7 @@ fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCo
     finish_new_project(
         cli_info,
         reporter,
-        project_is_ui,
+        project_type,
         &project_name,
         &bundle_id,
         &version,
@@ -252,13 +317,14 @@ fn execute_new_noninteractive(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCo
 fn finish_new_project(
     cli_info: &CLIInfo,
     reporter: &Reporter,
-    project_is_ui: bool,
+    project_type: ProjectType,
     project_name: &str,
     bundle_id: &str,
     version: &str,
     framework: &str,
     base_dir: &Path,
 ) -> ExitCode {
+    let project_is_ui = matches!(project_type, ProjectType::Ui);
     let project_root = base_dir.join(project_name);
 
     if project_root.exists() {
@@ -284,10 +350,25 @@ fn finish_new_project(
         }
     }
 
-    // A UI (web) project is scaffolded with the web framework's own tool
-    // (create-vite), then overlaid with the Peko host. A CLI project is a
-    // plain source tree.
+    // A UI project is scaffolded with the framework's own tool. A static (SSG)
+    // app uses create-vite and is overlaid with the native Peko host; a server
+    // (SSR) app uses the framework's own scaffolder and is deployed to the
+    // platform. A CLI project is a plain source tree.
     if project_is_ui {
+        if peko_core::config::ServerFramework::from_str(framework).is_some() {
+            // A --name run (Studio, scripts) is non-interactive; a prompted run
+            // lets the framework's tool prompt.
+            let non_interactive = cli_info.flags.get_flag("name").is_some();
+            return scaffold_server_project(
+                reporter,
+                project_name,
+                bundle_id,
+                version,
+                framework,
+                &project_root,
+                non_interactive,
+            );
+        }
         return scaffold_ui_project(
             cli_info,
             reporter,
@@ -297,6 +378,12 @@ fn finish_new_project(
             framework,
             &project_root,
         );
+    }
+
+    // A library package is a source tree with a `[package]`/`[lib]` manifest and
+    // a `source/lib.peko` entry, packed and published rather than built.
+    if matches!(project_type, ProjectType::Package) {
+        return scaffold_package_project(reporter, project_name, version, &project_root);
     }
 
     if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
@@ -403,6 +490,278 @@ fn scaffold_ui_project(
     ExitCode::SUCCESS
 }
 
+/// The manifest for a server (SSR) app: `[project]` plus a `[ui]` that names the
+/// SSR framework. No entry, no native target platforms — it is deployed, not
+/// bundled.
+const SERVER_MANIFEST_TEMPLATE: &str = "[project]\n\
+    name = \"{name}\"\n\
+    bundle = \"{bundle}\"\n\
+    version = \"{version}\"\n\
+    \n\
+    # A server (SSR) app deployed to Peko hosting. Link it to a platform app with\n\
+    # `peko link <app-id>`, then deploy with `peko deploy server`.\n\
+    [ui]\n\
+    framework = \"{framework}\"\n";
+
+/// One SSR framework's scaffolder: the command that creates the app and the
+/// self-hosting configuration the user must ensure before deploying.
+struct ServerScaffolder {
+    /// The framework id, matching `ServerFramework::as_str`.
+    id: &'static str,
+    /// A human-readable name.
+    display: &'static str,
+    /// `true` to launch via npx, `false` via `npm create`.
+    npx: bool,
+    /// The command arguments, with `{name}` replaced by the project name.
+    args: &'static [&'static str],
+    /// Extra arguments appended when scaffolding non-interactively (from Studio
+    /// or a script), so the create tool uses defaults instead of prompting.
+    /// Best-effort — the tools evolve.
+    yes_args: &'static [&'static str],
+    /// The one self-hosting step the framework needs for a Node deploy (or a
+    /// note that none is required).
+    hosting: &'static str,
+}
+
+/// The scaffolder for each server framework. The create tools evolve, so these
+/// invocations are intentionally minimal and run interactively — the framework's
+/// own tool owns its prompts.
+const SERVER_SCAFFOLDERS: &[ServerScaffolder] = &[
+    ServerScaffolder {
+        id: "next",
+        display: "Next.js",
+        npx: false,
+        args: &["create", "next-app@latest", "{name}"],
+        yes_args: &["--yes"],
+        hosting: "output: 'standalone' (set automatically)",
+    },
+    ServerScaffolder {
+        id: "nuxt",
+        display: "Nuxt",
+        npx: false,
+        args: &["create", "nuxt@latest", "{name}"],
+        yes_args: &["--packageManager", "npm", "--no-gitInit"],
+        hosting: "none needed — `nuxt build` emits the Nitro node server (.output)",
+    },
+    ServerScaffolder {
+        id: "sveltekit",
+        display: "SvelteKit",
+        npx: true,
+        args: &["sv", "create", "{name}"],
+        yes_args: &["--template", "minimal", "--types", "ts", "--no-add-ons", "--no-install"],
+        hosting: "install @sveltejs/adapter-node and use it in svelte.config.js",
+    },
+    ServerScaffolder {
+        id: "remix",
+        display: "Remix / React Router",
+        npx: false,
+        args: &["create", "react-router@latest", "{name}"],
+        yes_args: &["--yes"],
+        hosting: "none needed — the framework build emits build/server",
+    },
+    ServerScaffolder {
+        id: "astro",
+        display: "Astro",
+        npx: false,
+        args: &["create", "astro@latest", "{name}"],
+        yes_args: &["--template", "minimal", "--no-install", "--no-git", "--skip-houston"],
+        hosting: "add @astrojs/node (output: 'server') in astro.config.mjs",
+    },
+    ServerScaffolder {
+        id: "angular",
+        display: "Angular",
+        npx: true,
+        args: &["@angular/cli@latest", "new", "{name}", "--ssr"],
+        yes_args: &["--defaults", "--skip-git", "--skip-install"],
+        hosting: "none needed — created with --ssr",
+    },
+];
+
+fn server_scaffolder(id: &str) -> Option<&'static ServerScaffolder> {
+    SERVER_SCAFFOLDERS.iter().find(|s| s.id == id)
+}
+
+/// Scaffold a server (SSR) project: run the framework's own create tool
+/// interactively, then write a server manifest that links it to Peko hosting.
+/// The app is deployed with `peko deploy server`, not built locally.
+fn scaffold_server_project(
+    reporter: &Reporter,
+    project_name: &str,
+    bundle_id: &str,
+    version: &str,
+    framework: &str,
+    project_root: &Path,
+    non_interactive: bool,
+) -> ExitCode {
+    let Some(scaffolder) = server_scaffolder(framework) else {
+        reporter.error(format!("no scaffolder for server framework '{framework}'"));
+        return ExitCode::FAILURE;
+    };
+
+    // npm must be present (npx ships with it) to run the framework's scaffolder.
+    let npm_present = crate::proc::npm()
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !npm_present {
+        reporter.error(format!(
+            "Node.js is required to scaffold a {} project, but npm was not found",
+            scaffolder.display
+        ));
+        reporter.help("install Node.js (which bundles npm and npx) from https://nodejs.org");
+        return ExitCode::FAILURE;
+    }
+
+    let scaffold_dir = project_root.parent().unwrap_or_else(|| Path::new("."));
+    let mut args: Vec<String> = scaffolder
+        .args
+        .iter()
+        .map(|a| a.replace("{name}", project_name))
+        .collect();
+    // Non-interactive callers (Studio, scripts) have no TTY for the tool's
+    // prompts, so pass its "use defaults" flags.
+    if non_interactive {
+        args.extend(scaffolder.yes_args.iter().map(|a| (*a).to_owned()));
+    }
+
+    reporter.status(
+        "Scaffolding",
+        format!("{} app (runs the framework's own scaffolder)", scaffolder.display),
+    );
+    // Run interactively (inherited stdio) so the framework's prompts work.
+    let mut command = if scaffolder.npx {
+        crate::proc::npx()
+    } else {
+        crate::proc::npm()
+    };
+    match command.args(&args).current_dir(scaffold_dir).status() {
+        Ok(status) if status.success() => {}
+        Ok(_) => {
+            reporter.error(format!(
+                "{} scaffolding did not complete successfully",
+                scaffolder.display
+            ));
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            reporter.error(format!("could not run the {} scaffolder: {e}", scaffolder.display));
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if !project_root.is_dir() {
+        reporter.error(format!(
+            "the scaffolder did not create {}",
+            project_root.display()
+        ));
+        return ExitCode::FAILURE;
+    }
+
+    // Overlay the server manifest that links the app to Peko hosting.
+    let manifest = SERVER_MANIFEST_TEMPLATE
+        .replace("{name}", project_name)
+        .replace("{bundle}", bundle_id)
+        .replace("{version}", version)
+        .replace("{framework}", framework);
+    if let Err(e) = std::fs::write(project_root.join("peko.toml"), manifest) {
+        reporter.error(format!("could not write peko.toml: {e}"));
+        return ExitCode::FAILURE;
+    }
+
+    reporter.success(format!(
+        "created new {} server app {project_name} at {}",
+        scaffolder.display,
+        project_root.display()
+    ));
+
+    // Configure the framework for a self-hosted Node deploy. Next only needs
+    // `output: 'standalone'`, which we set automatically; the others need a
+    // package/config step the CLI leaves to the user.
+    if framework == "next" {
+        match enable_next_standalone(project_root) {
+            Ok(true) => reporter.info("enabled standalone output in next.config for server hosting"),
+            Ok(false) => reporter.warning(
+                "could not set `output: 'standalone'` automatically — add it to next.config before deploying",
+            ),
+            Err(e) => reporter.warning(format!(
+                "could not update next.config ({e}) — add `output: 'standalone'` before deploying"
+            )),
+        }
+    } else {
+        reporter.info(format!("self-hosting: {}", scaffolder.hosting));
+    }
+
+    reporter.info(format!(
+        "next: cd {project_name}, then `peko link <app-id>` and `peko deploy server`"
+    ));
+    ExitCode::SUCCESS
+}
+
+/// Enable Next.js `output: 'standalone'` in the scaffolded next.config so the
+/// deploy can package the standalone server. Returns whether it is now set
+/// (already present, or injected). Handles the create-next-app TS/JS configs.
+fn enable_next_standalone(project_root: &Path) -> std::io::Result<bool> {
+    for name in [
+        "next.config.ts",
+        "next.config.mjs",
+        "next.config.js",
+        "next.config.cjs",
+    ] {
+        let path = project_root.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path)?;
+        if source.contains("output:") {
+            // Respect an existing output setting rather than duplicating it.
+            return Ok(true);
+        }
+        if let Some(patched) = inject_output_standalone(&source) {
+            std::fs::write(&path, patched)?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    // No config file found: write a minimal one that sets standalone output.
+    std::fs::write(
+        project_root.join("next.config.mjs"),
+        "/** @type {import('next').NextConfig} */\n\
+         const nextConfig = { output: 'standalone' };\nexport default nextConfig;\n",
+    )?;
+    Ok(true)
+}
+
+/// Insert `output: "standalone"` at the start of the Next config object,
+/// matching the object opened by `= {` or `export default {`.
+fn inject_output_standalone(source: &str) -> Option<String> {
+    let brace = ["= {", "export default {"]
+        .iter()
+        .filter_map(|pattern| source.find(pattern).map(|i| i + pattern.len() - 1))
+        .min()?;
+    let mut out = String::with_capacity(source.len() + 32);
+    out.push_str(&source[..brace]);
+    out.push_str("{\n  output: \"standalone\",\n");
+    out.push_str(&source[brace + 1..]);
+    Some(out)
+}
+
+/// The framework's own source folder to place `main.peko` in, so the native
+/// host lives beside the app code — an existing `src/` (create-vite) or `app/`,
+/// else the project root.
+fn ui_source_dir(project_root: &Path) -> &'static str {
+    if project_root.join("src").is_dir() {
+        "src"
+    } else if project_root.join("app").is_dir() {
+        "app"
+    } else {
+        ""
+    }
+}
+
 /// Overlay the Peko host onto a web-framework project rooted at `project_root`:
 /// the manifest that marks it a static UI project and depends on pekoui, the
 /// one-line Peko entry, the Vite output config, and the @peko/client
@@ -422,22 +781,30 @@ fn overlay_peko_host(
     let pekoui_path = cli_info
         .get_peko_root()
         .join(format!("registry/src/pekoui/pekoui-{pekoui_version}"));
+    // Place main.peko in the framework's own source folder so the native host
+    // lives alongside the app code, and mark it as the entry in the manifest.
+    let source_dir = ui_source_dir(project_root);
+    let entry = if source_dir.is_empty() {
+        "main.peko".to_owned()
+    } else {
+        format!("{source_dir}/main.peko")
+    };
     let manifest = UI_MANIFEST_TEMPLATE
         .replace("{name}", project_name)
         .replace("{bundle}", bundle_id)
         .replace("{version}", version)
+        .replace("{entry}", &entry)
         .replace("{pekoui_version}", &pekoui_version);
 
-    if let Err(e) = std::fs::create_dir_all(project_root.join("src")) {
+    if !source_dir.is_empty()
+        && let Err(e) = std::fs::create_dir_all(project_root.join(source_dir))
+    {
         reporter.error(format!("could not create source directory: {e}"));
         return false;
     }
     let overlay: Vec<(PathBuf, &[u8])> = vec![
         (project_root.join("peko.toml"), manifest.as_bytes()),
-        (
-            project_root.join("src/main.peko"),
-            UI_MAIN_PEKO_TEMPLATE.as_bytes(),
-        ),
+        (project_root.join(&entry), UI_MAIN_PEKO_TEMPLATE.as_bytes()),
     ];
     for (path, bytes) in &overlay {
         if let Err(e) = std::fs::write(path, bytes) {
@@ -712,17 +1079,25 @@ fn normalize_version(input: &str) -> String {
 /// Present an arrow-key menu of web frameworks and return the selected
 /// create-vite template name, or `None` if the selection was aborted.
 fn prompt_web_framework() -> Option<String> {
-    // (menu label, create-vite template name)
-    const CHOICES: [(&str, &str); 9] = [
-        ("React", "react"),
-        ("React + TypeScript", "react-ts"),
-        ("Vue", "vue"),
-        ("Vue + TypeScript", "vue-ts"),
-        ("Svelte", "svelte"),
-        ("Svelte + TypeScript", "svelte-ts"),
-        ("Solid", "solid"),
-        ("Preact", "preact"),
-        ("Vanilla JS", "vanilla"),
+    // (menu label, framework id). The first group are create-vite templates for
+    // a static app in a native window; the second are server (SSR) frameworks
+    // the platform hosts, whose ids match ServerFramework.
+    const CHOICES: [(&str, &str); 15] = [
+        ("React (static)", "react"),
+        ("React + TypeScript (static)", "react-ts"),
+        ("Vue (static)", "vue"),
+        ("Vue + TypeScript (static)", "vue-ts"),
+        ("Svelte (static)", "svelte"),
+        ("Svelte + TypeScript (static)", "svelte-ts"),
+        ("Solid (static)", "solid"),
+        ("Preact (static)", "preact"),
+        ("Vanilla JS (static)", "vanilla"),
+        ("Next.js (server)", "next"),
+        ("Nuxt (server)", "nuxt"),
+        ("SvelteKit (server)", "sveltekit"),
+        ("Remix / React Router (server)", "remix"),
+        ("Astro (server)", "astro"),
+        ("Angular (server)", "angular"),
     ];
     let labels: Vec<&str> = CHOICES.iter().map(|(label, _)| *label).collect();
     let selection = dialoguer::Select::new()
@@ -786,7 +1161,7 @@ const UI_MANIFEST_TEMPLATE: &str = "[project]\n\
                                     name = \"{name}\"\n\
                                     bundle = \"{bundle}\"\n\
                                     version = \"{version}\"\n\
-                                    entry = \"src/main.peko\"\n\
+                                    entry = \"{entry}\"\n\
                                     target_platforms = [\"android\", \"ios\", \"linux\", \"macos\", \"windows\"]\n\
                                     \n\
                                     [ui]\n\
@@ -802,6 +1177,53 @@ const UI_MAIN_PEKO_TEMPLATE: &str = "import pekoui as ui;\n\
                                      fn on_start() {\n\
                                      \tui::app::from_bundle().run()\n\
                                      }\n";
+
+/// Scaffold a library package: a `[package]`/`[lib]` manifest plus an empty
+/// `source/lib.peko` entry and README. Folded in from the former `pkg new`.
+fn scaffold_package_project(
+    reporter: &Reporter,
+    project_name: &str,
+    version: &str,
+    project_root: &Path,
+) -> ExitCode {
+    if let Err(e) = std::fs::create_dir_all(project_root.join("source")) {
+        reporter.error(format!("could not create source directory: {e}"));
+        return ExitCode::FAILURE;
+    }
+
+    let manifest = PACKAGE_MANIFEST_TEMPLATE
+        .replace("{name}", project_name)
+        .replace("{version}", version);
+    let files: &[(&str, &[u8])] = &[
+        ("peko.toml", manifest.as_bytes()),
+        ("README.md", b""),
+        ("source/lib.peko", b""),
+    ];
+    for (relative, bytes) in files {
+        let path = project_root.join(relative);
+        if let Err(e) = std::fs::write(&path, bytes) {
+            reporter.error(format!("could not write {}: {e}", path.display()));
+            return ExitCode::FAILURE;
+        }
+    }
+
+    reporter.success(format!(
+        "created new package {project_name} at {}",
+        project_root.display()
+    ));
+    ExitCode::SUCCESS
+}
+
+/// The `peko.toml` scaffolded for a library package.
+const PACKAGE_MANIFEST_TEMPLATE: &str = "[package]\n\
+                                         name = \"{name}\"\n\
+                                         version = \"{version}\"\n\
+                                         description = \"\"\n\
+                                         \n\
+                                         [lib]\n\
+                                         root = \"source/lib.peko\"\n\
+                                         \n\
+                                         [dependencies]\n";
 
 /// The `peko.toml` scaffolded for a CLI project.
 const CLI_MANIFEST_TEMPLATE: &str = "[project]\n\

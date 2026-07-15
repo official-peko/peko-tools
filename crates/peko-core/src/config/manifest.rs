@@ -100,6 +100,10 @@ pub struct Project {
     pub version: Version,
     /// The platform-assigned app id written by `peko link`.
     pub app_id: Option<String>,
+    /// The platform serving host for a deployed app, `<slug>.serve.pekoui.com`.
+    /// Written once the app is created on the platform; absent until then, in
+    /// which case a built app serves its bundled UI from the loopback server.
+    pub host: Option<String>,
     /// The operating systems this application builds for.
     pub target_platforms: Vec<OperatingSystem>,
     /// An explicit entry source file, relative to the project root. When absent
@@ -112,6 +116,9 @@ pub struct Project {
 pub struct Ui {
     /// The UI build path.
     pub framework: Framework,
+    /// For a server (SSR) app, which framework it uses. `None` for native and
+    /// static apps.
+    pub server_framework: Option<ServerFramework>,
     /// The path to a square PNG app icon, relative to the project root.
     pub icon: Option<PathBuf>,
     /// A custom URL scheme the app registers for deep links, for example
@@ -210,6 +217,89 @@ impl Framework {
             Framework::Static => "static",
             Framework::Server => "server",
         }
+    }
+}
+
+/// A server-hosted SSR framework, selected when `ui.framework` names one (or by
+/// default for a bare `server`). Each builds to a self-hosted Node server that
+/// the platform runs in a container, and each is packaged differently for
+/// deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerFramework {
+    /// Next.js (React), `output: 'standalone'`.
+    Next,
+    /// Nuxt (Vue), Nitro `node-server` preset.
+    Nuxt,
+    /// SvelteKit (Svelte), `@sveltejs/adapter-node`.
+    SvelteKit,
+    /// Remix / React Router v7 (React).
+    Remix,
+    /// Astro (multi-framework), `@astrojs/node`.
+    Astro,
+    /// Angular with server-side rendering.
+    Angular,
+}
+
+impl ServerFramework {
+    /// Map an identifier to a server framework.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(identifier: &str) -> Option<ServerFramework> {
+        match identifier {
+            "next" => Some(ServerFramework::Next),
+            "nuxt" => Some(ServerFramework::Nuxt),
+            "sveltekit" => Some(ServerFramework::SvelteKit),
+            "remix" => Some(ServerFramework::Remix),
+            "astro" => Some(ServerFramework::Astro),
+            "angular" => Some(ServerFramework::Angular),
+            _ => None,
+        }
+    }
+
+    /// The canonical identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServerFramework::Next => "next",
+            ServerFramework::Nuxt => "nuxt",
+            ServerFramework::SvelteKit => "sveltekit",
+            ServerFramework::Remix => "remix",
+            ServerFramework::Astro => "astro",
+            ServerFramework::Angular => "angular",
+        }
+    }
+
+    /// A human-readable name.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ServerFramework::Next => "Next.js",
+            ServerFramework::Nuxt => "Nuxt",
+            ServerFramework::SvelteKit => "SvelteKit",
+            ServerFramework::Remix => "Remix / React Router",
+            ServerFramework::Astro => "Astro",
+            ServerFramework::Angular => "Angular",
+        }
+    }
+
+    /// Every server framework, in menu order.
+    pub fn all() -> &'static [ServerFramework] {
+        &[
+            ServerFramework::Next,
+            ServerFramework::Nuxt,
+            ServerFramework::SvelteKit,
+            ServerFramework::Remix,
+            ServerFramework::Astro,
+            ServerFramework::Angular,
+        ]
+    }
+}
+
+/// Parse the `ui.framework` string into a framework kind and, for a server app,
+/// which SSR framework it uses. A bare `server` defaults to Next.
+fn parse_ui_framework(raw: &str) -> Option<(Framework, Option<ServerFramework>)> {
+    match raw {
+        "native" => Some((Framework::Native, None)),
+        "static" => Some((Framework::Static, None)),
+        "server" => Some((Framework::Server, Some(ServerFramework::Next))),
+        other => ServerFramework::from_str(other).map(|sf| (Framework::Server, Some(sf))),
     }
 }
 
@@ -438,7 +528,7 @@ impl Manifest {
     /// source root and entry file are derived from [`Manifest::entry`].
     pub fn to_external_module(&self, root: &Path) -> ExternalModuleInfo {
         let entry = self.entry(root);
-        let source_root = entry
+        let mut source_root = entry
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| root.to_path_buf());
@@ -447,6 +537,18 @@ impl Manifest {
             .and_then(|name| name.to_str())
             .unwrap_or(APP_ENTRY_CANDIDATES[0])
             .to_owned();
+
+        // A prebuilt (source-hidden) package resolves against its generated
+        // definition-only stub tree, not its implementation source, which is
+        // absent from a distributed prebuilt package. The stub for the entry
+        // keeps its original file name, so only the root directory changes. The
+        // consumer links the package's prebuilt objects (see the prebuilt link
+        // path) rather than compiling these stubs' bodies. This redirect is
+        // skipped while the package itself is being prebuilt because the
+        // prebuilt manifest is written only after the objects are produced.
+        if super::PrebuiltManifest::is_prebuilt(root) {
+            source_root = super::PrebuiltManifest::stubs_dir(root);
+        }
 
         ExternalModuleInfo::new(
             self.name().to_owned(),
@@ -609,6 +711,34 @@ impl Manifest {
         })
     }
 
+    /// Write the platform serving host (`<slug>.serve.pekoui.com`) into an
+    /// application manifest's `[project]` table, preserving comments and
+    /// formatting. Set from a deploy so a later build bakes it as `bundle::host`.
+    pub fn write_host<P: AsRef<Path>>(path: P, host: &str) -> Result<(), ConfigError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut document = text
+            .parse::<DocumentMut>()
+            .map_err(|source| ConfigError::Edit {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+        let project = document
+            .get_mut("project")
+            .and_then(|item| item.as_table_mut())
+            .ok_or_else(|| ConfigError::invalid(path, "no [project] table to write host into"))?;
+        project["host"] = toml_edit::value(host);
+
+        std::fs::write(path, document.to_string()).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     /// Insert or replace a dependency in `[dependencies]`, preserving the
     /// file's formatting and comments.
     ///
@@ -717,6 +847,7 @@ struct RawProject {
     bundle: Option<String>,
     version: String,
     app_id: Option<String>,
+    host: Option<String>,
     #[serde(default)]
     target_platforms: Vec<String>,
     entry: Option<String>,
@@ -922,17 +1053,19 @@ fn build_project(raw: RawProject, source: &Path) -> Result<Project, ConfigError>
         bundle: raw.bundle,
         version,
         app_id: raw.app_id,
+        host: raw.host,
         target_platforms,
         entry: raw.entry.map(PathBuf::from),
     })
 }
 
 fn build_ui(raw: RawUi, source: &Path) -> Result<Ui, ConfigError> {
-    let framework = Framework::from_str(&raw.framework).ok_or_else(|| {
+    let (framework, server_framework) = parse_ui_framework(&raw.framework).ok_or_else(|| {
         ConfigError::invalid(
             source,
             format!(
-                "unknown ui.framework '{}'; expected native, static, or server",
+                "unknown ui.framework '{}'; expected native, static, server, or an SSR \
+                 framework (next, nuxt, sveltekit, remix, astro, angular)",
                 raw.framework
             ),
         )
@@ -943,6 +1076,7 @@ fn build_ui(raw: RawUi, source: &Path) -> Result<Ui, ConfigError> {
         .transpose()?;
     Ok(Ui {
         framework,
+        server_framework,
         icon: raw.icon.map(PathBuf::from),
         scheme,
         width: raw.width,

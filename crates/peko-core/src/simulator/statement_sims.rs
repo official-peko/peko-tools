@@ -1142,10 +1142,18 @@ impl PekoValueSimulator for ImportStatementAST {
             let current_module_arc = simulator_context.module_context.current_module();
             let current_module = current_module_arc.read().unwrap();
             let current_scope = current_module.scope.read().unwrap();
-            matches!(
-                current_scope.symbols.get(&import_as_module_name),
-                Some(ScopeSymbol::Module(..))
-            )
+            match current_scope.symbols.get(&import_as_module_name) {
+                // A module is already bound under this name. It is only a real
+                // conflict when it resolves to a *different* file. Re-binding
+                // the same module is harmless and happens routinely: importing a
+                // sibling that itself imports `json` puts `json` in scope, so an
+                // explicit `import std::json` in this module would otherwise be
+                // flagged against the very file it is importing.
+                Some(ScopeSymbol::Module(existing, _)) => {
+                    existing.definition_start.file != module_entry_file_path
+                }
+                _ => false,
+            }
         };
 
         if conflicting_import {

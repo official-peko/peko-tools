@@ -74,6 +74,10 @@ pub struct BundleInfo {
     pub identifier: String,
     /// The platform-assigned app id, empty when unassigned (`bundle::app_id`).
     pub app_id: String,
+    /// The platform serving host (`<slug>.serve.pekoui.com`), empty when the app
+    /// is not deployed. A built app loads from it instead of the loopback
+    /// asset server when set (`bundle::host`).
+    pub host: String,
     /// The application version string (`bundle::version`).
     pub version: String,
     /// The UI framework identifier: `native`, `static`, `server`, or `cli`

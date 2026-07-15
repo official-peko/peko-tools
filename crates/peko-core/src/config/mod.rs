@@ -21,6 +21,7 @@
 mod container;
 mod lock;
 mod manifest;
+mod prebuilt;
 mod toolchain;
 
 pub use container::{
@@ -31,7 +32,11 @@ pub use lock::{LOCKFILE_FILE, LOCKFILE_VERSION, LockSource, LockedPackage, Lockf
 pub use manifest::{
     ApplicationManifest, Demo, Dependency, DependencySpec, Framework, Icon, Lib, LoadedManifest,
     Manifest, ManifestKind, Native, NativeFlags, NativeLink, PackageManifest, PackageMeta,
-    Platforms, Project, Ui, Vendor,
+    Platforms, Project, ServerFramework, Ui, Vendor,
+};
+pub use prebuilt::{
+    PREBUILT_DIR, PREBUILT_MANIFEST_FILE, PREBUILT_OBJECTS_DIR, PREBUILT_STUBS_DIR,
+    PrebuiltManifest, PrebuiltSection,
 };
 pub use toolchain::{Toolchain, ToolchainBuild, ToolchainLink, ToolchainMeta, resolve_flag};
 

@@ -194,9 +194,14 @@ impl PekoTarget {
     /// [`OperatingSystem::Unknown`] beyond the architecture prefix.
     #[must_use]
     pub fn to_triple(&self) -> String {
-        // Android is hardcoded to aarch64; ignore the configured architecture.
+        // Android supports arm64 (devices) and x86_64 (emulators). Both use the
+        // API-19 codegen floor; the native-C/link toolchain sets its own API.
         if matches!(self.operating_system, OperatingSystem::Android) {
-            return "aarch64-unknown-linux-android19".to_owned();
+            return match self.architecture {
+                Architecture::X86_64 => "x86_64-unknown-linux-android19".to_owned(),
+                // Arm (and Unknown) default to the arm64 device target.
+                _ => "aarch64-unknown-linux-android19".to_owned(),
+            };
         }
 
         let arch_prefix = match self.architecture {

@@ -9,11 +9,11 @@ target only affects which platform-specific imports the type checker
 walks; nothing is codegen'd.
 
 OPTIONS
-    --os=<OS>             target operating system (android, ios, linux,
+    --os <OS>             target operating system (android, ios, linux,
                           macos, or windows). Defaults to the host OS.
-    --arch=<ARCH>         target CPU architecture (arm or x86_64).
+    --arch <ARCH>         target CPU architecture (arm or x86_64).
                           Defaults to the host architecture.
 
 EXAMPLES
     peko test main.peko
-    peko test src/lib.peko --os=windows --arch=x86_64
+    peko test src/lib.peko --os windows --arch x86_64

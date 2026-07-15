@@ -8,8 +8,8 @@ after that, edit peko.toml directly to change a project. The app icon is the
 square PNG that [ui].icon points to.
 
 SUBCOMMANDS
-    new                   scaffold a new project, prompting for whether it
-                          is a UI project, its name, bundle id, and version
+    new                   scaffold a new project, prompting for its type
+                          (UI / CLI / Package), name, bundle id, and version
     show-info             prints the current project's configuration
     show-icon             opens a window that displays the project icon
     show-assets           opens the project assets folder in the system
@@ -17,11 +17,28 @@ SUBCOMMANDS
     add-asset <PATH>      adds an asset to the UI project
     remove-asset <NAME>   removes an asset from the UI project
 
+`project new` scaffolds one of three project types: a UI project (a native
+app with a web frontend), a CLI project (a command-line program), or a
+Package (a library, a peko.toml with [package] and [lib] plus a
+source/lib.peko entry). When prompted interactively you pick the type from a
+menu; non-interactively, pass --name and select the type with --type.
+
 OPTIONS
     --force               for `project new` / `project add-asset`,
                           overwrite an existing folder or asset
+    --name <NAME>         scaffold non-interactively with this project name
+    --type <ui|cli|package>  the project type for a --name run (default: ui,
+                          or cli when --no-ui is given)
+    --no-ui               shorthand for --type cli
+    --bundle <ID>         (ui) the bundle id
+    --version <VERSION>   the project version (default 0.1.0)
+    --framework <NAME>    (ui) the web framework template (default react-ts)
+    --dir <DIR>           the directory to scaffold into (default: cwd)
 
 EXAMPLES
     peko project new
+    peko project new --name myapp --type ui --framework react-ts
+    peko project new --name mytool --type cli
+    peko project new --name mylib --type package
     peko project show-info
     peko project add-asset ./logo.png

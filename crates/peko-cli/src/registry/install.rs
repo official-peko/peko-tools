@@ -43,7 +43,17 @@ pub async fn update(
     progress: &dyn ProgressSink,
 ) -> Result<Lockfile, RegistryError> {
     let cache = Cache::new(peko_root);
-    let client = RegistryClient::new(cache)?;
+    let mut client = RegistryClient::new(cache)?;
+
+    // Attach the login session (best-effort) so gated packages resolve+download.
+    let id_token: Option<String> = match crate::auth::Session::load() {
+        Some(session) => crate::auth::fresh_id_token(&session).await.ok(),
+        None => None,
+    };
+    client.set_id_token(id_token.clone());
+    let base = crate::auth::platform_base(None);
+    let toolchain = super::gated::toolchain_version();
+
     let resolver = Resolver::new(&client);
 
     progress.message("Resolving dependencies");
@@ -56,6 +66,9 @@ pub async fn update(
                 let checksum = package.checksum.clone().unwrap_or_default();
                 fetch_registry(
                     &client,
+                    &base,
+                    id_token.as_deref(),
+                    toolchain,
                     &package.name,
                     &package.version,
                     &checksum,
@@ -67,6 +80,25 @@ pub async fn update(
                     version: package.version,
                     checksum: package.checksum,
                     source: LockSource::Registry,
+                    path: None,
+                });
+            }
+            LockSource::Gated => {
+                fetch_gated(
+                    &client,
+                    &base,
+                    id_token.as_deref(),
+                    toolchain,
+                    &package.name,
+                    &package.version,
+                    progress,
+                )
+                .await?;
+                locked.push(LockedPackage {
+                    name: package.name,
+                    version: package.version,
+                    checksum: package.checksum,
+                    source: LockSource::Gated,
                     path: None,
                 });
             }
@@ -115,18 +147,50 @@ async fn fetch_locked(
     progress: &dyn ProgressSink,
 ) -> Result<(), RegistryError> {
     let cache = Cache::new(peko_root);
-    let client = RegistryClient::new(cache)?;
+    let mut client = RegistryClient::new(cache)?;
+
+    // The login session (best-effort) lets the platform serve entitlement-gated
+    // proprietary packages; anonymous fetches get only public packages.
+    let id_token: Option<String> = match crate::auth::Session::load() {
+        Some(session) => crate::auth::fresh_id_token(&session).await.ok(),
+        None => None,
+    };
+    client.set_id_token(id_token.clone());
+
+    // A gated package is served as one all-platforms bundle for this CLI's exact
+    // toolchain version (ABI lockstep); the platform matches it to a bundle.
+    let base = crate::auth::platform_base(None);
+    let toolchain = super::gated::toolchain_version();
+
     for package in &lockfile.packages {
-        if package.source == LockSource::Registry {
-            let checksum = package.checksum.clone().unwrap_or_default();
-            fetch_registry(
-                &client,
-                &package.name,
-                &package.version,
-                &checksum,
-                progress,
-            )
-            .await?;
+        match package.source {
+            LockSource::Registry => {
+                let checksum = package.checksum.clone().unwrap_or_default();
+                fetch_registry(
+                    &client,
+                    &base,
+                    id_token.as_deref(),
+                    toolchain,
+                    &package.name,
+                    &package.version,
+                    &checksum,
+                    progress,
+                )
+                .await?;
+            }
+            LockSource::Gated => {
+                fetch_gated(
+                    &client,
+                    &base,
+                    id_token.as_deref(),
+                    toolchain,
+                    &package.name,
+                    &package.version,
+                    progress,
+                )
+                .await?;
+            }
+            LockSource::Path => {}
         }
     }
     Ok(())
@@ -134,20 +198,86 @@ async fn fetch_locked(
 
 /// Download a registry version, verify it, and unpack it when not already
 /// present.
+///
+/// A public package is a source `.pkpkg` from the CDN. When that is unavailable
+/// (a gated package is not served publicly) and the user is signed in, the
+/// gated (all-platforms prebuilt bundle) path is tried transparently — so
+/// `peko add pekoshots` just works for an authorized account.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_registry(
     client: &RegistryClient,
+    base: &str,
+    id_token: Option<&str>,
+    toolchain: &str,
     name: &str,
     version: &str,
     checksum: &str,
     progress: &dyn ProgressSink,
 ) -> Result<(), RegistryError> {
-    progress.tick(&format!("Fetching {name} {version}"));
-    let bytes = client.download_blob(name, version, checksum).await?;
-    if !client.cache().is_unpacked(name, version) {
-        let dest = client.cache().source_dir(name, version);
-        pack::unpack(&bytes, &dest)?;
+    if client.cache().is_unpacked(name, version) {
+        return Ok(());
     }
-    Ok(())
+    progress.tick(&format!("Fetching {name} {version}"));
+
+    match client.download_blob(name, version, checksum).await {
+        Ok(bytes) => {
+            let dest = client.cache().source_dir(name, version);
+            pack::unpack(&bytes, &dest)
+        }
+        Err(public_error) => {
+            // The public download failed; the package may be gated. Try the
+            // gated (all-platforms bundle) path when signed in.
+            let Some(id_token) = id_token else {
+                return Err(public_error);
+            };
+            progress.tick(&format!("Fetching {name} {version} (gated)"));
+            match super::gated::download_bundle(base, id_token, name, toolchain).await {
+                Ok(bytes) => {
+                    let dest = client.cache().source_dir(name, version);
+                    pack::unpack(&bytes, &dest)
+                }
+                // No gated bundle either (and a transient/network failure): keep
+                // the original public error, which is the better message for a
+                // genuinely public-but-unavailable or misspelled package.
+                Err(super::gated::GatedError::NoBundle { .. })
+                | Err(super::gated::GatedError::Network(_)) => Err(public_error),
+                Err(other) => Err(other.into_registry(name)),
+            }
+        }
+    }
+}
+
+/// Download and unpack a gated (proprietary, prebuilt) package's all-platforms
+/// bundle for this toolchain, when not already present.
+///
+/// Unlike a public package, a gated bundle is served only to an authenticated,
+/// entitled account, so a missing session is a hard error with a clear message
+/// rather than a silent public fallback.
+async fn fetch_gated(
+    client: &RegistryClient,
+    base: &str,
+    id_token: Option<&str>,
+    toolchain: &str,
+    name: &str,
+    version: &str,
+    progress: &dyn ProgressSink,
+) -> Result<(), RegistryError> {
+    if client.cache().is_unpacked(name, version) {
+        return Ok(());
+    }
+    let Some(id_token) = id_token else {
+        return Err(RegistryError::SignInRequired {
+            package: name.to_owned(),
+        });
+    };
+    progress.tick(&format!("Fetching {name} {version} (gated)"));
+    match super::gated::download_bundle(base, id_token, name, toolchain).await {
+        Ok(bytes) => {
+            let dest = client.cache().source_dir(name, version);
+            pack::unpack(&bytes, &dest)
+        }
+        Err(other) => Err(other.into_registry(name)),
+    }
 }
 
 /// `true` if the lockfile pins a satisfying version for every direct
@@ -166,11 +296,15 @@ fn lock_satisfies_manifest(lockfile: &Lockfile, loaded: &LoadedManifest) -> bool
                 return false;
             };
             match dependency {
-                Dependency::Registry { version, .. } => {
-                    entry.source == LockSource::Registry
-                        && Version::parse(&entry.version)
-                            .is_ok_and(|locked| version.matches(&locked))
-                }
+                Dependency::Registry { version, .. } => match entry.source {
+                    LockSource::Registry => Version::parse(&entry.version)
+                        .is_ok_and(|locked| version.matches(&locked)),
+                    // A gated package is pinned by toolchain, not the manifest
+                    // version requirement, so a locked gated entry is always
+                    // considered a valid pin for a registry-style dependency.
+                    LockSource::Gated => true,
+                    LockSource::Path => false,
+                },
                 Dependency::Path { .. } => entry.source == LockSource::Path,
             }
         })

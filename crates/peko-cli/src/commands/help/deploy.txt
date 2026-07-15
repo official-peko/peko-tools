@@ -1,0 +1,65 @@
+peko deploy <TARGET> [OPTIONS]
+
+Publishes a package to the registry, or deploys the current app to Peko
+server hosting.
+
+TARGETS
+    package   pack the enclosing library package and upload it to the registry
+    server    build the app and deploy it to Peko server hosting
+
+DEPLOY PACKAGE
+
+Packs the enclosing library package into a .pkpkg container, verifies it
+locally, and uploads it to the registry through the platform publish
+handshake. The server reads the package metadata from the embedded
+peko.toml, validates it, and queues the version for admin review. Only a
+package (a peko.toml with [package] and [lib]) can be published.
+
+DEPLOY SERVER
+
+Builds the project's web app (npm run build), packages the framework's
+built output into a Dockerized artifact, and hands it to the platform
+through the deploy handshake: request an upload slot, PUT the gzipped
+artifact, and signal completion. The platform then builds the container
+and runs it on its own infrastructure, serving the app at
+<slug>.serve.pekoui.com. The CLI never talks to the hosting backend
+directly.
+
+The artifact is a gzipped tarball whose root Dockerfile builds a
+container that listens on 0.0.0.0:3000. The CLI emits the matching build
++ Dockerfile per SSR framework: Next.js, Nuxt, SvelteKit, Remix / React
+Router, Astro, and Angular. (Next must emit a standalone build —
+`output: 'standalone'` in next.config.js — which `peko project new` sets
+up automatically.)
+
+The app must set `framework = "server"` under [ui], carry its SSR
+framework ([ui].server_framework, default "next"), and be linked to a
+platform app id ([project].app_id, or --app-id for a one-off).
+
+Deploying and publishing require a session (run `peko login` first) and a
+verified email. If your email is unverified the platform returns a message
+asking you to verify it from your account page on the web app; that step
+cannot be done from the CLI.
+
+On a successful server start the platform returns the app's URL
+(https://<slug>.serve.pekoui.com); the CLI writes the host into peko.toml
+(so the next build bakes it in) and then waits for the build to go live,
+printing the URL when it is serving.
+
+OPTIONS
+    --app-id <id>        (server) deploy to this platform app id, overriding
+                         [project].app_id in peko.toml
+    --health-path <p>    (server) the path the load balancer health-checks
+                         (default /); set this if the app does not return
+                         2xx-3xx on its root route
+    --no-wait            (server) start the deploy and exit without waiting
+                         for it to go live (track it on the dashboard instead)
+    --base <url>         override the platform base URL for this run
+                         (default: the PEKO_PLATFORM_URL environment
+                         variable, else https://app.pekoui.com)
+
+EXAMPLES
+    peko login
+    peko deploy package
+    peko deploy server
+    peko deploy server --app-id app_1a2b3c

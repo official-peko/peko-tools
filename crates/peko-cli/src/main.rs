@@ -6,8 +6,10 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod auth;
+pub mod bridge;
 pub mod bundler;
 pub mod cli;
+pub mod deploy;
 pub mod execution;
 pub mod keychain;
 pub mod proc;
@@ -29,7 +31,13 @@ use crate::cli::reporting::{IndicatifSink, Reporter, Verbosity};
 #[tokio::main]
 async fn main() -> ExitCode {
     // ---- Parse argv into CLIInfo -----------------------------------------
-    let cli_info = match CLIInfo::new(vec!["-".to_string(), "--".to_string()]) {
+    //
+    // The invoked subcommand's declared value-flags tell the parser which bare
+    // `--flag value` tokens consume the following argv slot as a value. The
+    // subcommand is the first non-flag argv token (global pre-subcommand flags
+    // are all bare switches, so they never consume it).
+    let value_flags = value_flags_for_argv();
+    let cli_info = match CLIInfo::new(vec!["-".to_string(), "--".to_string()], value_flags) {
         Ok(info) => info,
         Err(errors) => {
             // No reporter is constructed yet - emit plain stderr.
@@ -171,6 +179,21 @@ async fn main() -> ExitCode {
     };
 
     (command.execute)(&cli_info, &reporter).await
+}
+
+/// The value-taking flags of the subcommand named on the command line.
+///
+/// Scans the raw argv for the first non-flag token (the subcommand) and returns
+/// its declared `value_flags`, so the argument parser knows which bare
+/// `--flag value` tokens consume a following value. Returns an empty slice when
+/// there is no subcommand or it is not a known command.
+fn value_flags_for_argv() -> &'static [&'static str] {
+    std::env::args()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .and_then(|name| commands::lookup(&name))
+        .map(|command| command.value_flags)
+        .unwrap_or(&[])
 }
 
 /// `peko help [<command>]` - either print the master help index or the

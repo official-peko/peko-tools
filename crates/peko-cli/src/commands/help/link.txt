@@ -1,0 +1,14 @@
+peko link [<app-id>]
+
+Links the current project to a platform app.
+
+Writes `app_id` under [project] in peko.toml so `peko deploy server`
+knows which hosted app to deploy to. The id comes from the app's page on
+the Peko dashboard. Formatting and comments in peko.toml are preserved.
+
+With no argument, prints the current link (or that the project is not
+linked). Linking is a local edit — it needs no login or network.
+
+EXAMPLES
+    peko link                     show the current link
+    peko link app_1a2b3c          link to a platform app id

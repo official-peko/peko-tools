@@ -5,12 +5,12 @@ operating system or architecture is provided, the host's defaults are
 used. For multi-file projects use 'peko build' instead.
 
 OPTIONS
-    --os=<OS>             (optional) target operating system
+    --os <OS>             (optional) target operating system
                           (android, ios, linux, macos, or windows)
-    --arch=<ARCH>         (optional) target CPU architecture
+    --arch <ARCH>         (optional) target CPU architecture
                           (arm or x86_64)
 
-    --output=<PATH>       path for the output file. For binary mode,
+    --output <PATH>       path for the output file. For binary mode,
                           this is the linker output. For --object
                           mode, this is the output object file
     --object              stop after producing the object file; do not
@@ -24,6 +24,6 @@ OPTIONS
 
 EXAMPLES
     peko compile main.peko
-    peko compile main.peko --os=linux --arch=arm
-    peko compile main.peko --object --output=main.o
-    peko compile main.peko --shared --output=libfoo.so
+    peko compile main.peko --os linux --arch arm
+    peko compile main.peko --object --output main.o
+    peko compile main.peko --shared --output libfoo.so

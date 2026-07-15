@@ -35,6 +35,10 @@ pub struct Command {
     pub summary: &'static str,
     pub help: &'static str,
     pub execute: ExecuteFn,
+    /// The flags this command reads a value for (its `get_flag(...)` flags).
+    /// The parser consumes the following argv token as the value when one of
+    /// these is written space-separated (`--flag value`) with no `=`.
+    pub value_flags: &'static [&'static str],
 }
 
 /// Function-pointer type for a command's async execute. The future is
@@ -48,7 +52,7 @@ pub type ExecuteFn =
 /// produces a `pub mod`, a constant `Command` value, and an
 /// `include_str!` of its help file.
 macro_rules! commands {
-    ($($name:ident => $summary:literal),* $(,)?) => {
+    ($($name:ident => $summary:literal $([ $($vf:literal),* $(,)? ])?),* $(,)?) => {
         $(pub mod $name;)*
 
         /// The full set of subcommands the cli knows about. Order here
@@ -59,37 +63,39 @@ macro_rules! commands {
                 summary: $summary,
                 help: include_str!(concat!("help/", stringify!($name), ".txt")),
                 execute: |cli, rep| Box::pin($name::execute(cli, rep)),
+                value_flags: &[ $( $( $vf ),* )? ],
             }),*
         ];
     };
 }
 
 commands! {
-    add        => "add a dependency to peko.toml and install it",
-    build      => "build the project for one or more target platforms",
+    add        => "add a dependency to peko.toml and install it" [ "version", "path" ],
+    bridge     => "mint a native-bridge token for the current app" [ "app-id", "device-id", "base" ],
+    build      => "build the project for one or more target platforms" [ "platform", "target", "arch", "output" ],
     check      => "verify the Peko toolchain installation is healthy",
-    clangflags => "print clang flags peko_core would pass to the C compiler",
-    compile    => "compile a single Pekoscript file to an object or binary",
-    demo       => "run the app's demo shots to verify the automation flow",
+    clangflags => "print clang flags peko_core would pass to the C compiler" [ "os", "arch" ],
+    compile    => "compile a single Pekoscript file to an object or binary" [ "os", "arch", "output" ],
+    demo       => "run the app's demo shots to verify the automation flow" [ "from", "delay", "shot" ],
+    deploy     => "publish a package or deploy the app to Peko server hosting" [ "app-id", "health-path", "base" ],
     format     => "normalize the indentation and spacing of Pekoscript files",
-    icon       => "generate the per-platform app icon set from the icon source",
+    icon       => "generate the per-platform app icon set from the icon source" [ "platform", "out" ],
     install    => "resolve, download, and lock the project's dependencies",
-    keys       => "manage per-project signing keys",
-    login      => "authenticate the cli with the Peko platform",
+    keys       => "manage per-project signing keys" [ "platform", "password", "password-file", "keystore", "alias", "store-password", "key-password", "cert", "profile", "entitlements", "pfx", "notary-issuer", "notary-key-id", "notary-p8", "role", "file", "filename" ],
+    link       => "link the project to a platform app id for deploys",
+    login      => "authenticate the cli with the Peko platform" [ "base" ],
     logout     => "clear the stored platform session",
-    pkg        => "scaffold and pack a library package",
-    project    => "create or inspect a Pekoscript project",
-    publish    => "pack and publish a package to the registry",
+    project    => "create or inspect a Pekoscript project" [ "name", "type", "bundle", "version", "framework", "dir" ],
     remove     => "remove a dependency from peko.toml and re-resolve",
     run        => "build and run the project, with optional hot reload",
-    search     => "search or replace text across the project (used by the IDE)",
-    setup      => "install or update the Peko development environment",
-    test       => "type-check a Pekoscript file without producing output",
+    search     => "search or replace text across the project (used by the IDE)" [ "query", "include", "exclude", "replace", "root" ],
+    setup      => "install or update the Peko development environment" [ "peko-version", "sdk-version" ],
+    test       => "type-check a Pekoscript file without producing output" [ "os", "arch" ],
     toolchain  => "inspect and install build toolchains",
     update     => "re-resolve dependencies and refresh peko.lock",
     verify     => "scan a .pkpkg container and verify its structure and keys",
     version    => "print the cli version and exit",
-    whoami     => "print the identity behind the stored platform session",
+    whoami     => "print the identity behind the stored platform session" [ "base" ],
 }
 
 /// The devtools window shown by `peko run --devtools`. A helper module rather

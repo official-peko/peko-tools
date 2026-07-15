@@ -810,6 +810,9 @@ pub struct UIProjectInfo {
     pub app_id: Option<String>,
     /// The UI framework identifier: `native`, `static`, or `server`.
     pub framework: String,
+    /// For a server app, which SSR framework it uses (`next`, `nuxt`, ...);
+    /// `None` for native and static apps.
+    pub server_framework: Option<String>,
     pub platforms: Vec<peko_core::target::OperatingSystem>,
     /// The base app icon, reworked for platforms without an explicit override.
     pub icon: ProjectIcon,
@@ -865,6 +868,9 @@ pub struct PekoProject {
     /// The platform-assigned app id from `[project].app_id`, absent until
     /// `peko link` writes one.
     pub app_id: Option<String>,
+    /// The platform serving host from `[project].host`
+    /// (`<slug>.serve.pekoui.com`), absent until the app is deployed.
+    pub host: Option<String>,
     pub ui_project_info: Option<UIProjectInfo>,
 }
 
@@ -876,6 +882,7 @@ impl PekoProject {
         identifier: String,
         version: String,
         app_id: Option<String>,
+        host: Option<String>,
         root: PathBuf,
         incremental_info: Option<ProjectIncrementalMap>,
         entry_file: PathBuf,
@@ -889,6 +896,7 @@ impl PekoProject {
             identifier,
             version,
             app_id,
+            host,
             ui_project_info,
         }
     }
@@ -946,7 +954,16 @@ impl PekoProject {
     fn from_loaded_manifest(loaded: LoadedManifest) -> Result<PekoProject, ProjectError> {
         let root = loaded.root.clone();
         let entry_file = loaded.entry();
-        if !entry_file.exists() {
+        // A server (SSR) app has no Peko entry file — it is a web framework app
+        // the platform hosts — so it is exempt from the entrypoint requirement.
+        let is_server = match &loaded.manifest {
+            Manifest::Application(app) => app
+                .ui
+                .as_ref()
+                .is_some_and(|ui| matches!(ui.framework, peko_core::config::Framework::Server)),
+            Manifest::Package(_) => false,
+        };
+        if !is_server && !entry_file.exists() {
             return Err(ProjectError::MissingEntrypoint(entry_file));
         }
 
@@ -967,12 +984,13 @@ impl PekoProject {
 
         // The bundle identifier and app id come from `[project]` and are
         // absent for a package manifest.
-        let (identifier, app_id) = match &loaded.manifest {
+        let (identifier, app_id, host) = match &loaded.manifest {
             Manifest::Application(app) => (
                 app.project.bundle.clone().unwrap_or_default(),
                 app.project.app_id.clone(),
+                app.project.host.clone(),
             ),
-            Manifest::Package(_) => (String::new(), None),
+            Manifest::Package(_) => (String::new(), None, None),
         };
 
         Ok(PekoProject {
@@ -980,6 +998,7 @@ impl PekoProject {
             identifier,
             version: loaded.manifest.version().to_string(),
             app_id,
+            host,
             root,
             entry_file,
             incremental_info,
@@ -1048,6 +1067,7 @@ fn build_ui_info(
         project.version.to_string(),
         project.app_id.clone(),
         ui.framework.as_str().to_owned(),
+        ui.server_framework.map(|sf| sf.as_str().to_owned()),
         project.target_platforms.clone(),
         icon,
         icon_overrides,

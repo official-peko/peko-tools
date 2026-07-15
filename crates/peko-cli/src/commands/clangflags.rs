@@ -75,7 +75,7 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Validate and parse the `--os=<value>` flag. Reports the error through
+/// Validate and parse the `--os <value>` flag. Reports the error through
 /// `reporter` and returns `None` if missing or invalid.
 fn require_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem> {
     if !cli_info.flags.has_flag("os") {
@@ -115,7 +115,7 @@ fn require_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem
     }
 }
 
-/// Validate and parse the `--arch=<value>` flag. Reports the error through
+/// Validate and parse the `--arch <value>` flag. Reports the error through
 /// `reporter` and returns `None` if missing or invalid.
 fn require_arch(cli_info: &CLIInfo, reporter: &Reporter) -> Option<Architecture> {
     if !cli_info.flags.has_flag("arch") {

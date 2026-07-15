@@ -2221,22 +2221,34 @@ impl PekoParser {
                         _ => None,
                     };
 
-                    let constructor_body = self.parse_block("class constructor body");
+                    // A `;` in place of a body is a declaration-only constructor
+                    // (from a definition stub); its implementation is linked from
+                    // a prebuilt object. Parsing a block here would instead
+                    // consume the following member, so branch on the `;`.
+                    let is_external = self.tokens.current_token().equals(";");
+                    let constructor_body = if is_external {
+                        PositionedValue::new(
+                            Vec::new(),
+                            self.get_current_position(),
+                            self.get_current_position(),
+                        )
+                    } else {
+                        self.parse_block("class constructor body")
+                    };
 
-                    methods.push(ClassMethod::Constructor(
-                        ClassMethodInfo::new(
-                            start_position,
-                            constructor_body.end.clone(),
-                            visibility,
-                            docinfo,
-                            constructor_arguments,
-                            constructor_body,
-                            varargs_type,
-                            varargs_name,
-                            name,
-                        ),
-                        super_call,
-                    ));
+                    let mut constructor_info = ClassMethodInfo::new(
+                        start_position,
+                        constructor_body.end.clone(),
+                        visibility,
+                        docinfo,
+                        constructor_arguments,
+                        constructor_body,
+                        varargs_type,
+                        varargs_name,
+                        name,
+                    );
+                    constructor_info.is_external = is_external;
+                    methods.push(ClassMethod::Constructor(constructor_info, super_call));
 
                     method_index += 1;
                 }
@@ -2245,6 +2257,9 @@ impl PekoParser {
                 lexer::TokenType::FunctionDeclarator => {
                     let mut method = self.parse_function_declaration();
                     method.class_order = method_index;
+                    // No body (a `;`) is a declaration-only method from a
+                    // definition stub, linked from a prebuilt object.
+                    let is_external = method.function_body.is_none();
                     let mut method_info = ClassMethodInfo::new(
                         method.start.clone(),
                         method.end.clone(),
@@ -2261,6 +2276,7 @@ impl PekoParser {
                     method_info.generic_types = method.generic_types;
                     method_info.generic_bounds = method.generic_bounds;
                     method_info.is_static = is_static;
+                    method_info.is_external = is_external;
                     methods.push(ClassMethod::Method(method_info, method.return_type));
 
                     method_index += 1;

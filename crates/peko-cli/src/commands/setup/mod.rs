@@ -139,6 +139,39 @@ async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> Result<String> {
     let sdk_changed = force || existing.as_ref().is_none_or(|e| e.sdk.tag != sdk.tag_name);
     let tools_changed = force || existing.as_ref().is_none_or(|e| e.peko_tools.tag != tools.tag_name);
 
+    // `--check` reports version status without installing, for Studio's update
+    // check. It resolves the latest releases (above) and compares to the
+    // installed manifest, then returns.
+    if cli_info.flags.has_flag("check") {
+        let update_available = sdk_changed || tools_changed;
+        reporter.emit_json(serde_json::json!({
+            "type": "check",
+            "updateAvailable": update_available,
+            "installed": {
+                "peko": existing.as_ref().map(|e| e.peko_tools.tag.clone()),
+                "sdk": existing.as_ref().map(|e| e.sdk.tag.clone()),
+            },
+            "latest": { "peko": tools.tag_name.clone(), "sdk": sdk.tag_name.clone() },
+        }));
+        return Ok(if update_available {
+            format!(
+                "update available: peko {} → {}, sdk {} → {}",
+                existing
+                    .as_ref()
+                    .map(|e| e.peko_tools.tag.as_str())
+                    .unwrap_or("none"),
+                tools.tag_name,
+                existing
+                    .as_ref()
+                    .map(|e| e.sdk.tag.as_str())
+                    .unwrap_or("none"),
+                sdk.tag_name,
+            )
+        } else {
+            "the Peko environment is up to date".to_owned()
+        });
+    }
+
     // 1. The Compiler SDK (toolchains excluded) from peko-sdk-dist.
     if sdk_changed {
         reporter.status("SDK", format!("installing the Compiler {}", sdk.version()));

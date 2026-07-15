@@ -36,6 +36,12 @@ pub enum CliError {
     #[error("syntax error when providing value for flag {0}")]
     FlagSyntax(String),
 
+    /// A value-taking flag was written space-separated (`--flag value`) but no
+    /// value followed it: it was the last token, or the next token was itself
+    /// another flag.
+    #[error("flag `--{0}` requires a value")]
+    MissingValue(String),
+
     /// `PEKO_ROOT_PATH` was unset or unreadable.
     #[error(
         "could not find variable 'PEKO_ROOT_PATH' in the env. \
@@ -76,10 +82,17 @@ impl CLIInfo {
     /// `flag_prefixes` enumerates which argv-token leading substrings mark a
     /// flag. The cli passes `["-", "--"]`, matching short and long forms.
     ///
+    /// `value_flags` names the invoked subcommand's value-taking flags. When
+    /// one of these is written space-separated with no `=` (`--flag value`),
+    /// the following argv token is consumed as its value; if no value follows
+    /// (end of argv, or the next token is itself a flag) a [`CliError::MissingValue`]
+    /// is recorded. Flags not listed here keep the historical behavior: a bare
+    /// `--flag value` leaves `value` as a positional.
+    ///
     /// On success, returns a populated [`CLIInfo`]. On failure, returns
     /// every error encountered during parsing and environment validation so
     /// the caller can show them all at once.
-    pub fn new(flag_prefixes: Vec<String>) -> Result<CLIInfo, Vec<CliError>> {
+    pub fn new(flag_prefixes: Vec<String>, value_flags: &[&str]) -> Result<CLIInfo, Vec<CliError>> {
         let mut errors = Vec::new();
         let cli_arguments: Vec<String> = std::env::args().collect();
 
@@ -152,6 +165,21 @@ impl CLIInfo {
                 let mut value = cli_arguments[index].clone();
                 value.remove(0);
                 Some(value)
+            } else if value_flags.contains(&flag_name.as_str()) {
+                // --flag value  (space-separated value for a value-taking flag).
+                // Consume the next token unless it is missing or is itself a
+                // flag, in which case the value is missing.
+                let next_is_flag = index + 1 < cli_arguments.len()
+                    && flag_prefixes
+                        .iter()
+                        .any(|prefix| cli_arguments[index + 1].starts_with(prefix));
+                if index + 1 >= cli_arguments.len() || next_is_flag {
+                    errors.push(CliError::MissingValue(flag_name.clone()));
+                    None
+                } else {
+                    index += 1;
+                    Some(cli_arguments[index].clone())
+                }
             } else {
                 None
             };
@@ -243,24 +271,35 @@ impl CLIInfo {
         std::fs::write(self.peko_root.join(".roothash"), full_root_hash).is_ok()
     }
 
-    /// Compute a merkle hash over the contents of the Peko root, **excluding
-    /// `Compiler/toolchains`**. The toolchains directory holds platform-
-    /// specific SDKs and headers that aren't part of the user-installable
-    /// state; including them would invalidate the cached root hash every
-    /// time a user installs or updates a toolchain.
+    /// Compute a merkle hash over the contents of the Peko root, **excluding the
+    /// large vendored directories under `Compiler/`**: `toolchains`, `llvm18`,
+    /// `java`, and `bin`. These hold the platform SDKs, the bundled LLVM/JDK, and
+    /// the compiler binaries — several gigabytes of files that aren't
+    /// user-editable state. Hashing them dominated `peko check` (walking ~7 GB)
+    /// and invalidated the cached hash on every toolchain install. What remains
+    /// (`Compiler/include`, `Compiler/bundling`, and `Packages/`) is small, so the
+    /// health check stays fast while still covering the state a user can change.
     ///
     /// Returns None if either path is missing or contains non-UTF-8 bytes
     /// (the merkle library requires `&str`).
     fn compute_root_hash(&self) -> Option<Vec<u8>> {
+        // Vendored SDKs and binaries: large, not user-editable, skipped from the
+        // hash so `peko check` doesn't walk gigabytes of files.
+        const SKIP_COMPILER_CHILDREN: [&str; 4] = ["toolchains", "llvm18", "java", "bin"];
         let compiler_path = self.peko_root.join("Compiler");
         let packages_path = self.peko_root.join("Packages");
 
-        // Collect Compiler's immediate children, sorted by name so the
-        // resulting hash is order-independent. Skip `toolchains`.
+        // Collect Compiler's immediate children, sorted by name so the resulting
+        // hash is order-independent. Skip the large vendored directories.
         let mut compiler_children: Vec<PathBuf> = std::fs::read_dir(&compiler_path)
             .ok()?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("toolchains"))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| !SKIP_COMPILER_CHILDREN.contains(&name))
+                    .unwrap_or(true)
+            })
             .collect();
         compiler_children.sort();
 

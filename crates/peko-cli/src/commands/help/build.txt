@@ -11,20 +11,31 @@ On first build the bundling configuration files in
 .peko/bundling/configfiles/ are generated automatically. They are not
 regenerated after that unless --regenconfig is passed.
 
+Use --prebuild inside a library package to prebuild it for all platforms
+into a single uploadable .pkbundle (cross-compiled objects, definition-only
+stubs, FFI headers, and prebuilt.toml), for proprietary distribution.
+
 OPTIONS
     --release             build with release optimizations and run the
                           release signing step for each platform
-    --platform=<PLATFORM> build only the given platform, overriding the
+    --platform <PLATFORM> build only the given platform, overriding the
                           project's declared target_platforms (android,
                           ios, linux, macos, windows)
     --regenconfig         regenerate the per-platform configuration
                           file templates (overwrites any local edits)
     --clean               wipe the project's incremental build cache
                           and exit without building
+    --prebuild            prebuild the enclosing library package for all
+                          platforms into a single uploadable .pkbundle
+    --target <LIST>       with --prebuild, a comma-separated os-arch list
+                          to prebuild for (default: all platforms), e.g.
+                          macos-arm,windows-x86_64
 EXAMPLES
     peko build
     peko build --release
-    peko build --platform=android
-    peko build --release --platform=ios
+    peko build --platform android
+    peko build --release --platform ios
     peko build --regenconfig
     peko build --clean
+    peko build --prebuild
+    peko build --prebuild --target macos-arm,linux-x86_64

@@ -486,6 +486,14 @@ pub struct ClassMethodInfo {
     /// Never set on a constructor. Defaults to false.
     #[new(default)]
     pub is_static: bool,
+
+    /// A declaration-only method or constructor, parsed from a definition-only
+    /// stub (`fn name(args);` with no body). Its implementation lives in a
+    /// prebuilt object the consumer links against, so codegen emits a
+    /// declaration rather than a definition. The `body` is empty for these.
+    /// Defaults to false.
+    #[new(default)]
+    pub is_external: bool,
 }
 
 /// One method declared on a class.

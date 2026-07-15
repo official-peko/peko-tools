@@ -1,4 +1,4 @@
-peko clangflags --os=<OS> --arch=<ARCH> [--nostd]
+peko clangflags --os <OS> --arch <ARCH> [--nostd]
 
 Prints the clang flags peko_core would pass to the C/C++/Objective-C
 compiler when targeting the given operating system and CPU. Useful for
@@ -6,14 +6,14 @@ projects that bring along native sources and need to invoke clang
 themselves with matching flags.
 
 OPTIONS
-    --os=<OS>             (required) target operating system
+    --os <OS>             (required) target operating system
                           (android, ios, linux, macos, or windows)
-    --arch=<ARCH>         (required) target CPU architecture
+    --arch <ARCH>         (required) target CPU architecture
                           (arm or x86_64)
     --nostd               suppress the -std=c++17 flag (useful when
                           compiling plain C or Objective-C)
 
 EXAMPLES
-    peko clangflags --os=macos --arch=arm
-    peko clangflags --os=windows --arch=x86_64
-    peko clangflags --os=linux --arch=arm --nostd
+    peko clangflags --os macos --arch arm
+    peko clangflags --os windows --arch x86_64
+    peko clangflags --os linux --arch arm --nostd

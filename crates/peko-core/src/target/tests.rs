@@ -127,12 +127,12 @@ fn display_roundtrips_with_from_descriptor() {
 }
 
 #[test]
-fn to_triple_android_is_hardcoded() {
+fn to_triple_android_by_arch() {
+    // arm64 for devices, x86_64 for emulators.
     let t = PekoTarget::new(OperatingSystem::Android, Architecture::Arm, false);
     assert_eq!(t.to_triple(), "aarch64-unknown-linux-android19");
-    // Architecture should be ignored for Android.
     let t = PekoTarget::new(OperatingSystem::Android, Architecture::X86_64, false);
-    assert_eq!(t.to_triple(), "aarch64-unknown-linux-android19");
+    assert_eq!(t.to_triple(), "x86_64-unknown-linux-android19");
 }
 
 #[test]

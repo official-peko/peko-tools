@@ -313,6 +313,14 @@ impl Reporter {
         println!("{event}");
     }
 
+    /// Emit an arbitrary structured JSON event line on stdout, in JSON mode only.
+    /// For results richer than a message, such as `setup --check`.
+    pub fn emit_json(&self, event: serde_json::Value) {
+        if self.json {
+            println!("{event}");
+        }
+    }
+
     /// Attach a progress sink. Replaces any previously attached sink.
     pub fn with_progress<S: ProgressSink + 'static>(mut self, sink: S) -> Self {
         self.progress = Box::new(sink);

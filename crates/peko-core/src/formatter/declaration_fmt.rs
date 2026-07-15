@@ -147,8 +147,12 @@ impl Format for FunctionDeclarationAST {
             ctx.write(&format!(" => {return_type}"));
         }
         // A bodyless function is an external declaration; its `;` terminator is
-        // added by the sequence formatter.
-        if let Some(body) = &self.function_body {
+        // added by the sequence formatter. In definitions-only mode every
+        // function is emitted this way (body dropped), so the stub declares the
+        // signature and links against the prebuilt object.
+        if let Some(body) = &self.function_body
+            && !ctx.config().definitions_only
+        {
             ctx.write(" ");
             format_block(&body.value, ctx);
         }
@@ -193,7 +197,11 @@ fn format_class_method(method: &ClassMethod, ctx: &mut FormatContext) {
                 &info.varargs_name,
                 ctx,
             );
-            if let Some(parent_call) = parent_call {
+            // The parent-constructor call is an implementation detail, so it is
+            // dropped from a definitions-only stub.
+            if let Some(parent_call) = parent_call
+                && !ctx.config().definitions_only
+            {
                 ctx.write(" : ");
                 // The parent constructor call reuses the function-call form.
                 crate::asts::PekoAST::FunctionCall(parent_call.clone()).format(ctx);
@@ -213,8 +221,14 @@ fn format_class_method(method: &ClassMethod, ctx: &mut FormatContext) {
             }
         }
     }
-    ctx.write(" ");
-    format_block(&info.body.value, ctx);
+    // In definitions-only mode a method or constructor is a bodyless declaration
+    // terminated with `;`; otherwise its brace-delimited body follows.
+    if ctx.config().definitions_only {
+        ctx.write(";");
+    } else {
+        ctx.write(" ");
+        format_block(&info.body.value, ctx);
+    }
 }
 
 /// One renderable item inside a class, trait, or enum body: a member or a

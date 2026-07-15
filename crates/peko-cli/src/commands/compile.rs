@@ -18,10 +18,10 @@ use crate::project::PekoProject;
 use crate::toolchain::resolve_for_target;
 
 /// Where the intermediate object file lives, either at an explicit
-/// path the user gave (`--object --output=PATH`), or in a tempfile we
+/// path the user gave (`--object --output PATH`), or in a tempfile we
 /// clean up when the command exits.
 enum ObjectPathChoice {
-    /// User asked for `--object` mode with an explicit `--output=...`.
+    /// User asked for `--object` mode with an explicit `--output ...`.
     /// We write the object directly there and skip linking.
     ExplicitObject(PathBuf),
     /// User asked for `--object` mode without specifying an output;
@@ -198,7 +198,7 @@ enum OutputPathResult {
     Error,
 }
 
-/// Resolve the `--output=<path>` flag for the linker step. The flag is
+/// Resolve the `--output <path>` flag for the linker step. The flag is
 /// optional; missing means "let the linker decide".
 fn resolve_output_path(cli_info: &CLIInfo, reporter: &Reporter) -> OutputPathResult {
     if !cli_info.flags.has_flag("output") {
@@ -298,7 +298,7 @@ fn resolve_compilation_root(main_file: &std::path::Path, reporter: &Reporter) ->
     }
 }
 
-/// Parse `--os=<value>`, defaulting to the host target's operating
+/// Parse `--os <value>`, defaulting to the host target's operating
 /// system. Returns `None` if the flag was set but invalid.
 fn resolve_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem> {
     if !cli_info.flags.has_flag("os") {
@@ -325,7 +325,7 @@ fn resolve_os(cli_info: &CLIInfo, reporter: &Reporter) -> Option<OperatingSystem
     }
 }
 
-/// Parse `--arch=<value>`, defaulting to the host target's architecture.
+/// Parse `--arch <value>`, defaulting to the host target's architecture.
 /// Returns `None` if the flag was set but invalid.
 fn resolve_arch(cli_info: &CLIInfo, reporter: &Reporter) -> Option<Architecture> {
     if !cli_info.flags.has_flag("arch") {

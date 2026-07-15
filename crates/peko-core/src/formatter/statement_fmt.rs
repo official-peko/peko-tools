@@ -132,7 +132,10 @@ fn format_unpack_item(item: &UnpackItem, ctx: &mut FormatContext) {
 
 impl Format for ImportStatementAST {
     fn format(&self, ctx: &mut FormatContext) {
-        ctx.write("import ");
+        // An `export` re-exports the module as a submodule of the current one
+        // (a package entry exposing `package::submodule`); a plain `import`
+        // does not. Preserve which one it was.
+        ctx.write(if self.is_export { "export " } else { "import " });
 
         if !self.symbols_to_unpack.is_empty() {
             ctx.write("{ ");

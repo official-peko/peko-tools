@@ -130,7 +130,7 @@ pub(crate) fn format_sequence(asts: &[PekoAST], ctx: &mut FormatContext) {
             ctx.blank_line();
         }
         ast.format(ctx);
-        if needs_semicolon(ast) {
+        if needs_semicolon(ast, ctx.config().definitions_only) {
             ctx.write(";");
         }
 
@@ -218,11 +218,12 @@ pub(crate) fn format_block(body: &[PekoAST], ctx: &mut FormatContext) {
 /// Whether a statement needs a trailing `;`. Block-shaped declarations and
 /// control-flow statements end in `}` and take no terminator; everything else
 /// (expressions used as statements, assignments, returns, imports) does.
-fn needs_semicolon(ast: &PekoAST) -> bool {
+fn needs_semicolon(ast: &PekoAST, definitions_only: bool) -> bool {
     // A bodyless (external) function declaration ends without a brace, so it
-    // does take a terminator unlike a function with a body.
+    // does take a terminator unlike a function with a body. In definitions-only
+    // mode the body is dropped, so the declaration always takes a terminator.
     if let PekoAST::FunctionDeclaration(function) = ast {
-        return function.function_body.is_none();
+        return definitions_only || function.function_body.is_none();
     }
     !matches!(
         ast,
@@ -317,8 +318,17 @@ mod tests {
     /// Format with a narrow width so wrapping is exercised on small inputs.
     fn fmt_narrow(source: &str) -> String {
         let config = FormatConfig {
-            indent_unit: "    ".to_string(),
             max_width: 40,
+            ..FormatConfig::default()
+        };
+        format_source(source, &PathBuf::from("test.peko"), config)
+    }
+
+    /// Format as a definition-only stub (bodies dropped).
+    fn fmt_defs(source: &str) -> String {
+        let config = FormatConfig {
+            definitions_only: true,
+            ..FormatConfig::default()
         };
         format_source(source, &PathBuf::from("test.peko"), config)
     }
@@ -360,6 +370,49 @@ mod tests {
             let once = fmt_narrow(source);
             let twice = fmt_narrow(&once);
             assert_eq!(once, twice, "not idempotent for {source:?}");
+        }
+    }
+
+    #[test]
+    fn definitions_only_strips_function_body() {
+        let out = fmt_defs("[public] fn dosum(a: i32, b: i32) => i32 { return a + b }\n");
+        assert_eq!(out, "[public] fn dosum(a: i32, b: i32) => i32;\n");
+    }
+
+    #[test]
+    fn definitions_only_strips_class_bodies_keeps_fields() {
+        let src = "class Test {\n    [private] attr: i32;\n    constructor(start: i32) { this.attr = start }\n    fn increment() { this.attr += 1 }\n}\n";
+        let out = fmt_defs(src);
+        assert_eq!(
+            out,
+            "class Test {\n    [private] attr: i32;\n    constructor(start: i32);\n    fn increment();\n}\n"
+        );
+    }
+
+    #[test]
+    fn definitions_only_drops_constructor_parent_call() {
+        let src = "class Child from Base {\n    constructor(x: i32) : Base(x) { }\n}\n";
+        let out = fmt_defs(src);
+        assert!(
+            out.contains("constructor(x: i32);") && !out.contains("Base(x)"),
+            "parent call not dropped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn definition_stubs_reparse_and_are_idempotent() {
+        // The generated stubs must be valid Peko so a consumer can typecheck
+        // against them: format to a stub, then format the stub again and require
+        // it to round-trip unchanged (which only holds if it parsed correctly).
+        for source in [
+            "[public] fn dosum(a: i32, b: i32) => i32 { return a + b }\n",
+            "class Test {\n    [private] attr: i32;\n    constructor(start: i32) { this.attr = start }\n    fn increment() => i32 { return this.attr }\n}\n",
+            "enum Color { Red, Green, Blue }\n",
+            "trait Greeter { fn greet() => string; }\n",
+        ] {
+            let stub = fmt_defs(source);
+            let again = fmt_defs(&stub);
+            assert_eq!(stub, again, "stub did not round-trip (parse issue?): {stub:?}");
         }
     }
 

@@ -138,6 +138,13 @@ impl GlobalBuilder for PekoCodegenContext {
             if modname == "extern" {
                 continue;
             }
+            // An FFI module (a `.peko.h` header) is only external C declarations;
+            // it has no Peko globals and so no `set_globals` to run. Skip it
+            // rather than reference a `set_globals` nothing defines (which links
+            // fine from source but breaks against a prebuilt dependency).
+            if peko_core::ffi::is_ffi_header(&module.read().unwrap().file) {
+                continue;
+            }
             // A source file bound under two names appears twice in the registry
             // as the same module. Its globals initializer is one function, so
             // record its name once; calling it twice would reference a name the
@@ -294,6 +301,7 @@ impl GlobalBuilder for PekoCodegenContext {
                     "bundle::name" => Some(self.create_string(bundle.name.clone())),
                     "bundle::identifier" => Some(self.create_string(bundle.identifier.clone())),
                     "bundle::app_id" => Some(self.create_string(bundle.app_id.clone())),
+                    "bundle::host" => Some(self.create_string(bundle.host.clone())),
                     "bundle::version" => Some(self.create_string(bundle.version.clone())),
                     "bundle::framework" => Some(self.create_string(bundle.framework.clone())),
                     "bundle::scheme" => Some(self.create_string(bundle.scheme.clone())),

@@ -7,10 +7,10 @@ formatting, then re-resolves and refreshes peko.lock. With no version flag
 the requirement defaults to "*".
 
 OPTIONS
-    --version=<REQ>   pin a registry version requirement, e.g. ^1.2
-    --path=<DIR>      add a local path dependency instead of a registry one
+    --version <REQ>   pin a registry version requirement, e.g. ^1.2
+    --path <DIR>      add a local path dependency instead of a registry one
 
 EXAMPLES
     peko add sockets
-    peko add sockets --version=^1.2
-    peko add local_dep --path=../local_dep
+    peko add sockets --version ^1.2
+    peko add local_dep --path ../local_dep

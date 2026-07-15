@@ -39,6 +39,7 @@ use peko_llvm::codegen::data_structures::CodegenModule;
 
 pub mod incremental;
 pub mod native;
+pub mod prebuild;
 
 /// Outcome of a successful (or partial) [`compile`] invocation.
 ///

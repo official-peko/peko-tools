@@ -22,6 +22,7 @@ const TARGETS: &[(OperatingSystem, Architecture)] = &[
     (OperatingSystem::Linux, Architecture::Arm),
     (OperatingSystem::Linux, Architecture::X86_64),
     (OperatingSystem::Android, Architecture::Arm),
+    (OperatingSystem::Android, Architecture::X86_64),
     (OperatingSystem::Windows, Architecture::X86_64),
 ];
 

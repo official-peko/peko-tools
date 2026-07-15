@@ -7,7 +7,7 @@ prints the account uid, email, display name, role, and tier. Exits with
 an error when no session is stored or the session is expired or revoked.
 
 OPTIONS
-    --base=<url>          override the platform base URL for this run
+    --base <url>          override the platform base URL for this run
                           (default: the PEKO_PLATFORM_URL environment
                           variable, else https://app.pekoui.com)
 

@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use peko_core::config::{LockSource, Lockfile, Manifest, Toolchain, resolve_flag};
+use peko_core::config::{LockSource, Lockfile, Manifest, PrebuiltManifest, Toolchain, resolve_flag};
 use peko_core::packages::registry_source_dir;
 use peko_core::target::{OperatingSystem, PekoTarget};
 
@@ -62,6 +62,20 @@ pub(crate) fn compile_native_sources(
         let package_name = loaded.manifest.name().to_owned();
         let package_version = loaded.manifest.version().to_string();
         let package_root = loaded.root;
+
+        // A prebuilt (source-hidden) package ships its native objects in the
+        // prebuilt object table (added to the link separately), and its C
+        // sources are absent, so there is nothing to compile here. Its final
+        // link arguments (frameworks, `-l` flags) still apply, so gather those.
+        if PrebuiltManifest::is_prebuilt(&package_root) {
+            for arg in &native.link.all {
+                link_args.push(arg.clone());
+            }
+            for arg in native.link.for_os(target.operating_system) {
+                link_args.push(arg.clone());
+            }
+            continue;
+        }
 
         // Include directories: the global FFI header directory
         // (Compiler/include, which holds peko.h), the package's own (relative
@@ -196,6 +210,44 @@ pub(crate) fn collect_android_dex_files(peko_root: &Path, project_root: &Path) -
     dex_files
 }
 
+/// A reachable dependency shipped **prebuilt** (source-hidden): its generated
+/// definition-only stub tree and the prebuilt object files for one target.
+pub(crate) struct PrebuiltDependency {
+    /// The canonical `prebuilt/stubs` directory. A module whose source file
+    /// resolves under this root is a prebuilt module: the consumer typechecks
+    /// and codegens its declarations but does not emit or link its object,
+    /// linking the shipped object below instead.
+    pub stub_root: PathBuf,
+    /// The prebuilt objects (module `.o` plus native `.o`/`.a`) for the target
+    /// triple, in link order.
+    pub objects: Vec<PathBuf>,
+}
+
+/// Every reachable dependency that is distributed prebuilt, with its stub root
+/// and the prebuilt objects for `target`. Mirrors [`reachable_package_roots`]
+/// so a prebuilt dependency is recognized wherever it is reached (global
+/// packages and project lockfile alike).
+pub(crate) fn prebuilt_dependencies(
+    peko_root: &Path,
+    project_root: &Path,
+    target: PekoTarget,
+) -> Vec<PrebuiltDependency> {
+    let triple = target.to_triple();
+    let mut deps = Vec::new();
+    for package_root in reachable_package_roots(peko_root, project_root) {
+        let Some(prebuilt) = PrebuiltManifest::load(&package_root) else {
+            continue;
+        };
+        let stub_root = PrebuiltManifest::stubs_dir(&package_root);
+        let stub_root = stub_root.canonicalize().unwrap_or(stub_root);
+        deps.push(PrebuiltDependency {
+            stub_root,
+            objects: prebuilt.objects_for(&package_root, &triple),
+        });
+    }
+    deps
+}
+
 /// The roots of every package whose native sources the build links: the
 /// project, the in-repo `std` override, and each locked dependency. Duplicate
 /// roots are removed.
@@ -221,7 +273,7 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(&global_root) {
         for package in &lockfile.packages {
             let root = match package.source {
-                LockSource::Registry => {
+                LockSource::Registry | LockSource::Gated => {
                     registry_source_dir(peko_root, &package.name, &package.version)
                 }
                 LockSource::Path => match &package.path {
@@ -248,7 +300,7 @@ fn reachable_package_roots(peko_root: &Path, project_root: &Path) -> Vec<PathBuf
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {
         for package in &lockfile.packages {
             let root = match package.source {
-                LockSource::Registry => {
+                LockSource::Registry | LockSource::Gated => {
                     registry_source_dir(peko_root, &package.name, &package.version)
                 }
                 LockSource::Path => match &package.path {
