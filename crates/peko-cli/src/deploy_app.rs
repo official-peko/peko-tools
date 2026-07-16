@@ -14,8 +14,10 @@
 //! single compressed `.pkdeploy` bundle, and push it to the platform.
 //!
 //! Non-Apple targets (Windows/Android/Linux) always build locally. Apple
-//! targets build locally on a Mac host; on a non-Mac host they need a remote
-//! Apple builder, which is not yet available (a stub for now).
+//! targets build locally on a Mac host; on a non-Mac host the app source is
+//! packaged into the bundle (under `source/`, cache/deps/keys excluded) for the
+//! remote Mac builder to build with headless signing — the runner itself is not
+//! yet implemented, but the bundle it will consume is complete.
 
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -77,6 +79,17 @@ struct PlatformArtifact {
     signed: bool,
 }
 
+/// Instructions for the remote Mac builder: the platforms it must build from
+/// the packaged app source. Present when an Apple target was requested from a
+/// non-Mac host.
+#[derive(Serialize)]
+struct RemoteBuild {
+    /// The platforms the runner builds from source (`macos`, `ios`).
+    targets: Vec<String>,
+    /// Bundle-relative path to the packaged project source tree.
+    source: String,
+}
+
 /// The `deploy.json` manifest embedded at the root of the bundle.
 #[derive(Serialize)]
 struct DeployManifest {
@@ -92,6 +105,9 @@ struct DeployManifest {
     host_os: String,
     /// One entry per platform successfully built locally.
     platforms: Vec<PlatformArtifact>,
+    /// Present when the bundle carries app source for a remote Apple build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_build: Option<RemoteBuild>,
 }
 
 /// Execute `peko deploy app`.
@@ -122,7 +138,11 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let host_is_mac = cfg!(target_os = "macos");
+    // A Mac host builds Apple targets locally; other hosts hand them to the
+    // remote Mac builder. `PEKO_ASSUME_NON_APPLE_HOST` forces the non-Mac path
+    // so the remote-build source packaging can be exercised from a Mac.
+    let host_is_mac =
+        cfg!(target_os = "macos") && std::env::var_os("PEKO_ASSUME_NON_APPLE_HOST").is_none();
     let mut local_targets: Vec<OperatingSystem> = Vec::new();
     let mut remote_targets: Vec<OperatingSystem> = Vec::new();
     for os in &ui.platforms {
@@ -155,8 +175,10 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Apple targets on a non-Mac host require the remote builder, which is a
-    // stub for now. Offer it, but decline drops those targets from this run.
+    // Apple targets on a non-Mac host need the remote Mac builder. Accepting
+    // packages the app source into the bundle so the runner can build them
+    // later (the runner itself is not implemented yet); declining drops them.
+    let mut remote_build_requested = false;
     if !remote_targets.is_empty() {
         let labels = remote_targets
             .iter()
@@ -164,18 +186,25 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             .collect::<Vec<_>>()
             .join(", ");
         reporter.warning(format!(
-            "{labels}: Apple builds require a Mac host or the remote Apple builder"
+            "{labels}: Apple builds require a Mac host or the remote Mac builder"
         ));
-        if confirm(assume_yes, "Enable remote Apple build?", false) {
-            // Remote build is not implemented yet.
-            remote_build_stub(reporter, &remote_targets);
+        if confirm(
+            assume_yes,
+            "Package source for a remote Apple build?",
+            false,
+        ) {
+            remote_build_requested = true;
+            reporter.info(format!(
+                "{labels}: app source will be packaged for the remote builder (the runner is not available yet)"
+            ));
         } else {
             reporter.info(format!("skipping {labels} for this deploy"));
+            remote_targets.clear();
         }
     }
 
-    if local_targets.is_empty() {
-        reporter.error("no locally buildable platforms remain; nothing to deploy");
+    if local_targets.is_empty() && !remote_build_requested {
+        reporter.error("no platforms to deploy");
         return ExitCode::FAILURE;
     }
 
@@ -272,6 +301,23 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         });
     }
 
+    // Package the app source for remote Apple targets so the Mac runner can
+    // build them (Build 1 + Build 2) with headless signing. The build cache,
+    // build output, node_modules, VCS metadata, and signing keys are excluded.
+    let remote_build = if remote_build_requested && !remote_targets.is_empty() {
+        reporter.status("Packaging", "app source for the remote Apple builder");
+        if let Err(e) = copy_source_tree(&root, &staging.join("source")) {
+            reporter.error(format!("could not package the app source: {e}"));
+            return ExitCode::FAILURE;
+        }
+        Some(RemoteBuild {
+            targets: remote_targets.iter().map(|os| os.to_string()).collect(),
+            source: "source".to_owned(),
+        })
+    } else {
+        None
+    };
+
     let manifest = DeployManifest {
         app: project.name.clone(),
         app_id: ui.app_id.clone(),
@@ -279,6 +325,7 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         host_os: std::env::consts::OS.to_owned(),
         platforms: artifacts,
+        remote_build,
     };
     let manifest_json = match serde_json::to_vec_pretty(&manifest) {
         Ok(bytes) => bytes,
@@ -353,16 +400,45 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 }
 
-/// Report that remote Apple building is not implemented yet.
-fn remote_build_stub(reporter: &Reporter, targets: &[OperatingSystem]) {
-    let labels = targets
-        .iter()
-        .filter_map(platform_label)
-        .collect::<Vec<_>>()
-        .join(", ");
-    reporter.warning(format!(
-        "remote Apple build is not available yet ({labels}); build these on a macOS host for now"
-    ));
+/// Directory names excluded when packaging the app source for a remote build:
+/// the Peko cache/keys, build output, installed dependencies, VCS metadata, and
+/// framework build caches. The runner reinstalls dependencies and rebuilds.
+const SOURCE_EXCLUDE_DIRS: &[&str] = &[
+    ".peko",
+    "build",
+    "node_modules",
+    "target",
+    ".git",
+    "dist",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".astro",
+    ".output",
+    ".vite",
+];
+
+/// Recursively copy the project source tree, skipping [`SOURCE_EXCLUDE_DIRS`]
+/// and `.DS_Store`. Produces a clean, buildable source snapshot for the remote
+/// Mac runner — no cache, no installed dependencies, no signing keys.
+fn copy_source_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let from = entry.path();
+        let to = dst.join(name.as_ref());
+        if entry.file_type()?.is_dir() {
+            if SOURCE_EXCLUDE_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            copy_source_tree(&from, &to)?;
+        } else if name != ".DS_Store" {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Run one `peko build` as a subprocess, reusing all build, bundle, and signing
