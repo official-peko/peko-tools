@@ -32,6 +32,26 @@ OPTIONS
     --target <LIST>       with --prebuild, a comma-separated os-arch list
                           to prebuild for (default: all platforms), e.g.
                           macos-arm,windows-x86_64
+
+HEADLESS APPLE SIGNING (with --release, for CI runners)
+
+Pass signing material on the command line to sign Apple targets without a
+keychain or a pre-registered `peko keys` entry. When --p12 is given it
+takes precedence over the registered keystore key.
+
+    --p12 <PATH>                    Apple Distribution certificate (.p12);
+                                    signs the .app, .dmg, and .ipa
+    --p12-password <VALUE>          password for --p12
+    --p12-password-file <PATH>      read the --p12 password from a file
+                                    (preferred in CI; keeps it out of argv)
+    --provisioning-profile <PATH>   embedded in the bundle (App Store needs it)
+    --entitlements <PATH>           entitlements plist (else derived from the
+                                    provisioning profile)
+    --installer-p12 <PATH>          Mac Installer Distribution certificate;
+                                    signs the macOS App Store .pkg
+    --installer-p12-password <V>    password for --installer-p12
+    --installer-p12-password-file <PATH>  read it from a file
+
 EXAMPLES
     peko build
     peko build --release
@@ -41,3 +61,6 @@ EXAMPLES
     peko build --demo
     peko build --prebuild
     peko build --prebuild --target macos-arm,linux-x86_64
+    peko build --release --platform macos --p12 dist.p12 \
+        --p12-password-file p12.pw --installer-p12 installer.p12 \
+        --installer-p12-password-file installer.pw

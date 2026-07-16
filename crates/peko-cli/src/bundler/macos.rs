@@ -198,7 +198,7 @@ fn compile_app_icon(icon: &ProjectIcon, resources_dir: &Path) -> BundleResult<()
 /// with the same key. Installer-cert signing of the `.pkg` is deferred to the
 /// signing step. Without a key the artifacts are produced unsigned.
 pub fn sign(
-    _cli_info: &CLIInfo,
+    cli_info: &CLIInfo,
     project: &PekoProject,
     macos_build_directory: PathBuf,
     reporter: &Reporter,
@@ -216,13 +216,26 @@ pub fn sign(
         )));
     }
 
-    let key = signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "macos")?;
+    // Headless signing material from `peko build --p12 …` takes precedence over
+    // a registered keystore key, so a CI runner can sign without a keychain.
+    let key = match signing::headless_apple_key(cli_info)? {
+        Some(headless) => Some(headless),
+        None => signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "macos")?,
+    };
     let notary = signing::resolve_notary(project.get_root(), "macos");
 
-    // Sign the .app (hardened runtime) when a key is registered, then notarize
-    // it when notary credentials are present. Without a key the bundle is left
+    // Sign the .app (hardened runtime) when a key is present, then notarize it
+    // when notary credentials are present. Without a key the bundle is left
     // unsigned; the distributable artifacts below are still produced.
     if let Some(key) = &key {
+        // App Store distribution embeds the provisioning profile in the bundle
+        // (`Contents/embedded.provisionprofile`) before signing. Developer ID
+        // distribution has no profile, so this is skipped.
+        if let Some(profile) = key.profile.as_ref() {
+            let embedded = app.join("Contents").join("embedded.provisionprofile");
+            io_at(&embedded, fs::copy(profile, &embedded).map(|_| ()))?;
+        }
+
         let entitlements_xml = match key.entitlements.as_ref() {
             Some(path) => Some(io_at(path, fs::read_to_string(path))?),
             None => None,
@@ -236,26 +249,42 @@ pub fn sign(
         }
     }
 
-    // Always produce both distributable artifacts for a release build. The
-    // .dmg is required for direct distribution; the .pkg is best-effort because
-    // `productbuild` needs a full macOS login session (it fails in headless /
-    // automation contexts). A missing .pkg only blocks an App Store submission,
-    // so warn rather than failing the build.
+    // Always produce both distributable artifacts for a release build. The .dmg
+    // is required for direct distribution; the .pkg is best-effort (it depends
+    // on `productbuild` and a working per-user temp), and a missing .pkg only
+    // blocks an App Store submission, so warn rather than fail.
     let dmg = package_dmg(&macos_build_directory, &project.name, &app)?;
-    if let Err(e) = package_pkg(&macos_build_directory, &project.name, &app) {
-        reporter.warning(format!(
-            "macOS: could not build the App Store .pkg ({e}); the .app and .dmg were produced. `productbuild` needs a full macOS login session"
-        ));
-    }
+    let pkg = match package_pkg(&macos_build_directory, &project.name, &app) {
+        Ok(pkg) => Some(pkg),
+        Err(e) => {
+            reporter.warning(format!(
+                "macOS: could not build the App Store .pkg ({e}); the .app and .dmg were produced"
+            ));
+            None
+        }
+    };
 
     // Sign and (with notary credentials) notarize the disk image when a key is
-    // registered. The .pkg installer is signed by the headless-signing step,
-    // which owns the Mac Installer Distribution certificate.
+    // present.
     if let Some(key) = &key {
         signing::sign_dmg(&dmg, key)?;
         if let Some(creds) = &notary {
             signing::notarize_and_staple(&dmg, creds)?;
         }
+    }
+
+    // Sign the .pkg with the Mac Installer Distribution certificate when one is
+    // provided (`--installer-p12`); App Store submission requires a signed
+    // installer. Without it the .pkg is left unsigned.
+    if let (Some(pkg), Some((installer_p12, installer_password))) =
+        (&pkg, signing::headless_installer_material(cli_info)?)
+    {
+        signing::sign_pkg(
+            pkg,
+            &installer_p12,
+            &installer_password,
+            &macos_build_directory,
+        )?;
     }
 
     Ok(if key.is_some() {

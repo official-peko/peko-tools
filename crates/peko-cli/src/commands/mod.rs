@@ -72,7 +72,7 @@ macro_rules! commands {
 commands! {
     add        => "add a dependency to peko.toml and install it" [ "version", "path" ],
     bridge     => "mint a native-bridge token for the current app" [ "app-id", "device-id", "base" ],
-    build      => "build the project for one or more target platforms" [ "platform", "target", "arch", "output" ],
+    build      => "build the project for one or more target platforms" [ "platform", "target", "arch", "output", "p12", "p12-password", "p12-password-file", "provisioning-profile", "entitlements", "installer-p12", "installer-p12-password", "installer-p12-password-file" ],
     check      => "verify the Peko toolchain installation is healthy",
     clean      => "remove the project's build cache and output",
     clangflags => "print clang flags peko_core would pass to the C compiler" [ "os", "arch" ],

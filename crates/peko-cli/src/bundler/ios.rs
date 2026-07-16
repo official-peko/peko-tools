@@ -180,7 +180,7 @@ pub fn bundle(
 /// and the signed `.app` is wrapped in `Payload/` and zipped into a
 /// `<Name>.ipa`. Returns `false` when no iOS key is registered.
 pub fn sign(
-    _cli_info: &CLIInfo,
+    cli_info: &CLIInfo,
     project: &PekoProject,
     ios_build_directory: PathBuf,
 ) -> BundleResult<bool> {
@@ -188,9 +188,14 @@ pub fn sign(
         return Ok(false);
     };
 
-    let key = match signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "ios")? {
-        Some(key) => key,
-        None => return Ok(false),
+    // Headless signing material from `peko build --p12 …` takes precedence over
+    // a registered keystore key, so a CI runner can sign without a keychain.
+    let key = match signing::headless_apple_key(cli_info)? {
+        Some(headless) => headless,
+        None => match signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "ios")? {
+            Some(key) => key,
+            None => return Ok(false),
+        },
     };
 
     // iOS distribution requires a provisioning profile.

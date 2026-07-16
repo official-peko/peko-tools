@@ -25,6 +25,7 @@ use serde_json::Value;
 use x509_certificate::CapturedX509Certificate;
 
 use crate::bundler::{BundleError, BundleResult, java_tool, run_tool};
+use crate::cli::CLIInfo;
 
 /// Service name used for every keychain entry this module creates.
 const KEYCHAIN_SERVICE: &str = "dev.peko.signing";
@@ -324,6 +325,196 @@ pub fn resolve_apple(
         profile,
         entitlements,
     }))
+}
+
+/// Read a password from `--<prefix>-password` or `--<prefix>-password-file`.
+/// The file form is preferred for CI so the secret never lands in a process
+/// argument list. A trailing newline in the file is trimmed.
+fn read_flag_password(cli_info: &CLIInfo, prefix: &str) -> BundleResult<Option<String>> {
+    if let Some(password) = cli_info.flags.get_flag(format!("{prefix}-password")) {
+        return Ok(Some(password));
+    }
+    if let Some(path) = cli_info.flags.get_flag(format!("{prefix}-password-file")) {
+        let text = std::fs::read_to_string(&path).map_err(|source| BundleError::Io {
+            path: PathBuf::from(&path),
+            source,
+        })?;
+        return Ok(Some(text.trim_end_matches(['\r', '\n']).to_owned()));
+    }
+    Ok(None)
+}
+
+/// Build an Apple signing key from `peko build` command-line flags, for
+/// **headless** (keychain-free) signing on a CI runner. `--p12` selects this
+/// path; the password comes from `--p12-password` or `--p12-password-file`, with
+/// an optional `--provisioning-profile` (embedded in the bundle for App Store)
+/// and `--entitlements`. Returns `None` when `--p12` is absent, so callers fall
+/// back to the registered keystore key.
+pub fn headless_apple_key(cli_info: &CLIInfo) -> BundleResult<Option<AppleSigningKey>> {
+    let Some(p12) = cli_info.flags.get_flag("p12") else {
+        return Ok(None);
+    };
+    let p12 = PathBuf::from(p12);
+    if !p12.exists() {
+        return Err(BundleError::Signing(format!(
+            "--p12 file not found: {}",
+            p12.display()
+        )));
+    }
+    let Some(p12_password) = read_flag_password(cli_info, "p12")? else {
+        return Err(BundleError::Signing(
+            "--p12 requires --p12-password or --p12-password-file".to_owned(),
+        ));
+    };
+    let profile = cli_info
+        .flags
+        .get_flag("provisioning-profile")
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    let entitlements = cli_info
+        .flags
+        .get_flag("entitlements")
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    Ok(Some(AppleSigningKey {
+        p12,
+        p12_password,
+        profile,
+        entitlements,
+    }))
+}
+
+/// The Mac Installer Distribution material (a `.p12` and its password) from
+/// `--installer-p12` + `--installer-p12-password`/`--installer-p12-password-file`,
+/// used to sign the macOS `.pkg`. `None` when `--installer-p12` is absent.
+pub fn headless_installer_material(cli_info: &CLIInfo) -> BundleResult<Option<(PathBuf, String)>> {
+    let Some(p12) = cli_info.flags.get_flag("installer-p12") else {
+        return Ok(None);
+    };
+    let p12 = PathBuf::from(p12);
+    if !p12.exists() {
+        return Err(BundleError::Signing(format!(
+            "--installer-p12 file not found: {}",
+            p12.display()
+        )));
+    }
+    let Some(password) = read_flag_password(cli_info, "installer-p12")? else {
+        return Err(BundleError::Signing(
+            "--installer-p12 requires --installer-p12-password or --installer-p12-password-file"
+                .to_owned(),
+        ));
+    };
+    Ok(Some((p12, password)))
+}
+
+/// The signing identity's common name (e.g. "Mac Installer Distribution: Name
+/// (TEAMID)") read from a `.p12`, for passing to `productsign --sign`.
+fn identity_common_name(p12: &Path, password: &str) -> BundleResult<String> {
+    let bytes = std::fs::read(p12).map_err(|source| BundleError::Io {
+        path: p12.to_path_buf(),
+        source,
+    })?;
+    let (certificate, _key) = apple_codesign::cryptography::parse_pfx_data(&bytes, password)
+        .map_err(|e| BundleError::Signing(format!("installer p12 load failed: {e}")))?;
+    certificate
+        .subject_common_name()
+        .ok_or_else(|| BundleError::Signing("installer certificate has no common name".to_owned()))
+}
+
+/// Sign a `.pkg` installer with a Mac Installer Distribution certificate from a
+/// `.p12`, **headlessly**: `productsign` requires a keychain identity, so the
+/// cert is imported into a throwaway keychain used only for this signature and
+/// deleted afterward — the login keychain is never touched. `work_dir` holds the
+/// temporary keychain. The `.pkg` is signed in place.
+pub fn sign_pkg(
+    pkg: &Path,
+    installer_p12: &Path,
+    password: &str,
+    work_dir: &Path,
+) -> BundleResult<()> {
+    let identity = identity_common_name(installer_p12, password)?;
+    let keychain = work_dir.join("peko-installer-signing.keychain");
+    let keychain_password = "peko-ephemeral";
+
+    // Start from a clean throwaway keychain.
+    let _ = Command::new("security")
+        .arg("delete-keychain")
+        .arg(&keychain)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    run_tool(
+        "security",
+        Command::new("security")
+            .arg("create-keychain")
+            .arg("-p")
+            .arg(keychain_password)
+            .arg(&keychain),
+    )?;
+
+    let sign_and_clean = || -> BundleResult<()> {
+        run_tool(
+            "security",
+            Command::new("security")
+                .arg("import")
+                .arg(installer_p12)
+                .arg("-k")
+                .arg(&keychain)
+                .arg("-P")
+                .arg(password)
+                .arg("-T")
+                .arg("/usr/bin/productsign"),
+        )?;
+        run_tool(
+            "security",
+            Command::new("security")
+                .arg("unlock-keychain")
+                .arg("-p")
+                .arg(keychain_password)
+                .arg(&keychain),
+        )?;
+        // Allow the imported key to be used by the signing tools without an
+        // interactive prompt.
+        run_tool(
+            "security",
+            Command::new("security")
+                .arg("set-key-partition-list")
+                .arg("-S")
+                .arg("apple-tool:,apple:")
+                .arg("-s")
+                .arg("-k")
+                .arg(keychain_password)
+                .arg(&keychain),
+        )?;
+
+        let signed = pkg.with_extension("signed.pkg");
+        run_tool(
+            "productsign",
+            Command::new("productsign")
+                .arg("--sign")
+                .arg(&identity)
+                .arg("--keychain")
+                .arg(&keychain)
+                .arg(pkg)
+                .arg(&signed),
+        )?;
+        std::fs::rename(&signed, pkg).map_err(|source| BundleError::Io {
+            path: pkg.to_path_buf(),
+            source,
+        })
+    };
+
+    let result = sign_and_clean();
+
+    // Always remove the throwaway keychain, whether or not signing succeeded.
+    let _ = Command::new("security")
+        .arg("delete-keychain")
+        .arg(&keychain)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    result
 }
 
 /// Resolve Windows signing material for the project, or `None` when not
