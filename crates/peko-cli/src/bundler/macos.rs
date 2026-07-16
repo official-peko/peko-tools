@@ -183,16 +183,20 @@ fn compile_app_icon(icon: &ProjectIcon, resources_dir: &Path) -> BundleResult<()
     Ok(())
 }
 
-/// Optionally sign and notarize the macOS `.app` bundle.
+/// Finalize a macOS **release** build: sign the `.app` when a key is
+/// registered, then always produce the two distributable artifacts.
 ///
-/// macOS signing is optional. When no macOS key is registered the unsigned
-/// bundle is left in place. When a key is registered, the bundle is signed
-/// in place with the hardened runtime through the `apple-codesign` crate.
-/// Developer ID signing needs no provisioning profile. When a notary key
-/// is registered, the signed bundle is submitted to Apple's notary service
-/// and the ticket is stapled. A signed disk image holding the bundle is
-/// written next to it for distribution, and is notarized and stapled when a
-/// notary key is registered.
+/// A release build emits both a `.dmg` (for direct, download-the-app
+/// distribution) and a `.pkg` installer (which App Store Connect requires for
+/// macOS — it rejects a bare `.app` or a `.dmg`). Both are produced regardless
+/// of signing so the artifacts always exist; the headless-signing step applies
+/// the Apple Distribution / installer certificates.
+///
+/// When a macOS key is registered the `.app` is signed in place with the
+/// hardened runtime through the `apple-codesign` crate, and — with notary
+/// credentials — is notarized and stapled. The `.dmg` is signed and notarized
+/// with the same key. Installer-cert signing of the `.pkg` is deferred to the
+/// signing step. Without a key the artifacts are produced unsigned.
 pub fn sign(
     _cli_info: &CLIInfo,
     project: &PekoProject,
@@ -201,11 +205,6 @@ pub fn sign(
 ) -> BundleResult<signing::OptionalSignOutcome> {
     let Some(ui_info) = project.ui_project_info.as_ref() else {
         return Ok(signing::OptionalSignOutcome::NoKey);
-    };
-
-    let key = match signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "macos")? {
-        Some(key) => key,
-        None => return Ok(signing::OptionalSignOutcome::NoKey),
     };
 
     let app_file_name = format!("{}.app", project.name);
@@ -217,33 +216,53 @@ pub fn sign(
         )));
     }
 
-    let entitlements_xml = match key.entitlements.as_ref() {
-        Some(path) => Some(io_at(path, fs::read_to_string(path))?),
-        None => None,
-    };
-
-    signing::sign_apple_bundle(&app, &key, entitlements_xml.as_deref(), true)?;
-
-    // Notarize when notary credentials are registered. Without them the
-    // bundle is signed but not notarized.
+    let key = signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "macos")?;
     let notary = signing::resolve_notary(project.get_root(), "macos");
-    match &notary {
-        Some(creds) => signing::notarize_and_staple(&app, creds)?,
-        None => {
-            reporter.warning("macOS: no notary key registered; bundle signed but not notarized")
+
+    // Sign the .app (hardened runtime) when a key is registered, then notarize
+    // it when notary credentials are present. Without a key the bundle is left
+    // unsigned; the distributable artifacts below are still produced.
+    if let Some(key) = &key {
+        let entitlements_xml = match key.entitlements.as_ref() {
+            Some(path) => Some(io_at(path, fs::read_to_string(path))?),
+            None => None,
+        };
+        signing::sign_apple_bundle(&app, key, entitlements_xml.as_deref(), true)?;
+        match &notary {
+            Some(creds) => signing::notarize_and_staple(&app, creds)?,
+            None => {
+                reporter.warning("macOS: no notary key registered; bundle signed but not notarized")
+            }
         }
     }
 
-    // Package the signed bundle into a distributable disk image. The image
-    // is signed with the same key. When notary credentials are registered
-    // the image is notarized and stapled.
+    // Always produce both distributable artifacts for a release build. The
+    // .dmg is required for direct distribution; the .pkg is best-effort because
+    // `productbuild` needs a full macOS login session (it fails in headless /
+    // automation contexts). A missing .pkg only blocks an App Store submission,
+    // so warn rather than failing the build.
     let dmg = package_dmg(&macos_build_directory, &project.name, &app)?;
-    signing::sign_dmg(&dmg, &key)?;
-    if let Some(creds) = &notary {
-        signing::notarize_and_staple(&dmg, creds)?;
+    if let Err(e) = package_pkg(&macos_build_directory, &project.name, &app) {
+        reporter.warning(format!(
+            "macOS: could not build the App Store .pkg ({e}); the .app and .dmg were produced. `productbuild` needs a full macOS login session"
+        ));
     }
 
-    Ok(signing::OptionalSignOutcome::Signed)
+    // Sign and (with notary credentials) notarize the disk image when a key is
+    // registered. The .pkg installer is signed by the headless-signing step,
+    // which owns the Mac Installer Distribution certificate.
+    if let Some(key) = &key {
+        signing::sign_dmg(&dmg, key)?;
+        if let Some(creds) = &notary {
+            signing::notarize_and_staple(&dmg, creds)?;
+        }
+    }
+
+    Ok(if key.is_some() {
+        signing::OptionalSignOutcome::Signed
+    } else {
+        signing::OptionalSignOutcome::NoKey
+    })
 }
 
 /// Build a distributable disk image holding the signed `.app`. The image
@@ -290,6 +309,30 @@ fn package_dmg(build_dir: &Path, name: &str, app: &Path) -> BundleResult<PathBuf
     io_at(&staging, fs::remove_dir_all(&staging))?;
 
     Ok(dmg)
+}
+
+/// Build an App Store installer package (`.pkg`) that installs the `.app` into
+/// `/Applications`. App Store Connect requires a `.pkg` for macOS submissions
+/// (it rejects a bare `.app` or a `.dmg`). The package is written next to the
+/// bundle and its path is returned. Installer-certificate signing (the "Mac
+/// Installer Distribution" identity) is applied by the signing step. Package
+/// creation runs on macOS via `productbuild`.
+fn package_pkg(build_dir: &Path, name: &str, app: &Path) -> BundleResult<PathBuf> {
+    let pkg = build_dir.join(format!("{name}.pkg"));
+    if pkg.exists() {
+        io_at(&pkg, fs::remove_file(&pkg))?;
+    }
+
+    run_tool(
+        "productbuild",
+        Command::new("productbuild")
+            .arg("--component")
+            .arg(app)
+            .arg("/Applications")
+            .arg(&pkg),
+    )?;
+
+    Ok(pkg)
 }
 
 /// Resolve the `llvm-lipo` used to build the universal binary from the bundled
