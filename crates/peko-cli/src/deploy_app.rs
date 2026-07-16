@@ -23,7 +23,7 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use peko_core::target::OperatingSystem;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bundler::signing;
 use crate::cli::CLIInfo;
@@ -377,7 +377,7 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match push_bundle(cli_info, &ui, &project.name, bundle_bytes, reporter).await {
+    match push_bundle(cli_info, &ui, bundle_bytes, reporter).await {
         PushOutcome::Uploaded => {
             reporter.success(format!("deployed {} {}", project.name, ui.version));
             ExitCode::SUCCESS
@@ -493,6 +493,41 @@ fn pack_deploy(staging: &Path) -> Result<Vec<u8>, String> {
     zstd::encode_all(&tar_bytes[..], 19).map_err(|e| format!("could not compress the bundle: {e}"))
 }
 
+/// The `POST …/deploys` (start) response: a signed storage URL to PUT the
+/// bundle to, and the path to call once the upload finishes.
+#[derive(Deserialize)]
+struct StartResponse {
+    #[serde(rename = "releaseId")]
+    release_id: String,
+    upload: UploadTarget,
+    /// Path (or absolute URL) of the completion endpoint.
+    complete: String,
+    #[serde(rename = "maxBytes")]
+    max_bytes: Option<u64>,
+}
+
+/// The signed storage target: PUT the bundle bytes here with `content_type`.
+#[derive(Deserialize)]
+struct UploadTarget {
+    url: String,
+    #[serde(default = "default_put_method")]
+    method: String,
+    #[serde(rename = "contentType")]
+    content_type: Option<String>,
+}
+
+fn default_put_method() -> String {
+    "PUT".to_owned()
+}
+
+/// The `GET …/status` response while the platform unpacks the bundle.
+#[derive(Deserialize)]
+struct StatusResponse {
+    status: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 /// The result of attempting to push the bundle to the platform.
 enum PushOutcome {
     /// The platform accepted the upload.
@@ -503,16 +538,16 @@ enum PushOutcome {
     Failed(String),
 }
 
-/// Upload the deploy bundle to the platform app-deploy intake.
+/// Upload the deploy bundle via the platform's three-hop signed-upload flow.
 ///
-/// Contract (platform finalizes the shape): `POST {base}/api/apps/{app_id}/
-/// deploys` with a bearer session and the bundle as multipart `bundle`. This is
-/// coordination work like the gated-download intake; until it is live, a 404 /
-/// 501 is treated as "not available yet" and the local bundle is kept.
+/// A real bundle is far larger than a function body limit, so the bytes go
+/// straight to storage: `POST /api/apps/{id}/deploys` (start) returns a signed
+/// storage URL, the CLI `PUT`s the `.pkdeploy` there directly, then
+/// `POST …/deploys/{releaseId}/complete` starts extraction, and the CLI polls
+/// `GET …/status` until the draft opens. Mirrors `deploy server`.
 async fn push_bundle(
     cli_info: &CLIInfo,
     ui: &crate::project::UIProjectInfo,
-    app_name: &str,
     bundle: Vec<u8>,
     reporter: &Reporter,
 ) -> PushOutcome {
@@ -544,35 +579,134 @@ async fn push_bundle(
         Err(e) => return PushOutcome::Failed(format!("could not build the HTTP client: {e}")),
     };
 
-    reporter.status("Uploading", "deploy bundle to the platform");
-    let filename = format!("{}-{}.pkdeploy", sanitize(app_name), ui.version);
-    let part = reqwest::multipart::Part::bytes(bundle).file_name(filename);
-    let form = reqwest::multipart::Form::new()
-        .text("version", ui.version.clone())
-        .part("bundle", part);
-
-    let url = format!("{base}/api/apps/{app_id}/deploys");
-    let response = match http
-        .post(&url)
+    // 1. Start: request a signed storage URL for this release.
+    reporter.status("Uploading", "requesting an upload slot");
+    let start_url = format!("{base}/api/apps/{app_id}/deploys");
+    let start_resp = match http
+        .post(&start_url)
         .bearer_auth(&id_token)
-        .multipart(form)
+        .json(&serde_json::json!({ "version": ui.version }))
         .send()
         .await
     {
-        Ok(response) => response,
-        Err(e) => return PushOutcome::Failed(format!("network error: {e}")),
+        Ok(resp) => resp,
+        Err(e) => return PushOutcome::Failed(format!("network error starting the deploy: {e}")),
+    };
+    if !start_resp.status().is_success() {
+        let status = start_resp.status().as_u16();
+        return PushOutcome::Failed(
+            request_error("could not start the deploy", status, start_resp).await,
+        );
+    }
+    let start: StartResponse = match start_resp.json().await {
+        Ok(start) => start,
+        Err(e) => return PushOutcome::Failed(format!("could not read the upload slot: {e}")),
     };
 
-    match response.status().as_u16() {
-        200..=202 => PushOutcome::Uploaded,
-        401 => PushOutcome::Failed("not authorized (sign in as the app owner)".to_owned()),
-        403 => PushOutcome::Failed("forbidden (you are not the app owner)".to_owned()),
-        // The intake is not live yet — keep the local bundle.
-        404 | 501 => {
-            reporter.warning("the platform deploy intake is not available yet");
-            PushOutcome::Skipped
+    if let Some(max) = start.max_bytes
+        && bundle.len() as u64 > max
+    {
+        return PushOutcome::Failed(format!(
+            "bundle is {:.1} MiB, over the platform limit of {:.1} MiB",
+            bundle.len() as f64 / (1024.0 * 1024.0),
+            max as f64 / (1024.0 * 1024.0)
+        ));
+    }
+
+    // 2. PUT the bundle straight to storage via the signed URL (no bearer).
+    reporter.status(
+        "Uploading",
+        format!(
+            "{:.1} MiB to storage",
+            bundle.len() as f64 / (1024.0 * 1024.0)
+        ),
+    );
+    let method =
+        reqwest::Method::from_bytes(start.upload.method.as_bytes()).unwrap_or(reqwest::Method::PUT);
+    let mut put = http.request(method, &start.upload.url).body(bundle);
+    if let Some(content_type) = &start.upload.content_type {
+        put = put.header(reqwest::header::CONTENT_TYPE, content_type);
+    }
+    let put_resp = match put.send().await {
+        Ok(resp) => resp,
+        Err(e) => return PushOutcome::Failed(format!("network error uploading to storage: {e}")),
+    };
+    if !put_resp.status().is_success() {
+        let status = put_resp.status().as_u16();
+        return PushOutcome::Failed(
+            request_error("upload to storage failed", status, put_resp).await,
+        );
+    }
+
+    // 3. Complete: the platform verifies the object and starts unpacking.
+    reporter.status("Uploading", "finalizing the upload");
+    let complete_url = if start.complete.starts_with("http") {
+        start.complete.clone()
+    } else {
+        format!("{base}{}", start.complete)
+    };
+    let complete_resp = match http
+        .post(&complete_url)
+        .bearer_auth(&id_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => return PushOutcome::Failed(format!("network error finalizing the upload: {e}")),
+    };
+    if !complete_resp.status().is_success() {
+        let status = complete_resp.status().as_u16();
+        return PushOutcome::Failed(
+            request_error("could not finalize the deploy", status, complete_resp).await,
+        );
+    }
+
+    // 4. Poll until the platform unpacks the bundle into a draft.
+    reporter.status("Processing", "the platform is unpacking the bundle");
+    let status_url = format!(
+        "{base}/api/apps/{app_id}/deploys/{}/status",
+        start.release_id
+    );
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let Ok(resp) = http.get(&status_url).bearer_auth(&id_token).send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
         }
-        other => PushOutcome::Failed(format!("unexpected status {other}")),
+        let Ok(status) = resp.json::<StatusResponse>().await else {
+            continue;
+        };
+        match status.status.as_str() {
+            "draft" => return PushOutcome::Uploaded,
+            "failed" => {
+                let reason = status.error.unwrap_or_else(|| "unknown error".to_owned());
+                return PushOutcome::Failed(format!(
+                    "the platform could not process the bundle: {reason}"
+                ));
+            }
+            _ => {} // uploading | unpacking — keep polling
+        }
+    }
+
+    // The upload landed; extraction is still running on the platform.
+    reporter.warning("still unpacking on the platform; the draft will appear on your dashboard");
+    PushOutcome::Uploaded
+}
+
+/// Format a failed HTTP response with the platform's error detail (bounded).
+async fn request_error(context: &str, status: u16, response: reqwest::Response) -> String {
+    let body = response.text().await.unwrap_or_default();
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        format!("{context} (HTTP {status})")
+    } else {
+        format!(
+            "{context} (HTTP {status}): {}",
+            trimmed.chars().take(500).collect::<String>()
+        )
     }
 }
 
