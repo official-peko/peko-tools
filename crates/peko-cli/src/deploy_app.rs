@@ -13,11 +13,15 @@
 //! build both variants per platform, organize the outputs, pack them into a
 //! single compressed `.pkdeploy` bundle, and push it to the platform.
 //!
-//! Non-Apple targets (Windows/Android/Linux) always build locally. Apple
-//! targets build locally on a Mac host; on a non-Mac host the app source is
-//! packaged into the bundle (under `source/`, cache/deps/keys excluded) for the
-//! remote Mac builder to build with headless signing — the runner itself is not
-//! yet implemented, but the bundle it will consume is complete.
+//! The bundle **always** carries a clean, buildable snapshot of the app source
+//! (under `source/`, with cache/deps/keys excluded) — the source of truth for
+//! the platform, and what the remote Mac builder builds from.
+//!
+//! Non-Apple targets (Windows/Android/Linux) always build locally. Apple targets
+//! build locally on a Mac host; on a non-Mac host they are handed to the remote
+//! Mac builder (`remote_build`), which builds them from the packaged source with
+//! headless signing — the runner itself is not yet implemented, but the bundle
+//! it will consume is complete.
 
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -81,13 +85,12 @@ struct PlatformArtifact {
 
 /// Instructions for the remote Mac builder: the platforms it must build from
 /// the packaged app source. Present when an Apple target was requested from a
-/// non-Mac host.
+/// non-Mac host. The source itself is always in the bundle (see
+/// [`DeployManifest::source`]).
 #[derive(Serialize)]
 struct RemoteBuild {
     /// The platforms the runner builds from source (`macos`, `ios`).
     targets: Vec<String>,
-    /// Bundle-relative path to the packaged project source tree.
-    source: String,
 }
 
 /// The `deploy.json` manifest embedded at the root of the bundle.
@@ -105,7 +108,11 @@ struct DeployManifest {
     host_os: String,
     /// One entry per platform successfully built locally.
     platforms: Vec<PlatformArtifact>,
-    /// Present when the bundle carries app source for a remote Apple build.
+    /// Bundle-relative path to the packaged app source tree. Always present —
+    /// the bundle always carries a clean, buildable source snapshot.
+    source: String,
+    /// Present when the bundle's source must be built for extra platforms by the
+    /// remote Mac builder (Apple targets requested from a non-Mac host).
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_build: Option<RemoteBuild>,
 }
@@ -301,18 +308,21 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         });
     }
 
-    // Package the app source for remote Apple targets so the Mac runner can
-    // build them (Build 1 + Build 2) with headless signing. The build cache,
-    // build output, node_modules, VCS metadata, and signing keys are excluded.
+    // Always package a clean, buildable snapshot of the app source into the
+    // bundle (build cache, build output, node_modules, VCS metadata, and signing
+    // keys excluded). It is the source of truth for remote Apple builds and is
+    // available to the platform for any rebuild.
+    reporter.status("Packaging", "app source");
+    if let Err(e) = copy_source_tree(&root, &staging.join("source")) {
+        reporter.error(format!("could not package the app source: {e}"));
+        return ExitCode::FAILURE;
+    }
+
+    // Remote Apple targets (requested from a non-Mac host) tell the runner which
+    // platforms to build from that source.
     let remote_build = if remote_build_requested && !remote_targets.is_empty() {
-        reporter.status("Packaging", "app source for the remote Apple builder");
-        if let Err(e) = copy_source_tree(&root, &staging.join("source")) {
-            reporter.error(format!("could not package the app source: {e}"));
-            return ExitCode::FAILURE;
-        }
         Some(RemoteBuild {
             targets: remote_targets.iter().map(|os| os.to_string()).collect(),
-            source: "source".to_owned(),
         })
     } else {
         None
@@ -325,6 +335,7 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),
         host_os: std::env::consts::OS.to_owned(),
         platforms: artifacts,
+        source: "source".to_owned(),
         remote_build,
     };
     let manifest_json = match serde_json::to_vec_pretty(&manifest) {
