@@ -110,6 +110,9 @@ pub fn bundle(
         icon.to_car(&mut io_at(&car, File::create(&car))?);
 
         crate::bundler::copy_project_assets(project, app_dir)?;
+
+        // Third-party attribution for the native code linked into the app.
+        crate::bundler::write_app_notices(app_dir)?;
     }
 
     // Entitlements plist from the bundling config folder. Embedded as a
@@ -118,8 +121,16 @@ pub fn bundle(
         .get_root()
         .join(".peko/bundling/configfiles/ios/app.entitlements");
 
-    progress.tick("iOS: compiling arm64 binary");
-    let arm_target = PekoTarget::new(OperatingSystem::IOS, Architecture::Arm, false);
+    // Debug builds run in the simulator (arm64-apple-ios-simulator), so they can
+    // launch on an Apple Silicon Mac; release builds target the device
+    // (arm64-apple-ios) for signing and submission.
+    progress.tick(if release {
+        "iOS: compiling arm64 device binary"
+    } else {
+        "iOS: compiling arm64 simulator binary"
+    });
+    let arm_target =
+        PekoTarget::new(OperatingSystem::IOS, Architecture::Arm, false).with_simulator(!release);
     let arm_diagnostics = execution::incremental::compile_project(
         cli_info.get_peko_root(),
         project,
@@ -140,7 +151,8 @@ pub fn bundle(
 
     if !release {
         progress.tick("iOS: compiling x86_64 simulator binary");
-        let x86_64_target = PekoTarget::new(OperatingSystem::IOS, Architecture::X86_64, false);
+        let x86_64_target =
+            PekoTarget::new(OperatingSystem::IOS, Architecture::X86_64, false).with_simulator(true);
         let x86_64_diagnostics = execution::incremental::compile_project(
             cli_info.get_peko_root(),
             project,
@@ -192,10 +204,12 @@ pub fn sign(
     // a registered keystore key, so a CI runner can sign without a keychain.
     let key = match signing::headless_apple_key(cli_info)? {
         Some(headless) => headless,
-        None => match signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "ios")? {
-            Some(key) => key,
-            None => return Ok(false),
-        },
+        None => {
+            match signing::resolve_apple(cli_info, project.get_root(), &ui_info.bundle_id, "ios")? {
+                Some(key) => key,
+                None => return Ok(false),
+            }
+        }
     };
 
     // iOS distribution requires a provisioning profile.

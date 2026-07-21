@@ -164,11 +164,17 @@ pub fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     const DEFAULT_TARGETS: &[&str] = &[
         "macos-arm",
         "macos-x86_64",
+        // iOS arm has both a device build (release) and a simulator build
+        // (debug); a prebuilt package must ship objects for both so an app links
+        // the matching platform. x86_64 iOS is simulator-only.
         "ios-arm",
+        "ios-arm-simulator",
+        "ios-x86_64",
         "android-arm",
         "android-x86_64",
         "windows-x86_64",
         "linux-x86_64",
+        "linux-arm",
     ];
     let descriptors: Vec<String> = match cli_info.flags.get_flag("target") {
         Some(csv) => csv

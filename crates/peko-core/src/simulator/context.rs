@@ -2157,7 +2157,7 @@ impl
         };
 
         // Look up the method's overload set in the class's virtual table.
-        let method_options = if class
+        let method_options: Vec<SimulatorFunction> = if class
             .main_virtual_table
             .methods
             .contains_key(&method_name_str)
@@ -2188,6 +2188,19 @@ impl
 
         let post_stack = self.module_context.step_back();
 
+        // Detect a bare function passed where a `closure(...)` is expected — a
+        // common mistake the generic message hides — before the overload set is
+        // consumed by resolution. The first parameter is `this`, so it is
+        // skipped to align with the explicit argument types.
+        let passed_function_for_closure = method_options.iter().any(|candidate| {
+            argument_types
+                .iter()
+                .zip(candidate.arguments.values().skip(1))
+                .any(|(arg, param)| {
+                    arg.is_function() && !arg.is_closure() && param.argument_type.is_closure()
+                })
+        });
+
         let method_choice = self.choose_function(
             method_options,
             argument_types.clone(),
@@ -2196,8 +2209,13 @@ impl
         );
 
         let Some(method) = method_choice else {
+            let closure_hint = if passed_function_for_closure {
+                " — a bare function cannot be passed where a `closure(...)` is expected; wrap it in a closure literal"
+            } else {
+                ""
+            };
             return Err(format!(
-                "no overload of method `{method_name_str}` on type `{object_value_type}` matches the supplied argument types. The call's positional or keyword argument types do not match any declared overload",
+                "no overload of method `{method_name_str}` on type `{object_value_type}` matches the supplied argument types. The call's positional or keyword argument types do not match any declared overload{closure_hint}",
             ));
         };
 

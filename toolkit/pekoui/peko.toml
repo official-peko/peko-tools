@@ -1,6 +1,6 @@
 [package]
 name = "pekoui"
-version = "0.1.1"
+version = "0.1.6"
 description = "The PekoUI framework: a native webview host and UI runtime."
 license = "MIT"
 repository = "https://github.com/official-peko/peko-tools"
@@ -10,6 +10,12 @@ categories = ["gui"]
 
 [lib]
 root = "lib.peko"
+
+# The in-page client SDK (window chrome, native bridge). Delivered through the
+# registry and wired into a consuming app's web frontend at build time.
+[client]
+name = "@peko/client"
+root = "client"
 
 # The desktop webview, compiled from C/C++/Objective-C source at build time.
 # Only a project that depends on pekoui compiles and links these, so a

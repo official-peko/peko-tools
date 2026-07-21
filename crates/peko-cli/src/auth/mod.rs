@@ -111,6 +111,59 @@ pub fn platform_base(override_url: Option<String>) -> String {
     raw.trim_end_matches('/').to_owned()
 }
 
+/// A platform error body. Routes report either `{"error"}` or `{"message"}`,
+/// and may carry a machine-readable `code`.
+#[derive(Debug, Default, Deserialize)]
+struct PlatformErrorBody {
+    error: Option<String>,
+    message: Option<String>,
+    code: Option<String>,
+}
+
+/// A failed platform response, explained for the user.
+pub struct PlatformFailure {
+    /// The HTTP status the platform returned.
+    pub status: reqwest::StatusCode,
+    /// The user-facing explanation.
+    pub message: String,
+    /// An actionable next step, when there is one.
+    pub help: Option<String>,
+}
+
+/// Explain a failed response from an authenticated platform call.
+///
+/// Every authenticated route sits behind the platform's legal gate, which
+/// answers `403 {"code":"legal_required"}` before the handler runs when the
+/// account has not accepted the current agreements. That is indistinguishable
+/// from an unverified-email 403 by status alone, so it is branched on `code`
+/// and explained here once, rather than at each of the call sites.
+pub async fn explain_failure(response: reqwest::Response) -> PlatformFailure {
+    let status = response.status();
+    let body: PlatformErrorBody = response.json().await.unwrap_or_default();
+    let reported = body.error.or(body.message);
+    if body.code.as_deref() == Some("legal_required") {
+        return PlatformFailure {
+            status,
+            message: "the Peko terms have been updated and must be accepted before deploying"
+                .to_owned(),
+            help: Some(format!(
+                "sign in at {} and accept the updated terms, then re-run this command",
+                platform_base(None)
+            )),
+        };
+    }
+    let help = match status {
+        reqwest::StatusCode::UNAUTHORIZED => Some("run `peko login`".to_owned()),
+        _ => None,
+    };
+    PlatformFailure {
+        status,
+        message: reported
+            .unwrap_or_else(|| format!("the platform returned HTTP {}", status.as_u16())),
+        help,
+    }
+}
+
 /// The stored CLI session. The refresh token establishes fresh ID tokens; the
 /// Web API key identifies the Firebase project the tokens belong to.
 #[derive(Debug, Clone, Serialize, Deserialize)]

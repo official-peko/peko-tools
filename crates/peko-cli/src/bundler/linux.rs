@@ -21,15 +21,16 @@ use crate::cli::reporting::ProgressSink;
 use crate::execution;
 use crate::project::PekoProject;
 
-/// Load a toolchain's bundled-dylib sonames from its `toolchain.toml`.
-fn load_bundle_dylibs(toolchain_dir: &Path) -> BundleResult<Vec<String>> {
+/// Load a toolchain's bundled-dylib sonames and GIO module filenames from its
+/// `toolchain.toml`.
+fn load_bundle_dylibs(toolchain_dir: &Path) -> BundleResult<(Vec<String>, Vec<String>)> {
     let path = toolchain_dir.join("toolchain.toml");
     let toolchain =
         peko_core::config::Toolchain::load(&path).map_err(|source| BundleError::Toolchain {
             path,
             source: Box::new(source),
         })?;
-    Ok(toolchain.link.bundle_dylibs)
+    Ok((toolchain.link.bundle_dylibs, toolchain.link.gio_modules))
 }
 
 /// Build a squashfs filesystem at `output_file` containing the project's
@@ -41,6 +42,7 @@ fn create_linux_squashfs(
     main_binary: &Path,
     toolchain_lib_dir: &Path,
     bundle_dylibs: &[String],
+    gio_modules: &[String],
     multiarch_triple: &str,
     release: bool,
 ) -> BundleResult<()> {
@@ -182,6 +184,26 @@ fn create_linux_squashfs(
         .push_file(
             Cursor::new(desktop_file_contents.into_bytes()),
             format!("usr/share/applications/{app_id}.desktop"),
+            readable_header,
+        )
+        .unwrap();
+
+    // Third-party attribution for the native code linked into the app, at the
+    // FHS location for package documentation. usr/share already exists from
+    // the .desktop install above.
+    filesystem_writer
+        .push_dir("usr/share/doc", filesystem_header)
+        .unwrap();
+    filesystem_writer
+        .push_dir(format!("usr/share/doc/{app_id}"), filesystem_header)
+        .unwrap();
+    filesystem_writer
+        .push_file(
+            Cursor::new(crate::bundler::APP_NOTICES.as_bytes().to_vec()),
+            format!(
+                "usr/share/doc/{app_id}/{}",
+                crate::bundler::APP_NOTICES_FILE
+            ),
             readable_header,
         )
         .unwrap();
@@ -360,16 +382,36 @@ fn create_linux_squashfs(
         .push_dir("usr/lib", filesystem_header)
         .unwrap();
 
-    // Empty gio/modules dir. GIO_MODULE_DIR in AppRun points here so GIO
-    // scans this (empty) directory instead of the host's module dir,
-    // avoiding loading host GIO plugins that are built against a newer
-    // glib than we bundle.
+    // GIO_MODULE_DIR in AppRun points at usr/lib/gio/modules so GIO scans
+    // this directory instead of the host's module dir, avoiding host GIO
+    // plugins built against a newer glib than we bundle. We populate it with
+    // only the TLS backend module (libgiognutls.so) built against our bundled
+    // glib: WebKitGTK routes all https:// TLS through GIO, so without a TLS
+    // module every remote-origin load fails with "TLS/SSL support not
+    // available" and the webview falls back to about:blank. The module's own
+    // dependency libraries (libgnutls and its transitive closure) are listed
+    // in bundle_dylibs and land in usr/lib alongside it.
     filesystem_writer
         .push_dir("usr/lib/gio", filesystem_header)
         .unwrap();
     filesystem_writer
         .push_dir("usr/lib/gio/modules", filesystem_header)
         .unwrap();
+    let gio_modules_dir = toolchain_lib_dir.join("gio/modules");
+    for module in gio_modules {
+        let module_source = gio_modules_dir.join(module);
+        if !module_source.exists() {
+            continue;
+        }
+        let module_handle = io_at(&module_source, File::open(&module_source))?;
+        filesystem_writer
+            .push_file(
+                module_handle,
+                format!("/usr/lib/gio/modules/{module}"),
+                executable_header,
+            )
+            .unwrap();
+    }
 
     for soname in bundle_dylibs {
         let lib_source = toolchain_lib_dir.join(soname);
@@ -644,9 +686,10 @@ pub fn bundle(
     let arm_lib_dir = toolchain_root.join("arm/lib");
     let x86_64_lib_dir = toolchain_root.join("x86_64/lib");
 
-    // The libraries to bundle come from each toolchain's `toolchain.toml`.
-    let arm_dylibs = load_bundle_dylibs(&toolchain_root.join("arm"))?;
-    let x86_64_dylibs = load_bundle_dylibs(&toolchain_root.join("x86_64"))?;
+    // The libraries and GIO modules to bundle come from each toolchain's
+    // `toolchain.toml`.
+    let (arm_dylibs, arm_gio_modules) = load_bundle_dylibs(&toolchain_root.join("arm"))?;
+    let (x86_64_dylibs, x86_64_gio_modules) = load_bundle_dylibs(&toolchain_root.join("x86_64"))?;
 
     let release = cli_info.flags.has_flag("release");
     let arm_squashfs = arm_build_dir.join("appdir.squashfs");
@@ -656,6 +699,7 @@ pub fn bundle(
         &arm_app_binary,
         &arm_lib_dir,
         &arm_dylibs,
+        &arm_gio_modules,
         "aarch64-linux-gnu",
         release,
     )?;
@@ -667,6 +711,7 @@ pub fn bundle(
         &x86_64_app_binary,
         &x86_64_lib_dir,
         &x86_64_dylibs,
+        &x86_64_gio_modules,
         "x86_64-linux-gnu",
         release,
     )?;

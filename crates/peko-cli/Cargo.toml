@@ -60,6 +60,10 @@ x509-certificate = "0.24.0"
 # Decode a key file the IDE streams in as base64 over stdin (a dropped file's
 # bytes; keeps binary fidelity by decoding in Rust rather than the webview).
 base64 = "0.22"
+# Envelope-encrypt the deploy bundle's signing material to the remote Mac
+# builder's public key (X25519 + ChaCha20-Poly1305), so the platform relays only
+# ciphertext. Seal (package time) and unseal (`peko deploy unseal`) both in Rust.
+age = "0.11"
 keyring-core = "1.0.0"
 app-store-connect = "0.7.0"
 # Project-wide search/replace for the IDE: regex matching over a recursive walk.

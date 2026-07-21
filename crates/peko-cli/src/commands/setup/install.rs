@@ -65,6 +65,15 @@ pub(super) async fn install_archive(
     extract::extract(archive.path(), format, dest)
 }
 
+/// Peko's own license and the attribution for everything statically linked into
+/// the binary. Embedded so an install carries them however peko was obtained —
+/// release archive, `cargo install`, or a hand-copied binary.
+const LICENSE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../LICENSE"));
+const THIRD_PARTY_NOTICES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../THIRD-PARTY-NOTICES.txt"
+));
+
 /// Place the running peko executable at Compiler/bin/peko/peko.
 pub fn place_self(layout: &Layout) -> Result<()> {
     let exe =
@@ -72,6 +81,7 @@ pub fn place_self(layout: &Layout) -> Result<()> {
     let bin = layout.bin_peko();
     std::fs::create_dir_all(&bin)
         .map_err(|e| SetupError::io(format!("create {}", bin.display()), e))?;
+    place_notices(layout)?;
     let dest = bin.join(peko_binary());
     if exe == dest {
         return Ok(());
@@ -79,6 +89,24 @@ pub fn place_self(layout: &Layout) -> Result<()> {
     std::fs::copy(&exe, &dest)
         .map_err(|e| SetupError::io(format!("copy {}", dest.display()), e))?;
     make_executable(&dest)
+}
+
+/// Write Peko's license and third-party notices into the install root. Several
+/// of the linked components require their notice accompany the binary, and an
+/// install is a distribution of it.
+fn place_notices(layout: &Layout) -> Result<()> {
+    let root = layout.root();
+    std::fs::create_dir_all(root)
+        .map_err(|e| SetupError::io(format!("create {}", root.display()), e))?;
+    for (name, text) in [
+        ("LICENSE", LICENSE),
+        ("THIRD-PARTY-NOTICES.txt", THIRD_PARTY_NOTICES),
+    ] {
+        let dest = root.join(name);
+        std::fs::write(&dest, text)
+            .map_err(|e| SetupError::io(format!("write {}", dest.display()), e))?;
+    }
+    Ok(())
 }
 
 /// Install the linux and android toolchain payloads from the SDK release into

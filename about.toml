@@ -1,0 +1,43 @@
+# Configuration for `cargo about generate`, which produces THIRD-PARTY-NOTICES.txt
+# — the attribution that must travel with every distributed `peko` binary.
+#
+# Regenerate with:
+#   cargo about generate about.hbs -o THIRD-PARTY-NOTICES.txt
+#
+# Note this covers the Rust dependency graph ONLY. The bundled native code
+# (BearSSL, webview, the Android glue, LLVM) is invisible to cargo and is
+# maintained by hand in NOTICE-native.txt, which the generated file appends.
+
+# Notices describe what ships, so build- and dev-only dependencies are excluded.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Licenses accepted for dependencies, in PREFERENCE ORDER: for a dual-licensed
+# crate (`Apache-2.0 OR MIT`), the first match here is the one chosen and
+# reproduced. MIT leads so the notices align with Peko's own license.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "BlueOak-1.0.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "NCSA",
+    # File-level copyleft: obligations attach only to modified covered files.
+    # Every one of these comes unmodified from crates.io (no [patch]/[replace]
+    # in Cargo.toml), so only the notice below is required.
+    "MPL-2.0",
+    # Font licenses, from a crate that embeds font data.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]

@@ -74,9 +74,28 @@ pub struct CLIInfo {
     pub executable: String,
     /// Path to the user's Peko root directory (`PEKO_ROOT_PATH`).
     peko_root: PathBuf,
+    /// The run's signing secrets, loaded from the keychain lazily on first use
+    /// (see [`CLIInfo::signing_secrets`]). `Arc` so invocations derived by
+    /// [`with_flags`] share one load — the keychain is read at most once a run.
+    signing_secrets: std::sync::Arc<std::sync::OnceLock<crate::bundler::signing::SigningSecrets>>,
 }
 
 impl CLIInfo {
+    /// Derive a copy of this invocation carrying a different flag set, so one
+    /// command can run another in-process (instead of re-execing the binary).
+    /// The resolved Peko root, executable name, and positionals are preserved;
+    /// only the flags change.
+    pub fn with_flags(&self, flags: data_structures::Flags) -> CLIInfo {
+        CLIInfo {
+            flags,
+            arguments: self.arguments.clone(),
+            executable: self.executable.clone(),
+            peko_root: self.peko_root.clone(),
+            // Share the keychain load with the derived invocation.
+            signing_secrets: self.signing_secrets.clone(),
+        }
+    }
+
     /// Parse the process's CLI invocation.
     ///
     /// `flag_prefixes` enumerates which argv-token leading substrings mark a
@@ -209,7 +228,19 @@ impl CLIInfo {
             arguments,
             executable,
             peko_root,
+            signing_secrets: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    /// The project's signing secrets (all keychain-backed passwords, one
+    /// serializable object), loaded from the OS keychain on **first** use and
+    /// cached for the rest of the run. A build or deploy that signs several
+    /// platforms — or derives sub-invocations via [`with_flags`] — therefore
+    /// prompts the keychain at most once. The cache is shared with derived
+    /// invocations, so an in-process `peko build` reuses the same load.
+    pub fn signing_secrets(&self, bundle_id: &str) -> &crate::bundler::signing::SigningSecrets {
+        self.signing_secrets
+            .get_or_init(|| crate::bundler::signing::SigningSecrets::load(bundle_id))
     }
 
     /// The path to the user's Peko root, resolved from `PEKO_ROOT_PATH`.
@@ -325,5 +356,45 @@ impl CLIInfo {
         combined.extend_from_slice(&packages_tree.root.item.hash);
 
         Some(combined)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bundler::signing::SigningSecrets;
+
+    fn test_cli() -> CLIInfo {
+        CLIInfo {
+            flags: data_structures::Flags::default(),
+            arguments: Vec::new(),
+            executable: "peko".to_owned(),
+            peko_root: PathBuf::from("/tmp"),
+            signing_secrets: std::sync::Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    #[test]
+    fn signing_secrets_cached_once_and_shared_with_derived() {
+        let cli = test_cli();
+        // Pre-fill so the test never touches the real OS keychain.
+        let mut secrets = SigningSecrets::default();
+        secrets.set("ios", "p12", "pw");
+        cli.signing_secrets.set(secrets).ok();
+
+        // Repeated access returns the same cached instance (one load per run).
+        let first = cli.signing_secrets("dev.example") as *const _;
+        let second = cli.signing_secrets("dev.example") as *const _;
+        assert_eq!(first, second);
+        assert_eq!(
+            cli.signing_secrets("dev.example")
+                .get("ios", "p12")
+                .as_deref(),
+            Some("pw")
+        );
+
+        // A `with_flags`-derived invocation shares the same cached load.
+        let derived = cli.with_flags(data_structures::Flags::default());
+        assert_eq!(derived.signing_secrets("dev.example") as *const _, first);
     }
 }

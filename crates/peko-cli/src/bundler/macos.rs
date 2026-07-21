@@ -98,6 +98,9 @@ pub fn bundle(
     // Resources, so the hierarchical names are kept.
     crate::bundler::copy_project_assets(project, &resources_dir)?;
 
+    // Third-party attribution for the native code linked into the app.
+    crate::bundler::write_app_notices(&resources_dir)?;
+
     // Per-architecture executables compiled into an intermediates folder,
     // then combined into one universal binary.
     let intermediates = macos_build_directory.join("intermediates");
@@ -220,7 +223,7 @@ pub fn sign(
     // a registered keystore key, so a CI runner can sign without a keychain.
     let key = match signing::headless_apple_key(cli_info)? {
         Some(headless) => Some(headless),
-        None => signing::resolve_apple(project.get_root(), &ui_info.bundle_id, "macos")?,
+        None => signing::resolve_apple(cli_info, project.get_root(), &ui_info.bundle_id, "macos")?,
     };
     let notary = signing::resolve_notary(project.get_root(), "macos");
 
@@ -273,12 +276,15 @@ pub fn sign(
         }
     }
 
-    // Sign the .pkg with the Mac Installer Distribution certificate when one is
-    // provided (`--installer-p12`); App Store submission requires a signed
-    // installer. Without it the .pkg is left unsigned.
-    if let (Some(pkg), Some((installer_p12, installer_password))) =
-        (&pkg, signing::headless_installer_material(cli_info)?)
-    {
+    // Sign the .pkg with the Mac Installer Distribution certificate — from the
+    // headless `--installer-p12` flags, else the one registered with
+    // `peko keys add --platform macos --installer-cert …`. App Store submission
+    // requires a signed installer; without a cert the .pkg is left unsigned.
+    let installer = match signing::headless_installer_material(cli_info)? {
+        Some(material) => Some(material),
+        None => signing::resolve_installer(cli_info, project.get_root(), &ui_info.bundle_id)?,
+    };
+    if let (Some(pkg), Some((installer_p12, installer_password))) = (&pkg, installer) {
         signing::sign_pkg(
             pkg,
             &installer_p12,

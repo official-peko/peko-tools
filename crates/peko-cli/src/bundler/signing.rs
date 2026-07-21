@@ -268,6 +268,7 @@ pub struct WindowsSigningKey {
 /// Resolve Android signing material for the project, or `None` when no
 /// Android key is registered or a required password is missing.
 pub fn resolve_android(
+    cli_info: &CLIInfo,
     project_root: &Path,
     bundle_id: &str,
 ) -> BundleResult<Option<AndroidSigningKey>> {
@@ -283,7 +284,7 @@ pub fn resolve_android(
         .and_then(|a| a.as_str())
         .unwrap_or("upload")
         .to_string();
-    let secrets = SigningSecrets::load(bundle_id);
+    let secrets = cli_info.signing_secrets(bundle_id);
     let (Some(store_password), Some(key_password)) = (
         secrets.get("android", "store"),
         secrets.get("android", "key"),
@@ -301,6 +302,7 @@ pub fn resolve_android(
 /// Resolve Apple signing material for the project on `platform` ("ios" or
 /// "macos"), or `None` when not registered or the password is missing.
 pub fn resolve_apple(
+    cli_info: &CLIInfo,
     project_root: &Path,
     bundle_id: &str,
     platform: &str,
@@ -312,7 +314,7 @@ pub fn resolve_apple(
     if !p12.exists() {
         return Ok(None);
     }
-    let Some(p12_password) = SigningSecrets::load(bundle_id).get(platform, "p12") else {
+    let Some(p12_password) = cli_info.signing_secrets(bundle_id).get(platform, "p12") else {
         return Ok(None);
     };
     let profile =
@@ -382,6 +384,31 @@ pub fn headless_apple_key(cli_info: &CLIInfo) -> BundleResult<Option<AppleSignin
         profile,
         entitlements,
     }))
+}
+
+/// The registered Mac Installer Distribution material (a `.p12` and its
+/// password) from the project key registry + keychain — the non-headless
+/// counterpart to [`headless_installer_material`], used to sign the macOS
+/// `.pkg`. `None` when no installer certificate is registered.
+pub fn resolve_installer(
+    cli_info: &CLIInfo,
+    project_root: &Path,
+    bundle_id: &str,
+) -> BundleResult<Option<(PathBuf, String)>> {
+    let registry = load_registry(project_root)?;
+    let Some(p12) = registered_file(project_root, &registry, "macos", "installer-p12") else {
+        return Ok(None);
+    };
+    if !p12.exists() {
+        return Ok(None);
+    }
+    let Some(password) = cli_info
+        .signing_secrets(bundle_id)
+        .get("macos", "installer-p12")
+    else {
+        return Ok(None);
+    };
+    Ok(Some((p12, password)))
 }
 
 /// The Mac Installer Distribution material (a `.p12` and its password) from
@@ -520,6 +547,7 @@ pub fn sign_pkg(
 /// Resolve Windows signing material for the project, or `None` when not
 /// registered or the password is missing.
 pub fn resolve_windows(
+    cli_info: &CLIInfo,
     project_root: &Path,
     bundle_id: &str,
 ) -> BundleResult<Option<WindowsSigningKey>> {
@@ -530,7 +558,7 @@ pub fn resolve_windows(
     if !pfx.exists() {
         return Ok(None);
     }
-    let Some(password) = SigningSecrets::load(bundle_id).get("windows", "pfx") else {
+    let Some(password) = cli_info.signing_secrets(bundle_id).get("windows", "pfx") else {
         return Ok(None);
     };
     Ok(Some(WindowsSigningKey { pfx, password }))
@@ -601,17 +629,35 @@ fn file_name_of(path: &Path) -> Option<String> {
 /// Open a PKCS#12 container, returning the leaf certificate or a message that
 /// distinguishes a wrong password from a malformed file.
 fn open_pkcs12(bytes: &[u8], password: &str) -> Result<CapturedX509Certificate, String> {
-    match apple_codesign::cryptography::parse_pfx_data(bytes, password) {
-        Ok((certificate, _key)) => Ok(certificate),
-        Err(e) => {
-            let debug = format!("{e:?}");
-            if debug.contains("BadPassword") {
-                Err("wrong password".to_string())
-            } else {
-                Err(format!("not a valid PKCS#12 certificate ({e})"))
-            }
-        }
-    }
+    // parse_pfx_data delegates to the `p12` crate, which panics on an assertion
+    // when a PKCS#12 file's MAC uses SHA-256 instead of SHA-1 — the default for
+    // containers current keytool and macOS write. Contain the unwind (and
+    // silence the panic hook while it happens) so one such file reports an error
+    // instead of aborting the whole `keys verify`, which would leave the Studio's
+    // signing tab blank. verify runs platforms sequentially, so swapping the
+    // process-wide hook here is safe.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    // Reduce the parse to a small Result inside the closure (the leaf cert or a
+    // message), so the value crossing the unwind boundary carries no large error.
+    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        apple_codesign::cryptography::parse_pfx_data(bytes, password)
+            .map(|(certificate, _key)| certificate)
+            .map_err(|e| {
+                if format!("{e:?}").contains("BadPassword") {
+                    "wrong password".to_string()
+                } else {
+                    format!("not a valid PKCS#12 certificate ({e})")
+                }
+            })
+    }));
+    std::panic::set_hook(previous_hook);
+    parsed.unwrap_or_else(|_| {
+        Err(
+            "could not read PKCS#12 (unsupported MAC algorithm; verify with keytool or re-export with a SHA-1 MAC)"
+                .to_string(),
+        )
+    })
 }
 
 /// Check a certificate's validity window against the current time. Returns a
@@ -794,6 +840,42 @@ fn verify_apple(
     }
     checks.push(check);
 
+    // The optional macOS installer certificate (signs the App Store `.pkg`).
+    // Only reported when one is registered, so a project that signs just the
+    // `.app` is not marked incomplete.
+    if platform == "macos"
+        && let Some(path) = registered_file(root, registry, "macos", "installer-p12")
+    {
+        let mut check = KeyCheck {
+            role: "installer certificate".to_string(),
+            file: file_name_of(&path),
+            present: true,
+            ok: false,
+            unverified: false,
+            detail: String::new(),
+        };
+        match secrets.get("macos", "installer-p12") {
+            None => check.detail = "installer certificate password not set".to_string(),
+            Some(password) => match std::fs::read(&path) {
+                Err(e) => check.detail = format!("cannot read installer certificate: {e}"),
+                Ok(bytes) => match open_pkcs12(&bytes, &password) {
+                    Err(message) => check.detail = message,
+                    Ok(cert) => {
+                        let cn = cert.subject_common_name().unwrap_or_default();
+                        match cert_validity(&cert) {
+                            Err(message) => check.detail = format!("{cn}: {message}"),
+                            Ok(valid) => {
+                                check.ok = true;
+                                check.detail = format!("{cn} - {valid}");
+                            }
+                        }
+                    }
+                },
+            },
+        }
+        checks.push(check);
+    }
+
     if platform == "ios" {
         let profile_file = registered_file(root, registry, "ios", "profile");
         let mut check = KeyCheck {
@@ -918,19 +1000,41 @@ fn verify_android(
             match std::fs::read(&path) {
                 Err(e) => check.detail = format!("cannot read keystore: {e}"),
                 Ok(bytes) if bytes.first() == Some(&0x30) => {
-                    // PKCS#12 keystore.
-                    match open_pkcs12(&bytes, &store_password) {
-                        Err(message) => check.detail = format!("keystore: {message}"),
-                        Ok(cert) => {
-                            let cn = cert.subject_common_name().unwrap_or_default();
-                            match cert_validity(&cert) {
-                                Err(message) => check.detail = format!("{cn}: {message}"),
-                                Ok(valid) => {
-                                    check.ok = true;
-                                    check.detail = format!("PKCS#12 keystore - {cn}, {valid}");
+                    // PKCS#12 keystore. Current keytool and Android Studio write
+                    // PKCS#12 with a SHA-256 MAC, which the pure-Rust reader
+                    // cannot parse, so prefer keytool (it handles JKS and PKCS#12
+                    // alike) and fall back to the contained pure-Rust reader when
+                    // no JDK is present.
+                    match verify_jks_with_keytool(peko_root, &path, &store_password, &alias) {
+                        Ok(true) => {
+                            check.ok = true;
+                            check.detail = format!(
+                                "PKCS#12 keystore - alias '{alias}' opens with the password"
+                            );
+                        }
+                        Ok(false) => {
+                            check.detail =
+                                format!("alias '{alias}' not found or the store password is wrong");
+                        }
+                        Err(()) => match open_pkcs12(&bytes, &store_password) {
+                            Ok(cert) => {
+                                let cn = cert.subject_common_name().unwrap_or_default();
+                                match cert_validity(&cert) {
+                                    Err(message) => check.detail = format!("{cn}: {message}"),
+                                    Ok(valid) => {
+                                        check.ok = true;
+                                        check.detail = format!("PKCS#12 keystore - {cn}, {valid}");
+                                    }
                                 }
                             }
-                        }
+                            Err(_) => {
+                                check.ok = true;
+                                check.unverified = true;
+                                check.detail = format!(
+                                    "PKCS#12 keystore present; install a JDK (keytool) to verify alias '{alias}'"
+                                );
+                            }
+                        },
                     }
                 }
                 Ok(bytes) if bytes.len() >= 4 && bytes[0..4] == [0xFE, 0xED, 0xFE, 0xED] => {

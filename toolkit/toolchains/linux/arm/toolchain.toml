@@ -120,6 +120,17 @@ bundle_dylibs = [
   "libepoxy.so.0",
   # networking
   "libsoup-2.4.so.1",
+  # tls backend (glib-networking's libgiognutls.so, in gio_modules below) and
+  # its dependency closure, so a bundled webview loads https:// origins on a
+  # host without glib-networking installed
+  "libgnutls.so.30",
+  "libp11-kit.so.0",
+  "libidn2.so.0",
+  "libunistring.so.2",
+  "libnettle.so.8",
+  "libhogweed.so.6",
+  "libgmp.so.10",
+  "libselinux.so.1",
   # icu
   "libicui18n.so.70",
   "libicuuc.so.70",
@@ -171,4 +182,12 @@ bundle_dylibs = [
   "libmount.so.1",
   "libpcre2-8.so.0",
   "libz.so.1",
+]
+# GIO plugin modules copied into the bundle's usr/lib/gio/modules directory,
+# where GIO_MODULE_DIR points. WebKitGTK routes all https:// TLS through GIO,
+# so the TLS backend module must be present or every remote-origin load fails
+# with "TLS/SSL support not available" and the page falls back to about:blank.
+# Resolved against the toolchain's lib/gio/modules directory.
+gio_modules = [
+  "libgiognutls.so",
 ]

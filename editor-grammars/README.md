@@ -20,6 +20,6 @@ tree-sitter parse path/to/file.peko
 
 ## License
 
-Licensed under PSAL-1.0. See [LICENSE](LICENSE) for the full text.
+Licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
 
 Copyright 2026 Peko UI Technologies LLC.

@@ -65,3 +65,16 @@ jobs:
 
       - name: Test
         run: cargo test --all --locked
+
+      - name: Third-party notices are current
+        # Adding or bumping a dependency changes what must be attributed in the
+        # shipped archives. Regenerating here and diffing catches a stale
+        # THIRD-PARTY-NOTICES.txt at review time rather than after release.
+        run: |
+          cargo install cargo-about --features cli --locked
+          ./scripts/gen-notices.sh
+          if ! git diff --quiet -- THIRD-PARTY-NOTICES.txt; then
+            echo "::error::THIRD-PARTY-NOTICES.txt is out of date. Run ./scripts/gen-notices.sh and commit the result."
+            git diff --stat -- THIRD-PARTY-NOTICES.txt
+            exit 1
+          fi

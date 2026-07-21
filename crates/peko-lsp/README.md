@@ -25,7 +25,7 @@ The official language server for [Pekoscript](https://pekoui.comt), implementing
 Requires [Rust](https://rustup.rs/) 1.75 or later.
 
 ```bash
-git clone https://github.com/you/pekoscript-lsp
+git clone https://github.com/official-peko/peko-tools
 cd pekoscript-lsp
 cargo build --release
 ```

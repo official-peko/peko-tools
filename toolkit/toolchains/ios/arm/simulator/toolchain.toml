@@ -1,0 +1,34 @@
+# Toolchain description for the iOS simulator on arm64. Used for debug builds so
+# they run natively in the Simulator on Apple Silicon (no Rosetta).
+#
+# Differs from the device toolchain (../device) only in the SDK sysroot
+# (iPhoneSimulator vs iPhoneOS), the target triple's `-simulator` environment,
+# and the `ios-simulator` platform. Paths are relative to this file's directory;
+# OpenSSL is shared two levels up at ../../openssl_libs.
+
+[toolchain]
+id = "ios-arm-simulator"
+target = "ios"
+arch = "arm"
+triple = "arm64-apple-ios-simulator"
+
+[build]
+cxx_std = "c++17"
+c_flags = ["-fobjc-arc", "-isysroot", "iPhoneSimulator.sdk"]
+objc_flags = ["-fmodules"]
+include = ["include/c++"]
+
+[link]
+driver = "ld64.lld"
+lib_paths = []
+libs = ["objc", "c++", "c"]
+frameworks = ["Security", "Foundation", "UIKit", "CoreGraphics"]
+objects = ["../../openssl_libs/libssl.a", "../../openssl_libs/libcrypto.a"]
+# The two -platform_version values are the minimum and SDK versions.
+flags = [
+  "-w",
+  "-dynamic",
+  "-arch", "arm64",
+  "-platform_version", "ios-simulator", "15.0", "26.2",
+  "-syslibroot", "iPhoneSimulator.sdk",
+]

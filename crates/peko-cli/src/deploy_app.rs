@@ -24,16 +24,19 @@
 //! it will consume is complete.
 
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use peko_core::target::OperatingSystem;
 use serde::{Deserialize, Serialize};
+
+use std::collections::BTreeMap;
 
 use crate::bundler::signing;
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
 use crate::commands::platform_label;
 use crate::project::PekoProject;
+use crate::{deploy_pack, deploy_seal};
 
 /// Which of the two builds to produce for a platform.
 #[derive(Clone, Copy)]
@@ -45,11 +48,11 @@ enum BuildKind {
 }
 
 impl BuildKind {
-    /// The `peko build` flag that selects this build.
-    fn flag(self) -> &'static str {
+    /// The `peko build` flag name that selects this build.
+    fn flag_name(self) -> &'static str {
         match self {
-            BuildKind::Generation => "--demo",
-            BuildKind::Submission => "--release",
+            BuildKind::Generation => "demo",
+            BuildKind::Submission => "release",
         }
     }
 
@@ -93,6 +96,17 @@ struct RemoteBuild {
     targets: Vec<String>,
 }
 
+/// Sealed signing material info in the bundle manifest. The remote builder
+/// decrypts `sealed` with its runner key (`peko deploy unseal`) to sign the
+/// listed platforms' release builds.
+#[derive(Serialize)]
+struct SigningInfo {
+    /// Bundle-relative path to the sealed blob.
+    sealed: String,
+    /// The platforms whose signing material is sealed (`ios`, `macos`).
+    platforms: Vec<String>,
+}
+
 /// The `deploy.json` manifest embedded at the root of the bundle.
 #[derive(Serialize)]
 struct DeployManifest {
@@ -111,6 +125,23 @@ struct DeployManifest {
     /// Bundle-relative path to the packaged app source tree. Always present —
     /// the bundle always carries a clean, buildable source snapshot.
     source: String,
+    /// `true` when path deps were vendored into `source/vendor/` and the
+    /// resolved registry/gated cache + global lockfile were mirrored into
+    /// `pekoroot/` for a hermetic remote build. Set for remote Apple builds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    vendored: bool,
+    /// `true` when this is an SSR (server-framework) app whose hosted frontend
+    /// was deployed by this run before the native shells were built.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    server_deployed: bool,
+    /// `true` when the SSG web frontend was prebuilt into `prebuilt/web/` for a
+    /// remote builder to substitute via `peko build --web-dist`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    prebuilt_frontend: bool,
+    /// Sealed signing material for the remote builder, when Apple signing keys
+    /// were connected and a runner key was available to seal to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signing: Option<SigningInfo>,
     /// Present when the bundle's source must be built for extra platforms by the
     /// remote Mac builder (Apple targets requested from a non-Mac host).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,17 +291,26 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 
     // --- Step 3: two builds per local platform ------------------------------
-    let Ok(exe) = std::env::current_exe() else {
-        reporter.error("could not locate the peko executable to run the builds");
-        return ExitCode::FAILURE;
-    };
+
+    // An SSR (server-framework) app's native shells load its hosted origin, so
+    // the frontend must be deployed and the host assigned before the native
+    // apps are built (they bake `bundle::host`). Deploy the server first,
+    // in-process. Skipped on a local dry run.
+    let server_deployed = ui.framework == "server" && !no_upload;
+    if server_deployed {
+        reporter.status("Deploying", "the SSR server (frontend) first");
+        if crate::commands::deploy::deploy_server(cli_info, reporter).await != ExitCode::SUCCESS {
+            reporter.error("server deploy failed; aborting app deploy");
+            return ExitCode::FAILURE;
+        }
+    }
 
     for os in &local_targets {
         let label = platform_label(os).unwrap();
         for kind in [BuildKind::Generation, BuildKind::Submission] {
             reporter.status("Building", format!("{label}: {}", kind.label()));
-            if let Err(e) = run_build(&exe, &root, os, kind) {
-                reporter.error(format!("{label} {} build failed: {e}", kind.label()));
+            if !run_build(cli_info, os, kind, reporter).await {
+                reporter.error(format!("{label} {} build failed", kind.label()));
                 return ExitCode::FAILURE;
             }
         }
@@ -318,6 +358,116 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // For a remote build the Mac needs the app's dependencies without registry
+    // access, entitlements, or a matching global install: vendor local path
+    // deps into the packaged source (rewriting the manifest/lockfile) and mirror
+    // the resolved registry/gated cache + global lockfile into `pekoroot/`.
+    let vendored = remote_build_requested && !remote_targets.is_empty();
+    if vendored {
+        reporter.status("Packaging", "dependencies for the remote builder");
+        if let Err(e) = deploy_pack::vendor_path_deps(&root, &staging.join("source")) {
+            reporter.error(format!("could not vendor path dependencies: {e}"));
+            return ExitCode::FAILURE;
+        }
+        if let Err(e) =
+            deploy_pack::mirror_dependency_cache(cli_info.get_peko_root(), &root, &staging)
+        {
+            reporter.error(format!("could not mirror the dependency cache: {e}"));
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // An SSG (static) app embeds its web frontend, which builds with node — which
+    // the remote Mac does not have. Build it here and ship it as `prebuilt/web`;
+    // the Mac substitutes it into `assets/` via `peko build --web-dist`. The
+    // freshly built copy under `source/assets` is dropped to avoid shipping it
+    // twice.
+    let prebuilt_frontend = vendored && ui.framework == "static";
+    if prebuilt_frontend {
+        reporter.status("Packaging", "prebuilding the web frontend");
+        if crate::commands::build::build_web_frontend(
+            &project,
+            cli_info.get_peko_root(),
+            None,
+            reporter,
+        )
+        .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
+        let built = root.join("assets");
+        if built.is_dir()
+            && let Err(e) = deploy_pack::copy_dir_all(&built, &staging.join("prebuilt/web"))
+        {
+            reporter.error(format!("could not package the prebuilt web frontend: {e}"));
+            return ExitCode::FAILURE;
+        }
+        let _ = std::fs::remove_dir_all(staging.join("source/assets"));
+    }
+
+    // Seal the signing material for the remote Apple targets to the runner's
+    // public key, so the Mac can sign the release build but the platform relays
+    // only ciphertext. The recipient comes from the platform's runner-key
+    // registry (`GET /api/deploy/runner-key`); `--runner-key` / `PEKO_RUNNER_KEY`
+    // override it for testing without the platform. Without signing keys or a
+    // recipient, the remote release build is left unsigned.
+    let mut signing = None;
+    if vendored {
+        let mut apple_keys: BTreeMap<String, deploy_seal::PlatformSigning> = BTreeMap::new();
+        for os in &remote_targets {
+            if let Some(platform) = signing::platform_id(os)
+                && let Ok(Some(app)) =
+                    signing::resolve_apple(cli_info, &root, &ui.bundle_id, platform)
+            {
+                // macOS also needs the installer cert to sign the `.pkg`.
+                let installer = if *os == OperatingSystem::MacOS {
+                    signing::resolve_installer(cli_info, &root, &ui.bundle_id).unwrap_or(None)
+                } else {
+                    None
+                };
+                apple_keys.insert(
+                    platform.to_string(),
+                    deploy_seal::PlatformSigning { app, installer },
+                );
+            }
+        }
+        if !apple_keys.is_empty() {
+            let recipient = runner_public_key(cli_info, reporter).await;
+            match recipient {
+                Some(runner) => {
+                    reporter.status(
+                        "Packaging",
+                        match &runner.key_id {
+                            Some(id) => {
+                                format!("sealing signing material to build runner \"{id}\"")
+                            }
+                            None => "sealing signing material for the remote builder".to_owned(),
+                        },
+                    );
+                    match deploy_seal::seal_signing_material(&runner.recipient, &apple_keys) {
+                        Ok(bytes) => {
+                            if let Err(e) = std::fs::write(staging.join("signing.sealed"), &bytes) {
+                                reporter.error(format!("could not write signing.sealed: {e}"));
+                                return ExitCode::FAILURE;
+                            }
+                            signing = Some(SigningInfo {
+                                sealed: "signing.sealed".to_owned(),
+                                platforms: apple_keys.keys().cloned().collect(),
+                            });
+                        }
+                        Err(e) => {
+                            reporter.error(format!("could not seal the signing material: {e}"));
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+                None => reporter.warning(
+                    "signing keys are connected but no remote build runner key is available; the remote release build will be unsigned",
+                ),
+            }
+        }
+    }
+
     // Remote Apple targets (requested from a non-Mac host) tell the runner which
     // platforms to build from that source.
     let remote_build = if remote_build_requested && !remote_targets.is_empty() {
@@ -336,6 +486,10 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         host_os: std::env::consts::OS.to_owned(),
         platforms: artifacts,
         source: "source".to_owned(),
+        vendored,
+        server_deployed,
+        prebuilt_frontend,
+        signing,
         remote_build,
     };
     let manifest_json = match serde_json::to_vec_pretty(&manifest) {
@@ -411,6 +565,129 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     }
 }
 
+/// The platform's `GET /api/deploy/runner-key` response: the remote build
+/// runner's public half, which signing material is sealed to.
+#[derive(Deserialize)]
+struct RunnerKeyResponse {
+    #[serde(rename = "publicKey")]
+    public_key: String,
+    /// Which machine the key belongs to, reported so the user can see what
+    /// their signing material is being sealed to.
+    #[serde(rename = "keyId")]
+    key_id: Option<String>,
+}
+
+/// The remote build runner's public key and the machine it identifies.
+struct RunnerKey {
+    recipient: String,
+    key_id: Option<String>,
+}
+
+/// Whether `value` is a well-formed age recipient — the same shape the platform
+/// enforces on write. Validated before sealing so a corrupted or wrong response
+/// fails here rather than producing a bundle nobody can decrypt, which would
+/// only surface much later as an opaque remote build failure.
+fn is_age_recipient(value: &str) -> bool {
+    let Some(body) = value.strip_prefix("age1") else {
+        return false;
+    };
+    (40..=100).contains(&body.len())
+        && body
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// The remote build runner's public key, to seal the signing material to.
+///
+/// Normally fetched from the platform's runner-key registry, which an admin
+/// registers the build Mac with; `--runner-key` / `PEKO_RUNNER_KEY` override it
+/// so the flow can be exercised offline. Returns `None` (with a reason) when no
+/// runner is registered or the session can't authenticate — the caller then
+/// ships an unsealed bundle and the remote release build is left unsigned.
+///
+/// Deliberately sends no `Origin` and no App Check header: the route's
+/// same-origin assertion passes only when `Origin` is absent (the CLI path),
+/// and a valid bearer token already exempts the call from attestation.
+async fn runner_public_key(cli_info: &CLIInfo, reporter: &Reporter) -> Option<RunnerKey> {
+    if let Some(key) = cli_info
+        .flags
+        .get_flag("runner-key")
+        .or_else(|| std::env::var("PEKO_RUNNER_KEY").ok())
+    {
+        if !is_age_recipient(&key) {
+            reporter.error("the runner key override is not a valid age recipient (age1…)");
+            return None;
+        }
+        return Some(RunnerKey {
+            recipient: key,
+            key_id: None,
+        });
+    }
+
+    let Some(session) = crate::auth::Session::load() else {
+        reporter.warning("not signed in, so the remote build runner key could not be fetched");
+        reporter.help("run `peko login`, or pass --runner-key <age1…>");
+        return None;
+    };
+    let id_token = match crate::auth::fresh_id_token(&session).await {
+        Ok(token) => token,
+        Err(e) => {
+            reporter.warning(format!(
+                "could not refresh the session for the runner key: {e}"
+            ));
+            return None;
+        }
+    };
+    let base = crate::auth::platform_base(cli_info.flags.get_flag("base"));
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("peko-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let response = match http
+        .get(format!("{base}/api/deploy/runner-key"))
+        .bearer_auth(&id_token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            reporter.warning(format!("could not reach the runner-key registry: {e}"));
+            return None;
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        reporter.warning("no build runner key is registered with the platform");
+        reporter.help(
+            "an admin must register the build Mac's key at app.pekoui.com/admin/runner-key, or pass --runner-key <age1…>",
+        );
+        return None;
+    }
+    if !response.status().is_success() {
+        let failure = crate::auth::explain_failure(response).await;
+        reporter.warning(failure.message);
+        if let Some(help) = failure.help {
+            reporter.help(help);
+        }
+        return None;
+    }
+    let key = match response.json::<RunnerKeyResponse>().await {
+        Ok(key) => key,
+        Err(e) => {
+            reporter.warning(format!("could not read the runner key: {e}"));
+            return None;
+        }
+    };
+    if !is_age_recipient(&key.public_key) {
+        reporter
+            .warning("the platform returned a malformed runner key, so nothing was sealed to it");
+        return None;
+    }
+    Some(RunnerKey {
+        recipient: key.public_key,
+        key_id: key.key_id,
+    })
+}
+
 /// Directory names excluded when packaging the app source for a remote build:
 /// the Peko cache/keys, build output, installed dependencies, VCS metadata, and
 /// framework build caches. The runner reinstalls dependencies and rebuilds.
@@ -452,22 +729,21 @@ fn copy_source_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Run one `peko build` as a subprocess, reusing all build, bundle, and signing
-/// logic. Streams the build's output to the terminal.
-fn run_build(exe: &Path, root: &Path, os: &OperatingSystem, kind: BuildKind) -> Result<(), String> {
-    let status = Command::new(exe)
-        .arg("build")
-        .arg(kind.flag())
-        .arg("--platform")
-        .arg(os.to_string())
-        .current_dir(root)
-        .status()
-        .map_err(|e| format!("could not launch peko build: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("peko build exited with {status}"))
-    }
+/// Run one build in-process, reusing all build, bundle, and signing logic via
+/// `build::execute` with a derived flag set (the demo/release kind and a single
+/// `--platform`). Returns `true` on success. The working directory is already
+/// the project root, which `execute` builds from.
+async fn run_build(
+    cli_info: &CLIInfo,
+    os: &OperatingSystem,
+    kind: BuildKind,
+    reporter: &Reporter,
+) -> bool {
+    let mut flags = crate::cli::data_structures::Flags::default();
+    flags.set_flag(kind.flag_name(), None::<String>);
+    flags.set_flag("platform", Some(os.to_string()));
+    let build_cli = cli_info.with_flags(flags);
+    crate::commands::build::execute(&build_cli, reporter).await == ExitCode::SUCCESS
 }
 
 /// Recursively copy a directory tree. Errors if the source is missing.
@@ -711,6 +987,21 @@ async fn push_bundle(
 async fn request_error(context: &str, status: u16, response: reqwest::Response) -> String {
     let body = response.text().await.unwrap_or_default();
     let trimmed = body.trim();
+    // Every authenticated route sits behind the platform's legal gate, which
+    // answers before the handler runs. It shares status 403 with an unverified
+    // email, so it is recognized by `code` and explained plainly — otherwise it
+    // reads as an unrelated permission failure.
+    if serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|body| body.get("code")?.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("legal_required")
+    {
+        return format!(
+            "{context}: the Peko terms have been updated. Sign in at {} and accept them, then re-run this command.",
+            crate::auth::platform_base(None)
+        );
+    }
     if trimmed.is_empty() {
         format!("{context} (HTTP {status})")
     } else {
@@ -745,4 +1036,36 @@ fn confirm(assume_yes: bool, prompt: &str, default: bool) -> bool {
         .default(default)
         .interact()
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_well_formed_age_recipients() {
+        // The key actually registered for the build Mac.
+        assert!(is_age_recipient(
+            "age1s0a0rh236mx3qzws8zvvft90w6lmpye5l2drp6w8sj0tgajdmpzs5u96kv"
+        ));
+        // A freshly generated one, whatever it happens to be.
+        let (public, secret) = crate::deploy_seal::generate_runner_key();
+        assert!(is_age_recipient(&public));
+        // The secret half must never be accepted as a recipient.
+        assert!(!is_age_recipient(&secret));
+        assert!(!is_age_recipient(""));
+        assert!(!is_age_recipient("age1"));
+        assert!(!is_age_recipient("age1short"));
+        // Uppercase and separators are outside the bech32 charset.
+        assert!(!is_age_recipient(
+            "age1S0A0RH236MX3QZWS8ZVVFT90W6LMPYE5L2DRP6W8SJ0TGAJDMPZS5U96KV"
+        ));
+        assert!(!is_age_recipient(
+            "age1s0a0rh236mx3qzws8zvvft90w6lmpye5l2drp6w8sj0tgajdmpzs5u96k-"
+        ));
+        // Right shape, wrong prefix.
+        assert!(!is_age_recipient(
+            "AGE-SECRET-KEY-1QQPQYQ5QVQGQGPQYQ5QVQGQGPQYQ5QVQGQGPQYQ5QVQGQGPQ"
+        ));
+    }
 }

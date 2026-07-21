@@ -28,12 +28,14 @@ pub fn resolve_toolchain(
     manifest: &InstallManifest,
     os: OperatingSystem,
     arch: Architecture,
+    simulator: bool,
 ) -> Result<ResolvedToolchain, ToolchainError> {
-    let dir_id = toolchain_dir_id(os, arch).ok_or_else(|| ToolchainError::Unsupported {
-        target: format!("{}/{}", os.name(), arch.name()),
-    })?;
+    let dir_id =
+        toolchain_dir_id(os, arch, simulator).ok_or_else(|| ToolchainError::Unsupported {
+            target: format!("{}/{}", os.name(), arch.name()),
+        })?;
 
-    if !manifest.is_installed(os, arch) {
+    if !manifest.is_installed(os, arch, simulator) {
         return Err(ToolchainError::NotInstalled {
             id: dir_id.to_owned(),
         });
@@ -68,5 +70,6 @@ pub fn resolve_for_target(
         &manifest,
         target.operating_system,
         target.architecture,
+        target.simulator,
     )
 }

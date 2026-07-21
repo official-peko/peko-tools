@@ -259,7 +259,11 @@ pub(crate) fn prebuilt_dependencies(
 /// The roots of every package whose native sources the build links: the
 /// project, the in-repo `std` override, and each locked dependency. Duplicate
 /// roots are removed.
-fn reachable_package_roots(peko_root: &Path, project_root: &Path, demo: bool) -> Vec<PathBuf> {
+pub(crate) fn reachable_package_roots(
+    peko_root: &Path,
+    project_root: &Path,
+    demo: bool,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     let mut std_resolved = false;

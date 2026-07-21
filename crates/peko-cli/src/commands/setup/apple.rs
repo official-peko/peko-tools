@@ -42,7 +42,9 @@ fn sdk_path(sdk: &str) -> Result<String> {
 }
 
 /// Symlink the resolved SDKs into the macOS and iOS toolchain directories, where
-/// the toolchain descriptors reference them by name (MacOSX.sdk / iPhoneOS.sdk).
+/// the toolchain descriptors reference them by name (MacOSX.sdk / iPhoneOS.sdk /
+/// iPhoneSimulator.sdk). iOS arm64 splits into a device toolchain (iPhoneOS SDK)
+/// and a simulator toolchain (iPhoneSimulator SDK); x86_64 iOS is simulator-only.
 #[cfg(target_os = "macos")]
 pub fn symlink(layout: &Layout, paths: &AppleSdkPaths) -> Result<()> {
     use std::os::unix::fs::symlink as unix_symlink;
@@ -57,8 +59,16 @@ pub fn symlink(layout: &Layout, paths: &AppleSdkPaths) -> Result<()> {
             paths.macos.as_str(),
         ),
         (
-            layout.toolchain_dir("ios/arm64").join("iPhoneOS.sdk"),
+            layout
+                .toolchain_dir("ios/arm/device")
+                .join("iPhoneOS.sdk"),
             paths.ios_device.as_str(),
+        ),
+        (
+            layout
+                .toolchain_dir("ios/arm/simulator")
+                .join("iPhoneSimulator.sdk"),
+            paths.ios_sim.as_str(),
         ),
         (
             layout.toolchain_dir("ios/x86_64").join("iPhoneOS.sdk"),

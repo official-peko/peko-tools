@@ -33,11 +33,14 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // clangflags takes only os/arch; for iOS arm it reports the device toolchain
+    // (the simulator's flags differ only in the SDK sysroot).
     let resolved = match resolve_toolchain(
         peko_root,
         &manifest,
         target_operating_system,
         target_architecture,
+        false,
     ) {
         Ok(resolved) => resolved,
         Err(e) => {

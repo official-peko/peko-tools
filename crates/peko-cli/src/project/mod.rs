@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use derive_new::new;
 use image::{DynamicImage, EncodableLayout};
-use peko_core::config::{ConfigError, Icon, LoadedManifest, Manifest, Project, Ui};
+use peko_core::config::{ConfigError, Icon, LoadedManifest, Manifest, Project, Ui, Windows};
 use peko_core::target::OperatingSystem;
 use thiserror::Error;
 
@@ -834,6 +834,13 @@ pub struct UIProjectInfo {
     pub android_foreground: Option<ProjectIcon>,
     /// The Android adaptive-icon background layer.
     pub android_background: Option<ProjectIcon>,
+    /// The Windows Store identity name (`[windows].identity_name`), required to
+    /// emit the release MSIX. Absent until the project declares it.
+    pub windows_identity_name: Option<String>,
+    /// The Windows Store publisher id (`[windows].publisher`, e.g. `CN=...`).
+    pub windows_publisher: Option<String>,
+    /// The Windows Store publisher display name (`[windows].publisher_display_name`).
+    pub windows_publisher_display_name: Option<String>,
 }
 
 impl UIProjectInfo {
@@ -976,7 +983,13 @@ impl PekoProject {
 
         let ui_project_info = match &loaded.manifest {
             Manifest::Application(app) => match &app.ui {
-                Some(ui) => Some(build_ui_info(&root, &app.project, ui, app.icon.as_ref())?),
+                Some(ui) => Some(build_ui_info(
+                    &root,
+                    &app.project,
+                    ui,
+                    app.icon.as_ref(),
+                    app.windows.as_deref(),
+                )?),
                 None => None,
             },
             Manifest::Package(_) => None,
@@ -1018,6 +1031,7 @@ fn build_ui_info(
     project: &Project,
     ui: &Ui,
     icon_config: Option<&Icon>,
+    windows: Option<&Windows>,
 ) -> Result<UIProjectInfo, ProjectError> {
     // A configured icon path that no longer exists falls back rather than
     // failing the whole project load: the icon is regenerated on the next save,
@@ -1076,6 +1090,9 @@ fn build_ui_info(
         ui.height,
         android_foreground,
         android_background,
+        windows.and_then(|w| w.identity_name.clone()),
+        windows.and_then(|w| w.publisher.clone()),
+        windows.and_then(|w| w.publisher_display_name.clone()),
     ))
 }
 

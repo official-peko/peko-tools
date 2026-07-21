@@ -116,8 +116,8 @@ impl InstallManifest {
     /// The installed list mixes granularities (`macos/arm64` but a single
     /// `ios`), so a target matches either its directory id or the bare
     /// operating-system name.
-    pub fn is_installed(&self, os: OperatingSystem, arch: Architecture) -> bool {
-        match super::toolchain_dir_id(os, arch) {
+    pub fn is_installed(&self, os: OperatingSystem, arch: Architecture, simulator: bool) -> bool {
+        match super::toolchain_dir_id(os, arch, simulator) {
             Some(dir_id) => self
                 .toolchains
                 .installed
@@ -129,12 +129,19 @@ impl InstallManifest {
 
     /// The Apple SDK path for a target, when one is recorded.
     ///
-    /// macOS uses the macOS SDK; an iOS device uses the device SDK; the iOS
-    /// simulator (x86_64) uses the simulator SDK.
-    pub fn apple_sdk_for(&self, os: OperatingSystem, arch: Architecture) -> Option<&Path> {
+    /// macOS uses the macOS SDK; an iOS device build uses the device SDK; an iOS
+    /// simulator build (x86_64, or arm64 when `simulator`) uses the simulator SDK.
+    pub fn apple_sdk_for(
+        &self,
+        os: OperatingSystem,
+        arch: Architecture,
+        simulator: bool,
+    ) -> Option<&Path> {
         match (os, arch) {
             (OperatingSystem::MacOS, _) => self.apple_sdks.macos.as_deref(),
-            (OperatingSystem::IOS, Architecture::Arm) => self.apple_sdks.ios_device.as_deref(),
+            (OperatingSystem::IOS, Architecture::Arm) if !simulator => {
+                self.apple_sdks.ios_device.as_deref()
+            }
             (OperatingSystem::IOS, _) => self.apple_sdks.ios_sim.as_deref(),
             _ => None,
         }

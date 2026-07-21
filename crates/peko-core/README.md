@@ -80,7 +80,7 @@ In practice: if `peko_core` returns `Err`, the toolchain has a problem. If `peko
 
 ## Stability
 
-This crate is at version `0.1.0` and is consumed solely by the Pekoscript toolchain (`peko_llvm`, the `peko` CLI, the language server, and the editor extensions maintained by the Peko team). The public API may change without notice between point releases — there is no commitment to semver compatibility yet. The crate is published as source-available primarily so that external users can inspect, audit, and build it themselves; it is not designed as a general-purpose library for embedding into unrelated projects.
+This crate is at version `0.1.0` and is consumed solely by the Pekoscript toolchain (`peko_llvm`, the `peko` CLI, the language server, and the editor extensions maintained by the Peko team). The public API may change without notice between point releases — there is no commitment to semver compatibility yet. The crate is published primarily so that external users can inspect, audit, and build it themselves; it is not designed as a general-purpose library for embedding into unrelated projects.
 
 * **Rust edition**: 2021.
 * **MSRV**: not pinned. The crate currently builds on recent stable Rust; older versions may also work but are not tested.
@@ -88,14 +88,10 @@ This crate is at version `0.1.0` and is consumed solely by the Pekoscript toolch
 
 ## Contributing
 
-This crate is maintained by the Peko team and does not accept direct code contributions. If you've found a bug or have a feature request, please report it through the Peko website's contact form at [pekoui.com/contact](https://pekoui.com/contact).
+Contributions are welcome. See [CONTRIBUTING.md](../../CONTRIBUTING.md) in the project root for the development setup, the checks a change has to pass, and the pull request process. For anything larger than a small fix, open an issue first.
 
 ## License
 
-This project is licensed under the **Peko Source-Available License v1.0 (PSAL-1.0)** — a source-available license with the following terms:
-
-* **Non-commercial users** may download, build, and use the toolchain. The source is provided for inspection, auditing, and local builds.
-* **Commercial use** requires a separate license agreement with the Peko team.
-* **Modification and redistribution** (commercial or otherwise) are reserved to the Peko team. External users may not fork, patch, or redistribute the source or any derivative of it.
+This project is licensed under the **MIT License** — you may use, modify, and redistribute it, commercially or otherwise, provided the copyright notice and permission notice are retained.
 
 See the [LICENSE](LICENSE) file in the project root for the full terms.

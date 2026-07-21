@@ -5,9 +5,9 @@ members = ["crates/*"]
 [workspace.package]
 version = "2.0.0"
 edition = "2024"
-license = "LicenseRef-PSAL-1.0"
+license = "MIT"
 authors = ["Peko UI Technologies LLC"]
-repository = "https://github.com/peko-lang/peko"
+repository = "https://github.com/official-peko/peko-tools"
 
 [workspace.dependencies]
 peko-core = { version = "2.0.0", path = "crates/peko-core" }

@@ -85,13 +85,33 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
 /// Vite config writes into `assets/`, which the platform bundlers then embed.
 /// A project without a `package.json` is left as-is, so a hand-authored
 /// `assets/` still works.
-pub(crate) fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> Result<(), ExitCode> {
+pub(crate) fn build_web_frontend(
+    project: &PekoProject,
+    peko_root: &std::path::Path,
+    web_dist: Option<&std::path::Path>,
+    reporter: &Reporter,
+) -> Result<(), ExitCode> {
     let root = project.get_root();
     if !root.join("package.json").is_file() {
         return Ok(());
     }
 
-    if !root.join("node_modules").is_dir() {
+    // A remote build (a Mac with no node) supplies the frontend the dev machine
+    // already built: substitute it into `assets/` and skip npm entirely.
+    if let Some(web_dist) = web_dist {
+        reporter.status("Building", "web app (prebuilt, from the deploy bundle)");
+        if let Err(e) = replace_dir(web_dist, &root.join("assets")) {
+            reporter.error(format!("could not install the prebuilt web frontend: {e}"));
+            return Err(ExitCode::FAILURE);
+        }
+        return Ok(());
+    }
+
+    // Deliver each registry package's client npm package (`[client]`) into this
+    // app's web frontend and register a file: dependency, before installing.
+    let deps_changed = wire_client_dependencies(root, peko_root, reporter)?;
+
+    if deps_changed || !root.join("node_modules").is_dir() {
         reporter.status("Installing", "web dependencies (npm install)");
         match crate::proc::npm()
             .arg("install")
@@ -128,9 +148,122 @@ pub(crate) fn build_web_frontend(project: &PekoProject, reporter: &Reporter) -> 
     }
 }
 
+/// Deliver the client npm package (`[client]`) of every reachable registry
+/// package into this app's web frontend: extract its files under
+/// `.peko/client/<pkg>/` and register a `file:` dependency for it in the app's
+/// package.json. This is the official replacement for hand-vendored client SDKs
+/// (the old `sync-*` scripts). Runs on every build (self-healing); npm symlinks
+/// the file: dep, so re-copied files are picked up without a reinstall. Returns
+/// whether package.json changed (a new/changed dep needs a fresh npm install).
+fn wire_client_dependencies(
+    project_root: &std::path::Path,
+    peko_root: &std::path::Path,
+    reporter: &Reporter,
+) -> Result<bool, ExitCode> {
+    use peko_core::config::Manifest;
+
+    // demo = true: a client JS import is a web-build concern independent of the
+    // native demo gate, so wire every client dep (including demo-only ones like
+    // pekoshots) so the frontend that imports it always resolves.
+    let mut wired: Vec<(String, String)> = Vec::new();
+    for root in execution::native::reachable_package_roots(peko_root, project_root, true) {
+        let loaded = match Manifest::load(root.join("peko.toml")) {
+            Ok(loaded) => loaded,
+            Err(_) => continue,
+        };
+        let Manifest::Package(pkg) = &loaded.manifest else {
+            continue;
+        };
+        let Some(client) = &pkg.client else {
+            continue;
+        };
+        let src = loaded.root.join(&client.root);
+        if !src.is_dir() {
+            continue;
+        }
+        let dest_rel = format!(".peko/client/{}", pkg.package.name);
+        if let Err(e) = replace_dir(&src, &project_root.join(&dest_rel)) {
+            reporter.error(format!(
+                "could not stage client package {}: {e}",
+                client.name
+            ));
+            return Err(ExitCode::FAILURE);
+        }
+        wired.push((client.name.clone(), dest_rel));
+    }
+    if wired.is_empty() {
+        return Ok(false);
+    }
+    let changed = match register_client_deps(&project_root.join("package.json"), &wired) {
+        Ok(changed) => changed,
+        Err(e) => {
+            reporter.error(format!("could not register client deps in package.json: {e}"));
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    reporter.status(
+        "Linking",
+        format!("{} client package(s) from the registry", wired.len()),
+    );
+    Ok(changed)
+}
+
+/// Recursively copy `src` onto `dest`, clearing `dest` first.
+fn replace_dir(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if dest.exists() {
+        std::fs::remove_dir_all(dest)?;
+    }
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            replace_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Point a `file:` dependency at each `(npm name, relative path)`, preserving
+/// the rest of package.json. Returns whether anything changed.
+fn register_client_deps(
+    package_json: &std::path::Path,
+    deps: &[(String, String)],
+) -> std::io::Result<bool> {
+    let invalid = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
+    let text = std::fs::read_to_string(package_json)?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| invalid(&e.to_string()))?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| invalid("package.json is not an object"))?;
+    let table = obj
+        .entry("dependencies")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()))
+        .as_object_mut()
+        .ok_or_else(|| invalid("dependencies is not an object"))?;
+    let mut changed = false;
+    for (name, rel) in deps {
+        let want = serde_json::Value::String(format!("file:{rel}"));
+        if table.get(name) != Some(&want) {
+            table.insert(name.clone(), want);
+            changed = true;
+        }
+    }
+    if changed {
+        let mut out = serde_json::to_string_pretty(&value).map_err(|e| invalid(&e.to_string()))?;
+        out.push('\n');
+        std::fs::write(package_json, out)?;
+    }
+    Ok(changed)
+}
+
 /// Wipe the per-mode output build directory (e.g. `build/debug/`) so
-/// stale artifacts from previous builds don't leak across runs. Called
-/// at the start of every build pass.
+/// stale artifacts from previous builds don't leak across runs. Used for a CLI
+/// project, whose single host binary is the only output.
 fn nuke_output_directory(build_directory: &std::path::Path) -> std::io::Result<()> {
     if build_directory.exists() {
         if build_directory.is_dir() {
@@ -140,6 +273,28 @@ fn nuke_output_directory(build_directory: &std::path::Path) -> std::io::Result<(
         }
     }
     std::fs::create_dir_all(build_directory)
+}
+
+/// Remove only the given platforms' output subdirectories under `build/<mode>`
+/// (e.g. `build/debug/windows`), leaving other platforms' outputs untouched. A
+/// UI build cleans per platform rather than wiping the whole mode directory so a
+/// multi-platform `peko deploy` — which invokes `peko build --platform X` once
+/// per platform into the same tree — accumulates every platform's output for the
+/// bundle instead of each build erasing the last.
+fn clean_platform_outputs(
+    build_directory: &std::path::Path,
+    platforms: &[OperatingSystem],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(build_directory)?;
+    for platform in platforms {
+        let platform_dir = build_directory.join(platform.to_string());
+        if platform_dir.is_dir() {
+            std::fs::remove_dir_all(&platform_dir)?;
+        } else if platform_dir.exists() {
+            std::fs::remove_file(&platform_dir)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build a "CLI" project (no `ui_project_info`): a single host binary
@@ -234,7 +389,36 @@ fn build_ui_project(
 
     reporter.status("Building", format!("{} (UI project)", project.name));
 
-    if let Err(e) = nuke_output_directory(&build_directory) {
+    // Resolve the platforms to build first, so the output clean can remove only
+    // their directories. `peko deploy` builds each platform in its own
+    // `peko build --platform X` invocation into the shared build/<mode> tree;
+    // wiping the whole tree per platform would delete the previous platforms'
+    // outputs and leave nothing for the deploy bundle to collect.
+    let platforms = match cli_info.flags.get_flag("platform") {
+        Some(requested) => match parse_platform(&requested) {
+            Some(os) => vec![os],
+            None => {
+                reporter.error(format!(
+                    "unknown platform '{requested}'; expected android, ios, linux, macos, or windows"
+                ));
+                return ExitCode::FAILURE;
+            }
+        },
+        None => project.ui_project_info.as_ref().unwrap().platforms.clone(),
+    };
+
+    // Validate the platform list up front so an unsupported OS is caught before
+    // any work.
+    for platform in &platforms {
+        if platform_label(platform).is_none() {
+            reporter.error("project's target_platforms contains an unsupported operating system");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Clean only the directories for the platforms this build produces, leaving
+    // any other platforms' outputs in build/<mode> in place.
+    if let Err(e) = clean_platform_outputs(&build_directory, &platforms) {
         reporter.error(format!(
             "could not prepare build directory {}: {e}",
             build_directory.display()
@@ -248,7 +432,16 @@ fn build_ui_project(
         .ui_project_info
         .as_ref()
         .is_some_and(|ui| ui.framework == "static")
-        && let Err(code) = build_web_frontend(&project, reporter)
+        && let Err(code) = build_web_frontend(
+            &project,
+            cli_info.get_peko_root(),
+            cli_info
+                .flags
+                .get_flag("web-dist")
+                .as_deref()
+                .map(std::path::Path::new),
+            reporter,
+        )
     {
         return code;
     }
@@ -288,31 +481,8 @@ fn build_ui_project(
         return ExitCode::FAILURE;
     }
 
-    // For each declared platform: bundle, then sign if --release. A
-    // --platform flag overrides the project's declared list with a single
-    // platform.
-    let platforms = match cli_info.flags.get_flag("platform") {
-        Some(requested) => match parse_platform(&requested) {
-            Some(os) => vec![os],
-            None => {
-                reporter.error(format!(
-                    "unknown platform '{requested}'; expected android, ios, linux, macos, or windows"
-                ));
-                return ExitCode::FAILURE;
-            }
-        },
-        None => project.ui_project_info.as_ref().unwrap().platforms.clone(),
-    };
-
-    // Validate platform list up front so we catch OperatingSystem::Unknown
-    // before we start any work.
-    for platform in &platforms {
-        if platform_label(platform).is_none() {
-            reporter.error("project's target_platforms contains an unsupported operating system");
-            return ExitCode::FAILURE;
-        }
-    }
-
+    // For each platform (resolved and validated above): bundle, then sign if
+    // --release.
     let progress = reporter.progress();
     progress.start_phase(&format!("Building {}", project.name));
     // Don't set_total upfront, the bundlers call into

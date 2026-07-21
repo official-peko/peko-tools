@@ -40,6 +40,7 @@ pub mod cartool;
 pub mod ios;
 pub mod linux;
 pub mod macos;
+pub mod msix;
 pub mod signing;
 pub mod windows;
 
@@ -150,6 +151,31 @@ pub(crate) fn copy_project_assets(project: &PekoProject, dest_root: &Path) -> Bu
     }
 
     Ok(())
+}
+
+/// Attribution for the third-party native code compiled into every app Peko
+/// builds (BearSSL, webview, the Android glue). Embedded in the CLI so a build
+/// never depends on the source tree being present.
+///
+/// Deliberately NOT the toolchain's own `THIRD-PARTY-NOTICES.txt`: the CLI's
+/// Rust dependencies are not linked into a built app, and claiming otherwise
+/// would misattribute the app.
+pub(crate) const APP_NOTICES: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../NOTICE-app.txt"));
+
+/// The file name the notices are written under inside an app bundle.
+pub(crate) const APP_NOTICES_FILE: &str = "OPEN-SOURCE-NOTICES.txt";
+
+/// Write the third-party notices into a built app at `dest_root`.
+///
+/// The licenses of the native code Peko links into an app (MIT for BearSSL and
+/// webview, Apache-2.0 for the Android glue) require the notice accompany the
+/// binary. The app's author is the one distributing it and generally has no way
+/// to know what is linked in, so the bundler includes it on their behalf.
+pub(crate) fn write_app_notices(dest_root: &Path) -> BundleResult<()> {
+    io_at(dest_root, fs::create_dir_all(dest_root))?;
+    let dest = dest_root.join(APP_NOTICES_FILE);
+    io_at(&dest, fs::write(&dest, APP_NOTICES))
 }
 
 /// Run an external tool to completion, checking both that it could be
@@ -338,6 +364,7 @@ const IOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
     </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
@@ -459,6 +486,7 @@ const MACOS_INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
     </dict>
     <key>DTPlatformName</key><string>macosx</string>
     <key>DTSDKName</key><string>macosx26.2</string>
@@ -694,4 +722,51 @@ pub fn regenerate_application_bundle_files(project: &PekoProject) -> BundleResul
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    /// The app notices are hand-maintained, so they can silently fall out of
+    /// step with the native code actually linked into an app. This pins the
+    /// components currently vendored under `toolkit/`; adding another native
+    /// dependency should fail here until it is attributed.
+    #[test]
+    fn app_notices_cover_every_linked_native_component() {
+        for required in [
+            "BearSSL",
+            "Thomas Pornin",
+            "webview",
+            "Serge Zaitsev",
+            "Steffen André Langnes",
+            "Android Open Source Project",
+            "Apache License",
+        ] {
+            assert!(
+                APP_NOTICES.contains(required),
+                "NOTICE-app.txt is missing attribution for {required}"
+            );
+        }
+    }
+
+    /// An app links none of the CLI's Rust dependencies, so pulling the
+    /// toolchain's notices into an app bundle would misattribute it.
+    #[test]
+    fn app_notices_are_not_the_toolchain_notices() {
+        assert!(!APP_NOTICES.contains("cargo about"));
+        assert!(
+            APP_NOTICES.len() < 50_000,
+            "app notices look like the full toolchain set"
+        );
+    }
+
+    #[test]
+    fn writes_notices_into_a_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("Resources");
+        write_app_notices(&dest).unwrap();
+        let written = std::fs::read_to_string(dest.join(APP_NOTICES_FILE)).unwrap();
+        assert!(written.contains("BearSSL"));
+    }
 }

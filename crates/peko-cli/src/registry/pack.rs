@@ -56,6 +56,24 @@ pub fn pack_prebuilt(
                 path: prebuilt_dir.to_path_buf(),
                 source,
             })?;
+        // The client npm package the library ships (`[client]`), if any, at its
+        // declared path — so a consuming app wires it into its web frontend
+        // exactly as it would for a from-source package (whose source tree
+        // already carries it).
+        if let peko_core::config::Manifest::Package(pkg) = &loaded.manifest
+            && let Some(client) = &pkg.client
+        {
+            let client_dir = loaded.root.join(&client.root);
+            if client_dir.is_dir() {
+                let rel = client.root.to_string_lossy().replace('\\', "/");
+                builder
+                    .append_dir_all(&rel, &client_dir)
+                    .map_err(|source| RegistryError::Io {
+                        path: client_dir.clone(),
+                        source,
+                    })?;
+            }
+        }
         builder.finish().map_err(|source| RegistryError::Io {
             path: prebuilt_dir.to_path_buf(),
             source,

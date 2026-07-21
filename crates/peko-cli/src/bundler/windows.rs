@@ -15,7 +15,7 @@ use std::process::Command;
 
 use peko_core::target::{Architecture, OperatingSystem, PekoTarget};
 
-use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, run_tool, signing};
+use crate::bundler::{BundleError, BundleResult, CleanupGuard, io_at, msix, run_tool, signing};
 use crate::cli::CLIInfo;
 use crate::cli::reporting::ProgressSink;
 use crate::execution;
@@ -232,6 +232,11 @@ pub fn bundle(
     io_at(&resource_file, fs::remove_file(&resource_file))?;
     io_at(&resource_output, fs::remove_file(&resource_output))?;
 
+    // Third-party attribution for the native code linked into the app. Windows
+    // embeds assets as link-time resources, so this sits beside the .exe where
+    // the MSIX packer picks it up with the rest of the payload.
+    crate::bundler::write_app_notices(&windows_build_directory)?;
+
     guard.commit();
     Ok(())
 }
@@ -243,17 +248,12 @@ pub fn bundle(
 /// is left in place. When a key is registered and the tool is present,
 /// the executable is signed with the registered PKCS#12 certificate.
 pub fn sign(
-    _cli_info: &CLIInfo,
+    cli_info: &CLIInfo,
     project: &PekoProject,
     windows_build_directory: PathBuf,
 ) -> BundleResult<signing::OptionalSignOutcome> {
     let Some(ui_info) = project.ui_project_info.as_ref() else {
         return Ok(signing::OptionalSignOutcome::NoKey);
-    };
-
-    let key = match signing::resolve_windows(project.get_root(), &ui_info.bundle_id)? {
-        Some(key) => key,
-        None => return Ok(signing::OptionalSignOutcome::NoKey),
     };
 
     let exe = windows_build_directory.join(format!("{}.exe", project.name));
@@ -264,8 +264,99 @@ pub fn sign(
         )));
     }
 
-    // The pure-Rust Authenticode signer needs no external tool; osslsigncode is
-    // only a fallback inside sign_windows_exe.
-    signing::sign_windows_exe(&exe, &key)?;
-    Ok(signing::OptionalSignOutcome::Signed)
+    // Authenticode-sign the .exe first (optional), so the copy packed into the
+    // MSIX carries the signature. The pure-Rust signer needs no external tool;
+    // osslsigncode is only a fallback inside sign_windows_exe.
+    let outcome = match signing::resolve_windows(cli_info, project.get_root(), &ui_info.bundle_id)?
+    {
+        Some(key) => {
+            signing::sign_windows_exe(&exe, &key)?;
+            signing::OptionalSignOutcome::Signed
+        }
+        None => signing::OptionalSignOutcome::NoKey,
+    };
+
+    // A release build always emits the Store MSIX alongside the .exe. This
+    // validates the required [windows] identity keys and errors if any is
+    // absent (sign runs only for release builds).
+    write_store_msix(project, ui_info, &windows_build_directory, &exe)?;
+
+    Ok(outcome)
+}
+
+/// Package the built `.exe` into an unsigned Store MSIX beside it. Errors when
+/// the `[windows]` identity keys the package needs are missing from the manifest.
+fn write_store_msix(
+    project: &PekoProject,
+    ui_info: &crate::project::UIProjectInfo,
+    windows_build_directory: &std::path::Path,
+    exe: &std::path::Path,
+) -> BundleResult<()> {
+    // The three Store identity values come from Partner Center and cannot be
+    // derived, so require them explicitly and name any that are missing.
+    let mut missing = Vec::new();
+    let identity_name = ui_info
+        .windows_identity_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let publisher = ui_info
+        .windows_publisher
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let publisher_display = ui_info
+        .windows_publisher_display_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    if identity_name.is_none() {
+        missing.push("identity_name");
+    }
+    if publisher.is_none() {
+        missing.push("publisher");
+    }
+    if publisher_display.is_none() {
+        missing.push("publisher_display_name");
+    }
+    if !missing.is_empty() {
+        return Err(BundleError::Signing(format!(
+            "a Windows release build packages a Microsoft Store MSIX, which needs a [windows] \
+             table in peko.toml; missing key(s): {}. Add (values are from Partner Center):\n\n\
+             [windows]\n\
+             identity_name = \"Publisher.AppName\"\n\
+             publisher = \"CN=...\"\n\
+             publisher_display_name = \"Your Publisher Name\"",
+            missing.join(", ")
+        )));
+    }
+
+    let exe_name = format!("{}.exe", project.name);
+    let exe_bytes = io_at(exe, fs::read(exe))?;
+
+    // Store logos, resized from the project's Windows icon into PNGs.
+    let icon = ui_info.icon_for(OperatingSystem::Windows);
+    let png = |width: u32, height: u32| -> Vec<u8> {
+        let mut buffer = Vec::new();
+        icon.resize(width, height)
+            .to_png(&mut std::io::Cursor::new(&mut buffer));
+        buffer
+    };
+
+    let identity = msix::MsixIdentity {
+        identity_name: identity_name.unwrap(),
+        publisher: publisher.unwrap(),
+        publisher_display_name: publisher_display.unwrap(),
+        display_name: &project.name,
+        version: msix::four_part_version(&ui_info.version),
+        executable: &exe_name,
+    };
+    let package = msix::build_package(
+        &identity,
+        exe_bytes,
+        png(50, 50),
+        png(150, 150),
+        png(44, 44),
+    );
+
+    let msix_path = windows_build_directory.join(format!("{}.msix", project.name));
+    io_at(&msix_path, fs::write(&msix_path, package))?;
+    Ok(())
 }

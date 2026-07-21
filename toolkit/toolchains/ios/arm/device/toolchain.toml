@@ -1,10 +1,11 @@
-# Toolchain description for iOS on arm64 (device).
+# Toolchain description for iOS on arm64 (device). Used for release builds,
+# which sign and submit to the App Store.
 #
-# Paths are relative to this file's directory. OpenSSL is shared one level up
-# at ../openssl_libs.
+# Paths are relative to this file's directory. OpenSSL is shared two levels up
+# at ../../openssl_libs (this toolchain now nests under ios/arm/).
 
 [toolchain]
-id = "ios-arm64"
+id = "ios-arm-device"
 target = "ios"
 arch = "arm"
 triple = "arm64-apple-ios"
@@ -20,7 +21,7 @@ driver = "ld64.lld"
 lib_paths = []
 libs = ["objc", "c++", "c"]
 frameworks = ["Security", "Foundation", "UIKit", "CoreGraphics"]
-objects = ["../openssl_libs/libssl.a", "../openssl_libs/libcrypto.a"]
+objects = ["../../openssl_libs/libssl.a", "../../openssl_libs/libcrypto.a"]
 # The two -platform_version values are the minimum and SDK versions.
 flags = [
   "-w",

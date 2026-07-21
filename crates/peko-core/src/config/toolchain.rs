@@ -69,6 +69,12 @@ pub struct ToolchainLink {
     /// Dynamic library sonames copied into the final app bundle, resolved
     /// against the toolchain's `lib` directory.
     pub bundle_dylibs: Vec<String>,
+    /// GIO plugin module filenames copied into the bundle's
+    /// `usr/lib/gio/modules` directory (where `GIO_MODULE_DIR` points),
+    /// resolved against the toolchain's `lib/gio/modules` directory. The TLS
+    /// backend module lives here so a bundled webview can load `https://`
+    /// origins on a host without glib-networking installed.
+    pub gio_modules: Vec<String>,
 }
 
 /// Resolve a flag token against a toolchain directory.
@@ -173,6 +179,8 @@ struct RawLink {
     flags: Vec<String>,
     #[serde(default)]
     bundle_dylibs: Vec<String>,
+    #[serde(default)]
+    gio_modules: Vec<String>,
 }
 
 impl RawToolchain {
@@ -214,6 +222,7 @@ impl RawToolchain {
                 objects: self.link.objects.into_iter().map(PathBuf::from).collect(),
                 flags: self.link.flags,
                 bundle_dylibs: self.link.bundle_dylibs,
+                gio_modules: self.link.gio_modules,
             },
         })
     }

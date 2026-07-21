@@ -11,6 +11,8 @@ pub mod bundler;
 pub mod cli;
 pub mod deploy;
 pub mod deploy_app;
+pub mod deploy_pack;
+pub mod deploy_seal;
 pub mod execution;
 pub mod keychain;
 pub mod proc;

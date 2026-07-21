@@ -63,6 +63,11 @@ pub struct ApplicationManifest {
     /// The `[demo]` table: the demo module for store-asset generation. `None`
     /// means the app declares no demo module.
     pub demo: Option<Demo>,
+    /// The `[windows]` table: Windows Store packaging identity, required to emit
+    /// the release MSIX. `None` means the app declares no Windows identity.
+    /// Boxed to keep the `Application` variant of [`Manifest`] from dwarfing the
+    /// package variant.
+    pub windows: Option<Box<Windows>>,
     /// The `[dependencies]` table.
     pub dependencies: BTreeMap<String, Dependency>,
     /// The `[platforms]` table.
@@ -81,6 +86,8 @@ pub struct PackageManifest {
     pub package: PackageMeta,
     /// The `[lib]` table.
     pub lib: Lib,
+    /// The `[client]` table: a client npm package shipped alongside the library.
+    pub client: Option<Client>,
     /// The `[dependencies]` table.
     pub dependencies: BTreeMap<String, Dependency>,
     /// The `[platforms]` table.
@@ -129,6 +136,24 @@ pub struct Ui {
     pub width: Option<f64>,
     /// The initial window height in pixels. Absent uses the default.
     pub height: Option<f64>,
+}
+
+/// The `[windows]` table: the identity a release build stamps into the MSIX
+/// package for the Microsoft Store. These values come from Partner Center (the
+/// reserved app identity and publisher id) and cannot be derived. Each field is
+/// optional at parse time so a partial table never breaks loading a project that
+/// only builds other platforms; a Windows *release* build requires all three and
+/// errors if any is absent.
+#[derive(Debug, Clone, Default)]
+pub struct Windows {
+    /// `Package/Identity/@Name` — the reserved Store identity name, e.g.
+    /// `Contoso.Todo`.
+    pub identity_name: Option<String>,
+    /// `Package/Identity/@Publisher` — the publisher id, e.g.
+    /// `CN=ABCDEF01-2345-6789-ABCD-EF0123456789`.
+    pub publisher: Option<String>,
+    /// `Properties/PublisherDisplayName` — the human-readable publisher name.
+    pub publisher_display_name: Option<String>,
 }
 
 /// The `[icon]` table: the app-icon pipeline. `source` is a single square PNG
@@ -330,6 +355,18 @@ pub struct PackageMeta {
 #[derive(Debug, Clone)]
 pub struct Lib {
     /// The package root source file, relative to the project root.
+    pub root: PathBuf,
+}
+
+/// The `[client]` table of a package manifest: a client-side npm package the
+/// package ships (e.g. an in-page SDK), delivered through the registry and wired
+/// into a consuming UI app's web frontend at build time.
+#[derive(Debug, Clone)]
+pub struct Client {
+    /// The npm package name apps import, for example `@peko/pekoshots`.
+    pub name: String,
+    /// The client package directory, relative to the package root (holds its
+    /// `package.json` and JS/TS files). Defaults to `client`.
     pub root: PathBuf,
 }
 
@@ -838,8 +875,10 @@ struct RawManifest {
     ui: Option<RawUi>,
     icon: Option<RawIcon>,
     demo: Option<RawDemo>,
+    windows: Option<RawWindows>,
     package: Option<RawPackage>,
     lib: Option<RawLib>,
+    client: Option<RawClient>,
     #[serde(default)]
     dependencies: BTreeMap<String, RawDependency>,
     platforms: Option<RawPlatforms>,
@@ -901,6 +940,14 @@ struct RawDemo {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawWindows {
+    identity_name: Option<String>,
+    publisher: Option<String>,
+    publisher_display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPackage {
     name: String,
     version: String,
@@ -919,6 +966,13 @@ struct RawPackage {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLib {
+    root: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClient {
+    name: String,
     root: Option<String>,
 }
 
@@ -1002,6 +1056,7 @@ impl RawManifest {
             let ui = self.ui.map(|raw| build_ui(raw, source)).transpose()?;
             let icon = self.icon.map(build_icon);
             let demo = self.demo.map(build_demo);
+            let windows = self.windows.map(|raw| Box::new(build_windows(raw)));
 
             if self.lib.is_some() {
                 return Err(ConfigError::invalid(
@@ -1015,6 +1070,7 @@ impl RawManifest {
                 ui,
                 icon,
                 demo,
+                windows,
                 dependencies,
                 platforms,
                 native,
@@ -1038,10 +1094,18 @@ impl RawManifest {
                     .map(PathBuf::from)
                     .unwrap_or_else(default_package_root),
             };
+            let client = self.client.map(|raw| Client {
+                name: raw.name,
+                root: raw
+                    .root
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("client")),
+            });
 
             return Ok(Manifest::Package(PackageManifest {
                 package,
                 lib,
+                client,
                 dependencies,
                 platforms,
                 native,
@@ -1120,6 +1184,16 @@ fn build_icon(raw: RawIcon) -> Icon {
         overrides,
         android_foreground: raw.android_foreground.map(PathBuf::from),
         android_background: raw.android_background.map(PathBuf::from),
+    }
+}
+
+/// Build the `[windows]` table from its raw form. Presence of the individual
+/// keys is enforced only at Windows release build time, not here.
+fn build_windows(raw: RawWindows) -> Windows {
+    Windows {
+        identity_name: raw.identity_name,
+        publisher: raw.publisher,
+        publisher_display_name: raw.publisher_display_name,
     }
 }
 

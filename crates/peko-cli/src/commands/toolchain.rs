@@ -13,17 +13,20 @@ use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
 use crate::toolchain::{InstallManifest, resolve_toolchain};
 
-/// The canonical (os, arch) targets a toolchain can exist for.
-const TARGETS: &[(OperatingSystem, Architecture)] = &[
-    (OperatingSystem::MacOS, Architecture::Arm),
-    (OperatingSystem::MacOS, Architecture::X86_64),
-    (OperatingSystem::IOS, Architecture::Arm),
-    (OperatingSystem::IOS, Architecture::X86_64),
-    (OperatingSystem::Linux, Architecture::Arm),
-    (OperatingSystem::Linux, Architecture::X86_64),
-    (OperatingSystem::Android, Architecture::Arm),
-    (OperatingSystem::Android, Architecture::X86_64),
-    (OperatingSystem::Windows, Architecture::X86_64),
+/// The canonical (os, arch, simulator) targets a toolchain can exist for. iOS
+/// arm64 has both a device and a simulator toolchain; x86_64 iOS is
+/// simulator-only.
+const TARGETS: &[(OperatingSystem, Architecture, bool)] = &[
+    (OperatingSystem::MacOS, Architecture::Arm, false),
+    (OperatingSystem::MacOS, Architecture::X86_64, false),
+    (OperatingSystem::IOS, Architecture::Arm, false),
+    (OperatingSystem::IOS, Architecture::Arm, true),
+    (OperatingSystem::IOS, Architecture::X86_64, true),
+    (OperatingSystem::Linux, Architecture::Arm, false),
+    (OperatingSystem::Linux, Architecture::X86_64, false),
+    (OperatingSystem::Android, Architecture::Arm, false),
+    (OperatingSystem::Android, Architecture::X86_64, false),
+    (OperatingSystem::Windows, Architecture::X86_64, false),
 ];
 
 /// Execute the `toolchain` subcommand.
@@ -69,12 +72,12 @@ fn execute_list(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     println!("toolchains: {}", manifest.toolchains.version);
 
     let mut failures = 0;
-    for &(os, arch) in TARGETS {
-        if !manifest.is_installed(os, arch) {
+    for &(os, arch, simulator) in TARGETS {
+        if !manifest.is_installed(os, arch, simulator) {
             continue;
         }
 
-        match resolve_toolchain(peko_root, &manifest, os, arch) {
+        match resolve_toolchain(peko_root, &manifest, os, arch, simulator) {
             Ok(resolved) => {
                 let toolchain = &resolved.toolchain;
                 println!(

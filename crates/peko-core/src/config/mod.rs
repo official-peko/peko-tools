@@ -30,9 +30,9 @@ pub use container::{
 };
 pub use lock::{LOCKFILE_FILE, LOCKFILE_VERSION, LockSource, LockedPackage, Lockfile};
 pub use manifest::{
-    ApplicationManifest, Demo, Dependency, DependencySpec, Framework, Icon, Lib, LoadedManifest,
-    Manifest, ManifestKind, Native, NativeFlags, NativeLink, PackageManifest, PackageMeta,
-    Platforms, Project, ServerFramework, Ui, Vendor,
+    ApplicationManifest, Client, Demo, Dependency, DependencySpec, Framework, Icon, Lib,
+    LoadedManifest, Manifest, ManifestKind, Native, NativeFlags, NativeLink, PackageManifest,
+    PackageMeta, Platforms, Project, ServerFramework, Ui, Vendor, Windows,
 };
 pub use prebuilt::{
     PREBUILT_DIR, PREBUILT_MANIFEST_FILE, PREBUILT_OBJECTS_DIR, PREBUILT_STUBS_DIR,

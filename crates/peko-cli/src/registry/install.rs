@@ -46,10 +46,7 @@ pub async fn update(
     let mut client = RegistryClient::new(cache)?;
 
     // Attach the login session (best-effort) so gated packages resolve+download.
-    let id_token: Option<String> = match crate::auth::Session::load() {
-        Some(session) => crate::auth::fresh_id_token(&session).await.ok(),
-        None => None,
-    };
+    let id_token: Option<String> = load_id_token().await;
     client.set_id_token(id_token.clone());
     let base = crate::auth::platform_base(None);
     let toolchain = super::gated::toolchain_version();
@@ -128,6 +125,21 @@ pub async fn update(
 /// A project with no dependencies short-circuits without a network request or
 /// a lockfile write. Called at the start of a build so imports resolve against
 /// installed source.
+/// Load and refresh the login session's id token for gated-package access, or
+/// `None` when not signed in. `PEKO_OFFLINE` skips it entirely — no keychain
+/// read (which would block a headless build on a GUI authorization prompt) and
+/// no network — for a hermetic build whose dependencies are all already cached
+/// (e.g. the remote Apple builder building from a self-contained deploy bundle).
+async fn load_id_token() -> Option<String> {
+    if std::env::var_os("PEKO_OFFLINE").is_some() {
+        return None;
+    }
+    match crate::auth::Session::load() {
+        Some(session) => crate::auth::fresh_id_token(&session).await.ok(),
+        None => None,
+    }
+}
+
 pub async fn ensure_dependencies(
     peko_root: &Path,
     project_root: &Path,
@@ -151,10 +163,7 @@ async fn fetch_locked(
 
     // The login session (best-effort) lets the platform serve entitlement-gated
     // proprietary packages; anonymous fetches get only public packages.
-    let id_token: Option<String> = match crate::auth::Session::load() {
-        Some(session) => crate::auth::fresh_id_token(&session).await.ok(),
-        None => None,
-    };
+    let id_token: Option<String> = load_id_token().await;
     client.set_id_token(id_token.clone());
 
     // A gated package is served as one all-platforms bundle for this CLI's exact

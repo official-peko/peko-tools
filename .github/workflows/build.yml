@@ -136,6 +136,10 @@ jobs:
           out="peko-${ver}-${{ matrix.target }}"
           mkdir "$out"
           cp target/release/peko "$out"/
+          # The binary statically links hundreds of third-party components whose
+          # licenses require their notices travel with it, so they ship in the
+          # archive rather than only in the repository.
+          cp LICENSE THIRD-PARTY-NOTICES.txt "$out"/
           tar -C "$out" -cJf "${out}.tar.xz" .
           echo "ASSET=${out}.tar.xz" >> "$GITHUB_ENV"
 
@@ -147,6 +151,8 @@ jobs:
           $out = "peko-$ver-${{ matrix.target }}"
           New-Item -ItemType Directory $out | Out-Null
           Copy-Item target/release/peko.exe $out
+          # See the unix step: the third-party notices must ship with the binary.
+          Copy-Item LICENSE, THIRD-PARTY-NOTICES.txt $out
           Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
           "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 

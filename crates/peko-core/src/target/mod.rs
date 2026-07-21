@@ -131,6 +131,11 @@ pub struct PekoTarget {
     pub operating_system: OperatingSystem,
     pub architecture: Architecture,
     pub console: bool,
+    /// Whether an Apple target builds for the simulator rather than a device.
+    /// Only meaningful for iOS on arm64 (`arm64-apple-ios` device vs
+    /// `arm64-apple-ios-simulator`); x86_64 iOS is always the simulator, and
+    /// non-Apple targets ignore it.
+    pub simulator: bool,
 }
 
 impl PekoTarget {
@@ -145,7 +150,15 @@ impl PekoTarget {
             operating_system,
             architecture,
             console,
+            simulator: false,
         }
+    }
+
+    /// Returns this target with the simulator flag set (see [`Self::simulator`]).
+    #[must_use]
+    pub fn with_simulator(mut self, simulator: bool) -> Self {
+        self.simulator = simulator;
+        self
     }
 
     /// Parses a target description of the form `os-arch` or `os-arch-console`.
@@ -180,11 +193,19 @@ impl PekoTarget {
             return Err(PekoError::InvalidTargetDescriptor(descriptor.to_owned()));
         };
 
+        // A trailing `-simulator` component selects the Apple simulator variant;
+        // any other trailing component enables the console flag (Windows).
+        let simulator = rest.contains(&"simulator");
+        let console = rest
+            .iter()
+            .any(|part| *part != "simulator" && !part.is_empty());
+
         Ok(Self::new(
             OperatingSystem::from_name(os),
             Architecture::from_name(arch),
-            !rest.is_empty(),
-        ))
+            console,
+        )
+        .with_simulator(simulator))
     }
 
     /// Renders this target as an LLVM-style target triple.
@@ -211,6 +232,13 @@ impl PekoTarget {
         };
 
         let os_suffix = match self.operating_system {
+            // The arm64 iOS simulator needs the explicit `-simulator` environment
+            // (arm64-apple-ios is a device); x86_64 iOS is simulator-only, so its
+            // bare triple already resolves to the simulator and stays unsuffixed
+            // to keep prebuilt-object keys stable.
+            OperatingSystem::IOS if self.simulator && self.architecture == Architecture::Arm => {
+                "apple-ios16.4.0-simulator"
+            }
             OperatingSystem::IOS => "apple-ios16.4.0",
             OperatingSystem::Linux => "pc-linux-gnu",
             OperatingSystem::MacOS => "apple-darwin20.6.0",
@@ -251,6 +279,7 @@ impl Default for PekoTarget {
             operating_system,
             architecture,
             console: true,
+            simulator: false,
         }
     }
 }

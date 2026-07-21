@@ -24,7 +24,23 @@ use crate::cli::reporting::Reporter;
 use crate::project::PekoProject;
 
 /// Roles whose password is stored in the keychain for each platform.
+/// Every password role that can be set for a platform (used to validate
+/// `keys set-password --role`). macOS has an optional installer-certificate
+/// password in addition to the app certificate password.
 fn password_roles(platform: &str) -> &'static [&'static str] {
+    match platform {
+        "android" => &["store", "key"],
+        "macos" => &["p12", "installer-p12"],
+        "ios" => &["p12"],
+        "windows" => &["pfx"],
+        _ => &[],
+    }
+}
+
+/// The password roles a platform *requires* to count as fully signed (drives the
+/// "password set / missing" display). Excludes optional roles like the macOS
+/// installer certificate.
+fn required_password_roles(platform: &str) -> &'static [&'static str] {
     match platform {
         "android" => &["store", "key"],
         "ios" | "macos" => &["p12"],
@@ -96,10 +112,22 @@ fn require_platform(cli_info: &CLIInfo, reporter: &Reporter) -> Option<String> {
 
 /// Read a password from `--password` or `--password-file`.
 fn read_password(cli_info: &CLIInfo) -> Option<String> {
-    if let Some(password) = cli_info.flags.get_flag("password") {
+    read_named_password(cli_info, "")
+}
+
+/// Read a password from `--<name>-password` / `--<name>-password-file`, or the
+/// bare `--password` / `--password-file` when `name` is empty. The file form is
+/// preferred so a secret never lands in a process argument list.
+fn read_named_password(cli_info: &CLIInfo, name: &str) -> Option<String> {
+    let prefix = if name.is_empty() {
+        String::new()
+    } else {
+        format!("{name}-")
+    };
+    if let Some(password) = cli_info.flags.get_flag(format!("{prefix}password")) {
         return Some(password);
     }
-    if let Some(path) = cli_info.flags.get_flag("password-file")
+    if let Some(path) = cli_info.flags.get_flag(format!("{prefix}password-file"))
         && let Ok(contents) = std::fs::read_to_string(&path)
     {
         return Some(contents.trim_end_matches(['\n', '\r']).to_string());
@@ -108,6 +136,17 @@ fn read_password(cli_info: &CLIInfo) -> Option<String> {
 }
 
 /// Set a registered file name for a platform role in the registry.
+/// Whether a platform role's file is already recorded in the key registry.
+fn role_registered(registry: &Value, platform: &str, role: &str) -> bool {
+    registry
+        .get("platforms")
+        .and_then(|platforms| platforms.get(platform))
+        .and_then(|entry| entry.get("files"))
+        .and_then(|files| files.get(role))
+        .and_then(|value| value.as_str())
+        .is_some()
+}
+
 fn set_registry_file(registry: &mut Value, platform: &str, role: &str, filename: &str) {
     let root = registry.as_object_mut().expect("registry is an object");
     let platforms = root
@@ -264,24 +303,39 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         _ => &[],
     };
     let optional: &[(&str, &str)] = match platform.as_str() {
-        "ios" | "macos" => &[("entitlements", "entitlements")],
+        "ios" => &[("entitlements", "entitlements")],
+        // macOS App Store submission needs a *separate* Mac Installer
+        // Distribution certificate to sign the `.pkg` (the app cert signs the
+        // `.app`). It is optional: without it the `.pkg` is left unsigned.
+        "macos" => &[
+            ("entitlements", "entitlements"),
+            ("installer-cert", "installer-p12"),
+        ],
         _ => &[],
     };
 
     for (flag, role) in required {
-        let Some(path) = cli_info.flags.get_flag(flag) else {
-            reporter.error(format!("`--{flag}` is required for {platform} keys"));
-            return ExitCode::FAILURE;
-        };
-        if !install_file(
-            reporter,
-            root,
-            &platform,
-            role,
-            &PathBuf::from(path),
-            &mut registry,
-        ) {
-            return ExitCode::FAILURE;
+        match cli_info.flags.get_flag(flag) {
+            Some(path) => {
+                if !install_file(
+                    reporter,
+                    root,
+                    &platform,
+                    role,
+                    &PathBuf::from(path),
+                    &mut registry,
+                ) {
+                    return ExitCode::FAILURE;
+                }
+            }
+            // Fine to omit when it is already registered from an earlier add —
+            // e.g. adding only the installer certificate to a signed macOS
+            // project without re-supplying the app certificate.
+            None if role_registered(&registry, &platform, role) => {}
+            None => {
+                reporter.error(format!("`--{flag}` is required for {platform} keys"));
+                return ExitCode::FAILURE;
+            }
         }
     }
     for (flag, role) in optional {
@@ -339,15 +393,32 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         secrets.set("android", "store", &store_password);
         secrets.set("android", "key", &key_password);
     } else {
-        let Some(password) = password else {
-            reporter.error(format!(
-                "{platform} keys need a password (use --password or --password-file)"
-            ));
+        let role = required_password_roles(&platform)[0];
+        match password {
+            Some(password) => secrets.set(&platform, role, &password),
+            // Already stored from an earlier add (e.g. adding only the installer
+            // cert): leave the app-certificate password in place.
+            None if secrets.get(&platform, role).is_some() => {}
+            None => {
+                reporter.error(format!(
+                    "{platform} keys need a password (use --password or --password-file)"
+                ));
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // The optional macOS installer certificate carries its own password.
+    if platform == "macos" && cli_info.flags.get_flag("installer-cert").is_some() {
+        let Some(installer_password) = read_named_password(cli_info, "installer") else {
+            reporter.error(
+                "an installer certificate needs a password (use --installer-password or --installer-password-file)",
+            );
             return ExitCode::FAILURE;
         };
-        let role = password_roles(&platform)[0];
-        secrets.set(&platform, role, &password);
+        secrets.set("macos", "installer-p12", &installer_password);
     }
+
     if let Err(e) = secrets.store(bundle_id) {
         reporter.error(format!("could not store password: {e}"));
         return ExitCode::FAILURE;
@@ -572,7 +643,7 @@ fn valid_roles(platform: &str) -> &'static [&'static str] {
     match platform {
         "android" => &["keystore"],
         "ios" => &["p12", "profile", "entitlements"],
-        "macos" => &["p12", "entitlements"],
+        "macos" => &["p12", "entitlements", "installer-p12"],
         "windows" => &["pfx"],
         _ => &[],
     }
@@ -612,7 +683,7 @@ fn list(reporter: &Reporter, root: &Path, bundle_id: &str) -> ExitCode {
             files.push(format!("alias={alias}"));
         }
 
-        let password_present = password_roles(platform)
+        let password_present = required_password_roles(platform)
             .iter()
             .all(|role| secrets.get(platform, role).is_some());
         let password_state = if password_present {

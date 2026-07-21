@@ -1,0 +1,38 @@
+THIRD-PARTY NOTICES
+===============================================================================
+
+Peko bundles third-party software. The notices below are reproduced to satisfy
+the attribution terms of those components' licenses. Peko itself is licensed
+under the MIT License; see LICENSE.
+
+This file is GENERATED for the Rust dependency graph -- do not edit it by hand.
+Regenerate with:
+
+    cargo about generate about.hbs -o THIRD-PARTY-NOTICES.txt
+
+Hand-maintained notices for the bundled NATIVE components (BearSSL, webview,
+the Android native app glue, LLVM), which cargo cannot see, follow at the end.
+
+===============================================================================
+SUMMARY
+===============================================================================
+{{#each overview}}
+  {{{count}}}x  {{{name}}}
+{{/each}}
+
+===============================================================================
+LICENSE TEXTS
+===============================================================================
+{{#each licenses}}
+
+-------------------------------------------------------------------------------
+{{{name}}}
+-------------------------------------------------------------------------------
+
+Applies to:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

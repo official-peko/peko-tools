@@ -34,6 +34,9 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         "app" => crate::deploy_app::run(cli_info, reporter).await,
         "server" => deploy_server(cli_info, reporter).await,
         "package" => deploy_package(cli_info, reporter).await,
+        "runner-keygen" => deploy_runner_keygen(cli_info, reporter),
+        "runner-pubkey" => deploy_runner_pubkey(cli_info, reporter),
+        "unseal" => deploy_unseal(cli_info, reporter),
         other => {
             reporter.error(format!("unknown deploy target '{other}'"));
             reporter.help(
@@ -42,6 +45,159 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `deploy runner-keygen`: generate the remote build worker's keypair. Writes
+/// the secret identity to `--out` (default `~/.peko/runner.key`, mode 0600) and
+/// prints the public recipient (`age1…`) to register with the platform. Run once
+/// during Mac setup.
+fn deploy_runner_keygen(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    let out = cli_info
+        .flags
+        .get_flag("out")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_runner_key_path);
+    // Replacing a runner key invalidates every bundle already sealed to the old
+    // one, so never clobber silently.
+    if out.exists() && !cli_info.flags.has_flag("force") {
+        reporter.error(format!(
+            "a runner key already exists at {}",
+            out.display()
+        ));
+        reporter.help(
+            "use `peko deploy runner-pubkey` to print its public half; pass --force to replace it (this invalidates bundles sealed to the old key)",
+        );
+        return ExitCode::FAILURE;
+    }
+    let (public, secret) = crate::deploy_seal::generate_runner_key();
+    if let Some(parent) = out.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&out, format!("{secret}\n")) {
+        reporter.error(format!("could not write the runner key to {}: {e}", out.display()));
+        return ExitCode::FAILURE;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600));
+    }
+    reporter.success(format!("wrote the runner secret key to {}", out.display()));
+    reporter.info("register this public key with the platform (it is not secret):");
+    println!("{public}");
+    ExitCode::SUCCESS
+}
+
+/// `deploy runner-pubkey`: print the public half of an existing runner key
+/// (`--key`, default `~/.peko/runner.key`) to stdout. Lets a Mac re-register
+/// with the platform without generating a new key, which would invalidate every
+/// bundle sealed to the old one.
+fn deploy_runner_pubkey(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    let path = cli_info
+        .flags
+        .get_flag("key")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_runner_key_path);
+    let secret = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            reporter.error(format!(
+                "could not read the runner key at {}: {e}",
+                path.display()
+            ));
+            reporter.help("generate one with `peko deploy runner-keygen`");
+            return ExitCode::FAILURE;
+        }
+    };
+    match crate::deploy_seal::public_from_secret(&secret) {
+        Ok(public) => {
+            println!("{public}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            reporter.error(e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `deploy unseal`: on the Mac build worker, decrypt the deploy bundle's sealed
+/// signing material with the runner key. Reads `--sealed <blob>` and
+/// `--key <secret-file>` (default `~/.peko/runner.key`), extracts into `--out`
+/// (default `<sealed-dir>/signing`), and prints the per-platform paths + password
+/// as JSON for the build worker to pass to `peko build`'s headless flags.
+fn deploy_unseal(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+    let Some(sealed_path) = cli_info.flags.get_flag("sealed").map(std::path::PathBuf::from) else {
+        reporter.error("`deploy unseal` needs --sealed <blob>");
+        return ExitCode::FAILURE;
+    };
+    let key_path = cli_info
+        .flags
+        .get_flag("key")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_runner_key_path);
+    let out = cli_info
+        .flags
+        .get_flag("out")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            sealed_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("signing")
+        });
+
+    let secret = match std::fs::read_to_string(&key_path) {
+        Ok(text) => text.trim().to_owned(),
+        Err(e) => {
+            reporter.error(format!("could not read the runner key at {}: {e}", key_path.display()));
+            return ExitCode::FAILURE;
+        }
+    };
+    let sealed = match std::fs::read(&sealed_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            reporter.error(format!("could not read {}: {e}", sealed_path.display()));
+            return ExitCode::FAILURE;
+        }
+    };
+    let platforms = match crate::deploy_seal::unseal_to_dir(&secret, &sealed, &out) {
+        Ok(platforms) => platforms,
+        Err(e) => {
+            reporter.error(format!("could not unseal the signing material: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    // Emit absolute paths so the build worker can hand them to `peko build`.
+    let resolved: std::collections::BTreeMap<String, serde_json::Value> = platforms
+        .into_iter()
+        .map(|(platform, material)| {
+            let abs = |rel: &str| out.join(rel).to_string_lossy().into_owned();
+            (
+                platform,
+                serde_json::json!({
+                    "p12": abs(&material.p12),
+                    "password": material.password,
+                    "profile": material.profile.as_deref().map(abs),
+                    "entitlements": material.entitlements.as_deref().map(abs),
+                    "installer_p12": material.installer_p12.as_deref().map(abs),
+                    "installer_password": material.installer_password,
+                }),
+            )
+        })
+        .collect();
+    reporter.success(format!("unsealed signing material into {}", out.display()));
+    println!("{}", serde_json::to_string_pretty(&resolved).unwrap_or_default());
+    ExitCode::SUCCESS
+}
+
+/// The default runner key path, `~/.peko/runner.key` (the poller's config dir,
+/// distinct from `PEKO_ROOT_PATH`).
+fn default_runner_key_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(".peko").join("runner.key")
 }
 
 /// `deploy package`: pack the enclosing library package into a `.pkpkg`, verify
@@ -182,7 +338,7 @@ async fn deploy_package(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
 }
 
 /// Build, package, and deploy the current project to server hosting.
-async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
+pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let project = match PekoProject::from_current_directory() {
         Ok(project) => project,
         Err(e) => {
@@ -231,8 +387,15 @@ async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     };
     let base = crate::auth::platform_base(cli_info.flags.get_flag("base"));
 
-    // Build the web app (npm run build → the Next.js standalone output).
-    if let Err(code) = crate::commands::build::build_web_frontend(&project, reporter) {
+    // Build the web app (npm run build → the Next.js standalone output). The
+    // server frontend is always built fresh here (this runs on the dev host,
+    // which has node), never from a prebuilt dist.
+    if let Err(code) = crate::commands::build::build_web_frontend(
+        &project,
+        cli_info.get_peko_root(),
+        None,
+        reporter,
+    ) {
         return code;
     }
 

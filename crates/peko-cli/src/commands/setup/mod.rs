@@ -226,7 +226,13 @@ async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> Result<String> {
         reporter.status("Toolchains", "linking Apple SDKs via xcrun");
         let paths = apple::detect()?;
         apple::symlink(&layout, &paths)?;
-        for id in ["macos/arm64", "macos/x86_64", "ios/arm64", "ios/x86_64"] {
+        for id in [
+            "macos/arm64",
+            "macos/x86_64",
+            "ios/arm/device",
+            "ios/arm/simulator",
+            "ios/x86_64",
+        ] {
             installed.push(id.to_string());
         }
         if sdk_changed {

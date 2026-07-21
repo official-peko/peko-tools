@@ -1768,13 +1768,27 @@ impl PekoValueSimulator for FunctionCallAST {
                 }
                 function_call_info.write().unwrap().docinfo = best_signature_choice.docinfo.clone();
 
+                // A bare function passed where a `closure(...)` is expected is a
+                // common mistake the generic message hides; call it out.
+                let passed_function_for_closure = argument_types
+                    .iter()
+                    .zip(best_signature_choice.arguments.values())
+                    .any(|(arg, param)| {
+                        arg.is_function() && !arg.is_closure() && param.argument_type.is_closure()
+                    });
+                let closure_hint = if passed_function_for_closure {
+                    " — a bare function cannot be passed where a `closure(...)` is expected; wrap it in a closure literal"
+                } else {
+                    ""
+                };
+
                 simulator_context
                     .diagnostics
                     .report_diagnostic(diagnostics::PekoDiagnostic::new(
                         self.start.clone(),
                         self.end.clone(),
                         format!(
-                            "no overload of `{function_full_name}` matches the supplied argument types. Check the argument types against the declared overloads"
+                            "no overload of `{function_full_name}` matches the supplied argument types. Check the argument types against the declared overloads{closure_hint}"
                         ),
                         diagnostics::DiagnosticType::Error,
                         simulator_context.get_current_file(),

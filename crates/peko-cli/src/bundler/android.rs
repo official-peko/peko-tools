@@ -88,13 +88,20 @@ pub fn bundle(
     // open assets from.
     crate::bundler::copy_project_assets(project, &assets_dir)?;
 
+    // Third-party attribution for the native code linked into the app.
+    crate::bundler::write_app_notices(&assets_dir)?;
+
     // Select the ABI to build. arm64-v8a is the default (real devices); x86_64
-    // is for emulators (fast under KVM on an x86 host). `--arch x86_64` picks it;
-    // anything else falls back to arm64. Each ABI's `.so` goes in its own
-    // `lib/<abi>/` dir, which is exactly what the universal APK packages.
+    // is for emulators (fast under KVM on an x86 host). `--arch x86_64` picks it
+    // explicitly; a demo build defaults to x86_64 because it runs on the device
+    // farm's x86_64 emulator (KVM-accelerated on the Linux VM host); anything
+    // else falls back to arm64. Each ABI's `.so` goes in its own `lib/<abi>/`
+    // dir, which is exactly what the universal APK packages.
     let architecture = match cli_info.flags.get_flag("arch").as_deref() {
         Some("x86_64") => Architecture::X86_64,
-        _ => Architecture::Arm,
+        Some(_) => Architecture::Arm,
+        None if cli_info.flags.has_flag("demo") => Architecture::X86_64,
+        None => Architecture::Arm,
     };
     let abi = match architecture {
         Architecture::X86_64 => "x86_64",
@@ -500,7 +507,7 @@ pub fn sign(
         return Ok(false);
     };
 
-    let key = match signing::resolve_android(project.get_root(), &ui_info.bundle_id)? {
+    let key = match signing::resolve_android(cli_info, project.get_root(), &ui_info.bundle_id)? {
         Some(key) => key,
         None => return Ok(false),
     };

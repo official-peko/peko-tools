@@ -357,6 +357,44 @@ const windowControls = {
 // draw a custom titlebar only on a frameless desktop window, and fall back to
 // an HTML menu where there is no native menu bar. The OS is read from the user
 // agent; whether the window is frameless is injected by the native host.
+// A cross-origin webview (WebKitGTK loading a deployed SSR origin) may not
+// receive the native host's window.__PEKO__ user-script injection the way
+// WKWebView does. As a fallback the host also passes the device-bound bridge
+// token and the run's mode flags in the navigation URL; adopt them into
+// window.__PEKO__ before anything reads config, so the in-page agent's
+// isDemo()/isShotsMode() see the run and dial the bridge bound to the host's
+// device id. The bridge endpoint is same-origin (the page host), so only the
+// token and flags travel in the URL. A JWT is URL-safe, so no decoding is
+// needed. Runs at module load, before the connector or the shots agent read it.
+if (
+  typeof window !== 'undefined' &&
+  typeof location !== 'undefined' &&
+  !window.__PEKO__ &&
+  location.search
+) {
+  try {
+    const query = new URLSearchParams(location.search);
+    const bootToken = query.get('__pk_t');
+    if (bootToken) {
+      const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      window.__PEKO__ = {
+        url: scheme + '//' + location.host + '/__peko__',
+        token: bootToken,
+        bridgeStatus: 'ok',
+        shots: query.get('__pk_s') === '1',
+        // Host-delegated capture (iOS) needs the loopback host too. The native
+        // window.__PEKO__ injection carries shotsHost, but a cross-origin webview
+        // may drop that injection, so it also rides the URL as __pk_h; without it
+        // the agent turns on but hostPost() targets "http://undefined/…".
+        shotsHost: query.get('__pk_h') || '',
+        demo: query.get('__pk_d') === '1',
+      };
+    }
+  } catch (error) {
+    // Malformed query: ignore and fall back to same-origin, tokenless.
+  }
+}
+
 // The native host injects window.__PEKO__ into the main frame. A pop-up window
 // is a same-origin iframe of the app at another route; it has no injection of
 // its own, so it inherits the opener's config (bridge endpoint, platform) from

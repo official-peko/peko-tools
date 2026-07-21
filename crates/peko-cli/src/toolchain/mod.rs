@@ -19,15 +19,24 @@ pub use version::InstallManifest;
 
 /// The toolchain directory id, relative to `Compiler/toolchains`, for a target.
 ///
+/// `simulator` selects the Apple simulator toolchain: iOS on arm64 splits into
+/// `ios/arm/simulator` (arm64-apple-ios-simulator) and `ios/arm/device`
+/// (arm64-apple-ios). x86_64 iOS is simulator-only and has a single directory.
+///
 /// Returns `None` for a target with no toolchain (an unsupported os/arch
 /// combination).
-pub fn toolchain_dir_id(os: OperatingSystem, arch: Architecture) -> Option<&'static str> {
+pub fn toolchain_dir_id(
+    os: OperatingSystem,
+    arch: Architecture,
+    simulator: bool,
+) -> Option<&'static str> {
     use Architecture::{Arm, X86_64};
     use OperatingSystem::{Android, IOS, Linux, MacOS, Windows};
     Some(match (os, arch) {
         (MacOS, Arm) => "macos/arm64",
         (MacOS, X86_64) => "macos/x86_64",
-        (IOS, Arm) => "ios/arm64",
+        (IOS, Arm) if simulator => "ios/arm/simulator",
+        (IOS, Arm) => "ios/arm/device",
         (IOS, X86_64) => "ios/x86_64",
         (Linux, Arm) => "linux/arm",
         (Linux, X86_64) => "linux/x86_64",

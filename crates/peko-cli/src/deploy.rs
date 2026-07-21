@@ -222,6 +222,8 @@ struct CompleteResponse {
 struct ErrorBody {
     error: Option<String>,
     message: Option<String>,
+    /// A machine-readable reason, such as `legal_required`.
+    code: Option<String>,
 }
 
 /// The result of a started deploy.
@@ -316,11 +318,17 @@ fn http_client() -> Result<reqwest::Client, DeployError> {
 /// Read a server explanation from an error response, falling back to a generic
 /// message.
 async fn error_body(response: reqwest::Response) -> String {
-    response
-        .json::<ErrorBody>()
-        .await
-        .ok()
-        .and_then(|b| b.error.or(b.message))
+    let body = response.json::<ErrorBody>().await.ok();
+    // The platform's legal gate rejects every authenticated route before the
+    // handler runs, sharing status 403 with other permission failures. Branch on
+    // `code` so it reads as the actionable thing it is.
+    if body.as_ref().and_then(|b| b.code.as_deref()) == Some("legal_required") {
+        return format!(
+            "the Peko terms have been updated. Sign in at {} and accept them, then re-run this command.",
+            crate::auth::platform_base(None)
+        );
+    }
+    body.and_then(|b| b.error.or(b.message))
         .unwrap_or_else(|| "the platform rejected the request".to_owned())
 }
 

@@ -1876,6 +1876,10 @@ pub trait ExecutionContextAlgorithms<
         if type1.array_depth != type2.array_depth
             || type1.reference_depth != type2.reference_depth
             || type1.is_function() != type2.is_function()
+            // A function and a `closure(...)` are distinct types: a bare function
+            // reference cannot stand in for a closure (it has no environment, and
+            // coercing one produces a broken thunk that crashes at the call).
+            || type1.is_closure() != type2.is_closure()
             || type1.name() != type2.name()
             || type1.module_names() != type2.module_names()
             || type1.generics().len() != type2.generics().len()

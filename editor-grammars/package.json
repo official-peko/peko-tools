@@ -4,9 +4,9 @@
   "description": "Pekoscript grammar for tree-sitter",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tree-sitter/tree-sitter-pekoscript.git"
+    "url": "git+https://github.com/official-peko/peko-tools.git"
   },
-  "license": "Custom",
+  "license": "MIT",
   "author": {
     "name": "Preston Brown",
     "email": "preston@pekoui.com",

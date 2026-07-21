@@ -170,6 +170,40 @@ import std::json;
             let route: string = runtime::create_managed(c_deeplink::peko_deeplink_take_initial())
             return new json::JsonString(route).to_string()
         })
+
+        // A shots run on iOS loads a cross-origin HTTPS page in WKWebView, which
+        // blocks a mixed-content fetch from that page to the loopback capture
+        // host — so no capture beacon ever leaves the webview. The in-page agent
+        // instead relays each host request through the bridge to here; native
+        // code is not subject to the webview's content policy, so it forwards the
+        // request to the host helper over plain HTTP and returns its response.
+        // params: {"path":"/capture","body":{...}}.
+        this.channel.on("shots.hostproxy", closure(params: string) => string {
+            let object: json::JsonObject = as_object(params)
+            let path: string = string_field(object, "path")
+            let host_port: string = env::get("PEKO_SHOTS_HOST")
+            if host_port.size() == 0 || path.size() == 0 {
+                return `{}`
+            }
+            let host: string = host_port
+            let port: number = 80
+            if host_port.contains(":") {
+                let one: number = 1
+                let separator: number = host_port.index_of(":")
+                host = host_port.substring(0, separator)
+                port = host_port.substring(separator + one, host_port.size()).to_number()
+            }
+            let response: sockets::HttpResponse? = new sockets::Request()
+                .method("POST")
+                .path(path)
+                .header("Content-Type", "application/json")
+                .body(raw_field(object, "body"))
+                .send_http(host, port)
+            if !response.is_value() {
+                return `{}`
+            }
+            return response.unwrap().body()
+        })
     }
 
     /// The underlying webview, so callers can adjust window chrome
@@ -359,7 +393,11 @@ import std::json;
             let device_id: string = env::get("PEKO_BRIDGE_DEVICE")
             let initial_token: string = env_token
             if env_token.size() == 0 {
-                let minted: json::JsonObject? = mint_bridge_token(host, "")
+                // Mint bound to the supplied device id (PEKO_BRIDGE_DEVICE) when
+                // present, so the page, the native provider, and an external
+                // driver that set the same id all pair on the hub. Empty means
+                // no coordination is required and the backend assigns a fresh id.
+                let minted: json::JsonObject? = mint_bridge_token(host, device_id)
                 if minted.is_value() {
                     let obj: json::JsonObject = minted.unwrap()
                     initial_token = string_field(obj, "token")
@@ -522,6 +560,26 @@ import std::json;
         if !is_dev {
             if bundle::host.size() > 0 {
                 url = `https://${bundle::host}`
+                // A cross-origin webview (WebKitGTK loading the deployed origin)
+                // may not apply the window.__PEKO__ user-script injection, leaving
+                // the in-page agent dormant. For a demo/shots run, also carry the
+                // device-bound page token and mode flags in the URL; the client SDK
+                // adopts them into window.__PEKO__ on load so the agent activates
+                // and dials the bridge on the same device id as the provider. Only
+                // for a demo/shots run — a production URL never carries a token.
+                if (demo == "true" || shots == "true") && token.size() > 0 {
+                    let flags: string = ""
+                    if shots == "true" {
+                        // Carry the host-side capture endpoint too (iOS host-delegated
+                        // capture posts here); the client SDK adopts it as shotsHost.
+                        // Without it the agent activates but has no host to post to.
+                        flags = `${flags}&__pk_s=1&__pk_h=${shots_host}`
+                    }
+                    if demo == "true" {
+                        flags = `${flags}&__pk_d=1`
+                    }
+                    url = `${url}/?__pk_t=${token}${flags}`
+                }
             } else {
                 url = assets::get_asset_url("index.html")
             }
