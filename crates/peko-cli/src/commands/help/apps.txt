@@ -1,0 +1,31 @@
+peko apps [list] [--limit <n>]
+peko apps show <app-id>
+
+Lists the platform apps this account owns, or shows one of them.
+
+Both are read-only. Use `peko link <app-id>` to point the current project
+at one of the listed apps; linking is a local edit to peko.toml and needs
+no network.
+
+Each app reports its capabilities, which are fixed when the app is created
+on the platform and decide how it can be deployed:
+
+    server          has an SSR backend      -> peko deploy server
+    distribution    ships native binaries   -> peko deploy app
+
+An app without a capability cannot be deployed that way, so check this
+before a deploy rather than after a failed one.
+
+`show` distinguishes an app that does not exist from one owned by another
+account, so a stale link can be told apart from being signed in as the
+wrong user.
+
+OPTIONS
+    --limit <n>     apps to list per page (platform default 50, max 200)
+    --base <url>    platform base url (defaults to the configured one)
+    --json          print machine-readable output for tooling
+
+EXAMPLES
+    peko apps                     list this account's apps
+    peko apps list --json         the same, for tooling
+    peko apps show app_1a2b3c     show one app's name and capabilities

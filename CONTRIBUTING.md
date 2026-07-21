@@ -122,7 +122,7 @@ Compiler bugs without a reproducing case are usually not actionable.
 ## Security
 
 Do not report security issues in a public issue. Email
-[connect@pekoui.com](mailto:connect@pekoui.com) with the details and give us a
+[contact@pekoui.com](mailto:contact@pekoui.com) with the details and give us a
 chance to ship a fix before disclosing.
 
 ## Conduct

@@ -338,6 +338,17 @@ async fn deploy_package(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
 }
 
 /// Build, package, and deploy the current project to server hosting.
+/// Emit a terminal `result` event for a deploy, in JSON mode only.
+///
+/// The streamed status lines already describe progress, but a host driving a
+/// deploy (the IDE panel) needs the outcome as data rather than prose: whether
+/// it succeeded, whether it is still building, and the resulting URL. Emitting
+/// one final event keeps that contract explicit instead of leaving the host to
+/// match on the wording of the last success line.
+fn emit_deploy_result(reporter: &Reporter, event: serde_json::Value) {
+    reporter.emit_json(event);
+}
+
 pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let project = match PekoProject::from_current_directory() {
         Ok(project) => project,
@@ -478,6 +489,13 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
             // Unless asked not to, wait for the build to go live.
             if cli_info.flags.has_flag("no-wait") {
                 reporter.info("not waiting; track progress on your dashboard at https://app.pekoui.com");
+                emit_deploy_result(
+                    reporter,
+                    serde_json::json!({
+                        "type": "result", "ok": true, "kind": "server",
+                        "state": "building", "appId": app_id, "url": url,
+                    }),
+                );
                 return ExitCode::SUCCESS;
             }
             reporter.info("building and releasing (this can take a few minutes)...");
@@ -485,10 +503,24 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
                 LiveResult::Live(live_url) => {
                     let shown = live_url.or(url).unwrap_or_default();
                     reporter.success(format!("live at {shown}"));
+                    emit_deploy_result(
+                        reporter,
+                        serde_json::json!({
+                            "type": "result", "ok": true, "kind": "server",
+                            "state": "live", "appId": app_id, "url": shown,
+                        }),
+                    );
                     ExitCode::SUCCESS
                 }
                 LiveResult::Failed(err) => {
                     reporter.error(format!("deploy failed: {err}"));
+                    emit_deploy_result(
+                        reporter,
+                        serde_json::json!({
+                            "type": "result", "ok": false, "kind": "server",
+                            "state": "failed", "appId": app_id, "error": err,
+                        }),
+                    );
                     ExitCode::FAILURE
                 }
                 LiveResult::Timeout => {
@@ -498,6 +530,16 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
                     if let Some(url) = &url {
                         reporter.info(format!("it will serve at {url} once live"));
                     }
+                    // Still building is not a failure, but it is not a finished
+                    // deploy either; the host should keep showing it as pending
+                    // rather than report success.
+                    emit_deploy_result(
+                        reporter,
+                        serde_json::json!({
+                            "type": "result", "ok": true, "kind": "server",
+                            "state": "building", "appId": app_id, "url": url,
+                        }),
+                    );
                     ExitCode::SUCCESS
                 }
             }

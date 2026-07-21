@@ -94,3 +94,40 @@ NativeActivity entry-point glue, linked on Android.
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+
+-------------------------------------------------------------------------------
+GTK, WebKitGTK, and the Linux desktop stack
+-------------------------------------------------------------------------------
+
+Linux builds only. A Linux AppImage bundles the shared libraries the webview
+needs so the app runs on hosts that do not have them. They are redistributed
+UNMODIFIED and linked DYNAMICALLY; each retains its own license.
+
+The bundled set includes, among others:
+
+  WebKitGTK, JavaScriptCore      LGPL-2.1-or-later, BSD-2-Clause
+  GTK 3, GDK, gdk-pixbuf         LGPL-2.1-or-later
+  GLib, GObject, GIO, GModule    LGPL-2.1-or-later
+  ATK, at-spi2                   LGPL-2.1-or-later
+  Pango, HarfBuzz, fribidi       LGPL-2.1-or-later, MIT, Old MIT
+  cairo, pixman                  LGPL-2.1-or-later or MPL-1.1
+  GStreamer and its plugins      LGPL-2.1-or-later
+  libsoup, libsecret, libgudev   LGPL-2.1-or-later
+  GnuTLS, nettle, hogweed        LGPL-2.1-or-later
+  libgcrypt, libgpg-error        LGPL-2.1-or-later
+  ICU                            Unicode-3.0
+  libxml2, libxslt, sqlite3      MIT, public domain
+  freetype, libpng, libjpeg,     FTL or GPL-2.0, zlib-acknowledgement,
+  libwebp, zlib, brotli, lcms2   BSD-3-Clause, zlib, MIT
+
+The LGPL components are dynamically linked, so you may replace them with your
+own modified versions: extract the AppImage, substitute the library under
+`usr/lib`, and repack.
+
+Complete corresponding source for these libraries is available from the
+distribution they were taken from. To request the exact sources used to build
+this bundle, email contact@pekoui.com.
+
+NOTE FOR APP AUTHORS: if you modify any of these libraries and ship the result,
+the LGPL requires you to make your modified source available. Shipping them
+unmodified, as the Peko bundler does, requires only this notice.

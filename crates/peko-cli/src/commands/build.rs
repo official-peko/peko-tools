@@ -113,11 +113,10 @@ pub(crate) fn build_web_frontend(
 
     if deps_changed || !root.join("node_modules").is_dir() {
         reporter.status("Installing", "web dependencies (npm install)");
-        match crate::proc::npm()
-            .arg("install")
-            .current_dir(root)
-            .status()
-        {
+        // npm writes progress to stdout; keep it off the JSON event stream.
+        let mut npm = crate::proc::npm();
+        crate::proc::route_stdout_to_stderr(&mut npm);
+        match npm.arg("install").current_dir(root).status() {
             Ok(status) if status.success() => {}
             Ok(_) => {
                 reporter.error("npm install failed");
@@ -131,11 +130,9 @@ pub(crate) fn build_web_frontend(
     }
 
     reporter.status("Building", "web app (npm run build)");
-    match crate::proc::npm()
-        .args(["run", "build"])
-        .current_dir(root)
-        .status()
-    {
+    let mut npm = crate::proc::npm();
+    crate::proc::route_stdout_to_stderr(&mut npm);
+    match npm.args(["run", "build"]).current_dir(root).status() {
         Ok(status) if status.success() => Ok(()),
         Ok(_) => {
             reporter.error("web build failed (npm run build)");

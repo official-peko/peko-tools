@@ -539,12 +539,24 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             "built deploy bundle for {} (not uploaded)",
             project.name
         ));
+        reporter.emit_json(serde_json::json!({
+            "type": "result", "ok": true, "kind": "app", "state": "not_uploaded",
+            "app": project.name, "version": ui.version,
+            "bundle": bundle_path.display().to_string(),
+        }));
         return ExitCode::SUCCESS;
     }
 
+    // The terminal `result` event gives a host (the IDE panel) the outcome as
+    // data. The streamed status lines already cover progress, but matching on
+    // the wording of the last one to decide success would be brittle.
     match push_bundle(cli_info, &ui, bundle_bytes, reporter).await {
         PushOutcome::Uploaded => {
             reporter.success(format!("deployed {} {}", project.name, ui.version));
+            reporter.emit_json(serde_json::json!({
+                "type": "result", "ok": true, "kind": "app", "state": "uploaded",
+                "app": project.name, "version": ui.version, "appId": ui.app_id,
+            }));
             ExitCode::SUCCESS
         }
         PushOutcome::Skipped => {
@@ -555,11 +567,21 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
                 project.name,
                 bundle_path.display()
             ));
+            reporter.emit_json(serde_json::json!({
+                "type": "result", "ok": true, "kind": "app", "state": "not_uploaded",
+                "app": project.name, "version": ui.version,
+                "bundle": bundle_path.display().to_string(),
+            }));
             ExitCode::SUCCESS
         }
         PushOutcome::Failed(message) => {
             reporter.error(format!("deploy upload failed: {message}"));
             reporter.help(format!("the bundle is kept at {}", bundle_path.display()));
+            reporter.emit_json(serde_json::json!({
+                "type": "result", "ok": false, "kind": "app", "state": "failed",
+                "app": project.name, "error": message,
+                "bundle": bundle_path.display().to_string(),
+            }));
             ExitCode::FAILURE
         }
     }

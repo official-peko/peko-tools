@@ -12,6 +12,23 @@
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 
+# Every release target, pinned. Two reasons, and both matter:
+#
+#  1. Correctness. The same THIRD-PARTY-NOTICES.txt ships in all five release
+#     archives, so it has to cover all five dependency graphs — a Windows-only
+#     crate must be attributed in the Windows archive.
+#  2. Determinism. Left unset, cargo-about resolves against the host triple, so
+#     the file generated on macOS differs from the one CI regenerates on Linux
+#     and the freshness check fails on a platform difference rather than a real
+#     dependency change.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
 # Licenses accepted for dependencies, in PREFERENCE ORDER: for a dual-licensed
 # crate (`Apache-2.0 OR MIT`), the first match here is the one chosen and
 # reproduced. MIT leads so the notices align with Peko's own license.

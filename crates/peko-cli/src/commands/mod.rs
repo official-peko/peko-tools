@@ -71,6 +71,7 @@ macro_rules! commands {
 
 commands! {
     add        => "add a dependency to peko.toml and install it" [ "version", "path" ],
+    apps       => "list the platform apps this account owns" [ "base", "limit" ],
     bridge     => "mint a native-bridge token for the current app" [ "app-id", "device-id", "base" ],
     build      => "build the project for one or more target platforms" [ "platform", "target", "arch", "output", "web-dist", "p12", "p12-password", "p12-password-file", "provisioning-profile", "entitlements", "installer-p12", "installer-p12-password", "installer-p12-password-file" ],
     check      => "verify the Peko toolchain installation is healthy",

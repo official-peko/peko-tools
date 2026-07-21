@@ -139,9 +139,16 @@ pub struct PlatformFailure {
 /// and explained here once, rather than at each of the call sites.
 pub async fn explain_failure(response: reqwest::Response) -> PlatformFailure {
     let status = response.status();
-    let body: PlatformErrorBody = response.json().await.unwrap_or_default();
-    let reported = body.error.or(body.message);
-    if body.code.as_deref() == Some("legal_required") {
+    let body = response.text().await.unwrap_or_default();
+    explain_parts(status, &body)
+}
+
+/// The body-inspection half of [`explain_failure`], split out so it can be
+/// tested without constructing an HTTP response.
+fn explain_parts(status: reqwest::StatusCode, body: &str) -> PlatformFailure {
+    let parsed: PlatformErrorBody = serde_json::from_str(body).unwrap_or_default();
+    let reported = parsed.error.or(parsed.message);
+    if parsed.code.as_deref() == Some("legal_required") {
         return PlatformFailure {
             status,
             message: "the Peko terms have been updated and must be accepted before deploying"
@@ -152,15 +159,25 @@ pub async fn explain_failure(response: reqwest::Response) -> PlatformFailure {
             )),
         };
     }
-    let help = match status {
-        reqwest::StatusCode::UNAUTHORIZED => Some("run `peko login`".to_owned()),
-        _ => None,
-    };
+    // Any 401 means re-authenticate, whatever the body says. In production the
+    // body is App Check's ("This request could not be verified. Reload the app
+    // and try again.") rather than a sign-in message: a valid bearer token
+    // exempts the request from attestation, so a missing, expired, or malformed
+    // token fails attestation before the handler is reached. Relaying that text
+    // would tell a CLI user to reload an app they are not using, so the status
+    // alone decides the message and the body is discarded.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return PlatformFailure {
+            status,
+            message: "the platform rejected the session; it is missing or expired".to_owned(),
+            help: Some("run `peko login`".to_owned()),
+        };
+    }
     PlatformFailure {
         status,
         message: reported
             .unwrap_or_else(|| format!("the platform returned HTTP {}", status.as_u16())),
-        help,
+        help: None,
     }
 }
 
@@ -581,5 +598,53 @@ mod tests {
         let result =
             drive_callback("GET /callback?error=access_denied&state=s HTTP/1.1", "s").await;
         assert!(matches!(result, Err(AuthError::Denied(_))));
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    /// In production a 401 carries App Check's message, not a sign-in one.
+    /// Relaying it verbatim would tell a CLI user to reload an app.
+    #[test]
+    fn unauthorized_never_relays_the_app_check_message() {
+        let failure = explain_parts(
+            StatusCode::UNAUTHORIZED,
+            r#"{"message":"This request could not be verified. Reload the app and try again."}"#,
+        );
+        assert!(!failure.message.contains("Reload the app"));
+        assert_eq!(failure.help.as_deref(), Some("run `peko login`"));
+    }
+
+    /// An expired token fails attestation the same way, so the body varies but
+    /// the guidance must not.
+    #[test]
+    fn unauthorized_with_an_empty_body_still_guides_to_login() {
+        let failure = explain_parts(StatusCode::UNAUTHORIZED, "");
+        assert_eq!(failure.help.as_deref(), Some("run `peko login`"));
+    }
+
+    /// The legal gate shares 403 with the wrong-account case, so it is branched
+    /// on `code` rather than status.
+    #[test]
+    fn legal_gate_is_recognized_by_code() {
+        let failure = explain_parts(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"Accept the updated Peko terms to continue.","code":"legal_required"}"#,
+        );
+        assert!(failure.message.contains("terms"));
+        assert!(failure.help.unwrap().contains("accept"));
+    }
+
+    /// A 403 without that code is a different failure and must be relayed as-is.
+    #[test]
+    fn other_forbidden_relays_the_server_message() {
+        let failure = explain_parts(
+            StatusCode::FORBIDDEN,
+            r#"{"error":"You do not have access to this app."}"#,
+        );
+        assert_eq!(failure.message, "You do not have access to this app.");
     }
 }

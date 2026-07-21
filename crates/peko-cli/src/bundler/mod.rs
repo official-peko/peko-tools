@@ -183,6 +183,8 @@ pub(crate) fn write_app_notices(dest_root: &Path) -> BundleResult<()> {
 /// surfaces as [`BundleError::ToolLaunch`] and a non-zero exit status as
 /// [`BundleError::Tool`].
 pub(crate) fn run_tool(tool: &str, command: &mut Command) -> BundleResult<()> {
+    // Build tools write prose to stdout; keep it off the JSON event stream.
+    crate::proc::route_stdout_to_stderr(command);
     let status = command.status().map_err(|source| BundleError::ToolLaunch {
         tool: tool.to_owned(),
         source,
@@ -742,6 +744,10 @@ mod notice_tests {
             "Steffen André Langnes",
             "Android Open Source Project",
             "Apache License",
+            // The Linux AppImage bundles the GTK/WebKit stack; the LGPL
+            // components there carry their own notice duty.
+            "WebKitGTK",
+            "LGPL-2.1",
         ] {
             assert!(
                 APP_NOTICES.contains(required),

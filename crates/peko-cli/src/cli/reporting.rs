@@ -297,6 +297,10 @@ impl Reporter {
     /// line on stdout. Color is turned off so the stream stays clean.
     pub fn set_json(&mut self, on: bool) {
         self.json = on;
+        // Subprocesses spawned deep in the bundlers have no reporter to consult,
+        // so the mode is mirrored into a process-wide flag they can read to keep
+        // their output off the JSON stream.
+        crate::proc::set_json_stdout(on);
         if on {
             self.use_color = false;
         }
