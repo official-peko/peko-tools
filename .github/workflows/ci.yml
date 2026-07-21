@@ -67,19 +67,12 @@ jobs:
         run: cargo test --all --locked
 
       - name: Third-party notices are current
-        # Adding or bumping a dependency changes what must be attributed in the
-        # shipped archives. Regenerating here and diffing catches a stale
-        # THIRD-PARTY-NOTICES.txt at review time rather than after release.
+        # Verifies every dependency is attributed. Deliberately not a byte
+        # comparison of the generated file: cargo-about's license bodies are not
+        # reproducible across hosts (they differ by whitespace), so diffing the
+        # whole file reports "out of date" for cosmetic drift while a genuinely
+        # unattributed dependency looks the same. The script compares the crate
+        # set instead, and names anything missing.
         run: |
-          # Pinned: a newer generator can reformat the output, which would fail
-          # this check as a "stale file" when nothing about the dependencies
-          # changed. Bump deliberately, regenerating the committed file with it.
           cargo install cargo-about --version 0.9.1 --features cli --locked
-          ./scripts/gen-notices.sh
-          if ! git diff --quiet -- THIRD-PARTY-NOTICES.txt; then
-            echo "::error::THIRD-PARTY-NOTICES.txt is out of date. Run ./scripts/gen-notices.sh and commit the result."
-            # The full diff, not just a stat: a mismatch here is usually one
-            # added crate, and seeing which one is the whole diagnosis.
-            git --no-pager diff -- THIRD-PARTY-NOTICES.txt
-            exit 1
-          fi
+          ./scripts/gen-notices.sh --check

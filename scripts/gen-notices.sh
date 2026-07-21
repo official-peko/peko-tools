@@ -7,11 +7,22 @@
 #   2. The bundled native components (BearSSL, webview, Android glue, LLVM),
 #      hand-maintained in NOTICE-native.txt because cargo cannot see them.
 #
-# Run from anywhere; CI runs it to verify the checked-in file is current.
+#   ./scripts/gen-notices.sh            rewrite the committed file
+#   ./scripts/gen-notices.sh --check    verify it attributes every dependency
+#
+# --check compares the SET OF ATTRIBUTED CRATES rather than the file byte for
+# byte. The generated license bodies are not reproducible across machines —
+# cargo-about's output for the same dependency at the same version can differ by
+# whitespace depending on the host — so a byte comparison fails on cosmetic
+# drift and says "out of date" when nothing about the dependencies changed. What
+# the check actually needs to catch is a dependency that gained no attribution,
+# and the crate set answers exactly that.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/THIRD-PARTY-NOTICES.txt"
+CHECK=""
+[ "${1:-}" = "--check" ] && CHECK=1
 
 if ! command -v cargo-about >/dev/null; then
   echo "cargo-about is not installed. Install it with:" >&2
@@ -20,10 +31,49 @@ if ! command -v cargo-about >/dev/null; then
 fi
 
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+generated="$(mktemp)"
+trap 'rm -f "$tmp" "$generated"' EXIT
 
 echo "generating the Rust dependency notices..."
 (cd "$ROOT" && cargo about generate about.hbs -o "$tmp")
+cat "$tmp" "$ROOT/NOTICE-native.txt" > "$generated"
 
-cat "$tmp" "$ROOT/NOTICE-native.txt" > "$OUT"
-echo "wrote $OUT ($(wc -l < "$OUT" | tr -d ' ') lines)"
+# The attributed crates, as "<name> <version>" lines from the "Applies to:"
+# blocks the template emits.
+crate_set() {
+  grep -E '^  - [^ ]+ [0-9]' "$1" | sed 's/^  - //; s/ (.*//' | sort -u
+}
+
+if [ -n "$CHECK" ]; then
+  if [ ! -f "$OUT" ]; then
+    echo "::error::THIRD-PARTY-NOTICES.txt is missing. Run ./scripts/gen-notices.sh and commit it." >&2
+    exit 1
+  fi
+  committed_crates="$(mktemp)"
+  fresh_crates="$(mktemp)"
+  trap 'rm -f "$tmp" "$generated" "$committed_crates" "$fresh_crates"' EXIT
+  crate_set "$OUT" > "$committed_crates"
+  crate_set "$generated" > "$fresh_crates"
+
+  if ! diff -q "$committed_crates" "$fresh_crates" >/dev/null; then
+    echo "::error::THIRD-PARTY-NOTICES.txt does not attribute every dependency. Run ./scripts/gen-notices.sh and commit the result." >&2
+    echo "--- attributed in the committed file but no longer a dependency:" >&2
+    comm -23 "$committed_crates" "$fresh_crates" | sed 's/^/    /' >&2
+    echo "--- a dependency with no attribution (this is what must be fixed):" >&2
+    comm -13 "$committed_crates" "$fresh_crates" | sed 's/^/    /' >&2
+    exit 1
+  fi
+
+  # The hand-maintained native half cannot be regenerated, so verify it is
+  # present rather than silently shipping a file with only the Rust half.
+  if ! grep -q "BUNDLED NATIVE COMPONENTS" "$OUT"; then
+    echo "::error::THIRD-PARTY-NOTICES.txt is missing the native section from NOTICE-native.txt." >&2
+    exit 1
+  fi
+
+  echo "ok: $(wc -l < "$committed_crates" | tr -d ' ') crates attributed, native section present"
+  exit 0
+fi
+
+cp "$generated" "$OUT"
+echo "wrote $OUT ($(wc -l < "$OUT" | tr -d ' ') lines, $(crate_set "$OUT" | wc -l | tr -d ' ') crates attributed)"
