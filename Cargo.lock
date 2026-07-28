@@ -5331,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "peko-cli"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "age",
  "app-store-connect",
@@ -5398,7 +5398,7 @@ dependencies = [
 
 [[package]]
 name = "peko-core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "derive-new",
  "indexmap",
@@ -5412,7 +5412,7 @@ dependencies = [
 
 [[package]]
 name = "peko-llvm"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cc",
  "derive-new",
@@ -5426,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "peko-lsp"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dashmap",
  "dirs 6.0.0",
