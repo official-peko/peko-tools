@@ -616,9 +616,15 @@ pub struct KeyCheck {
 #[derive(Debug, Serialize)]
 pub struct PlatformReport {
     pub platform: String,
-    /// "missing" (required material absent), "invalid" (present but a check
-    /// failed), "unverified" (present, a soft pass), or "valid".
+    /// "not_required" (the platform does not sign), "optional" (signing is
+    /// available but absent), "missing" (required material absent), "invalid"
+    /// (present but a check failed), "unverified" (present, a soft pass), or
+    /// "valid".
     pub state: String,
+    /// "required", "optional", or "not_applicable" — whether the platform must
+    /// be signed to ship. Lets a caller gate on the requirement rather than
+    /// inferring it from the platform name.
+    pub requirement: String,
     pub checks: Vec<KeyCheck>,
 }
 
@@ -1069,6 +1075,34 @@ fn verify_android(
 }
 
 /// Verify all registered signing material for a platform.
+/// Whether a platform needs signing material to ship.
+///
+/// Not every target signs. Treating them alike made an unsigned Windows build
+/// and a Linux build — which has no signing concept at all — look like the same
+/// failure as a missing Apple certificate, blocking deploys that were never
+/// going to be signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigningRequirement {
+    /// Cannot ship without it: the store rejects an unsigned build.
+    Required,
+    /// Ships either way. Signing raises trust (Windows SmartScreen) but is not
+    /// a gate.
+    Optional,
+    /// The platform has no signing model.
+    NotApplicable,
+}
+
+/// What signing a platform requires. Apple targets must be signed to install at
+/// all; Android must be signed to be accepted by Play. Windows Authenticode is
+/// optional, and Linux AppImages are not signed.
+pub fn signing_requirement(platform: &str) -> SigningRequirement {
+    match platform {
+        "ios" | "macos" | "android" => SigningRequirement::Required,
+        "windows" => SigningRequirement::Optional,
+        _ => SigningRequirement::NotApplicable,
+    }
+}
+
 pub fn verify_platform(
     project_root: &Path,
     peko_root: &Path,
@@ -1085,9 +1119,22 @@ pub fn verify_platform(
         _ => {}
     }
 
-    let state = if checks.is_empty() || checks.iter().any(|c| !c.present) {
-        "missing"
+    let requirement = signing_requirement(platform);
+    let absent = checks.is_empty() || checks.iter().any(|c| !c.present);
+    let state = if requirement == SigningRequirement::NotApplicable {
+        // Linux: nothing to register, so an empty check list is the expected
+        // state rather than a missing one.
+        "not_required"
+    } else if absent {
+        // Absent material only blocks a platform that must be signed. For an
+        // optional one it means the build ships unsigned, which is a choice.
+        match requirement {
+            SigningRequirement::Optional => "optional",
+            _ => "missing",
+        }
     } else if checks.iter().any(|c| !c.ok) {
+        // Registered but broken is a real failure whether or not signing was
+        // required: the user asked for it and it will not work.
         "invalid"
     } else if checks.iter().any(|c| c.unverified) {
         "unverified"
@@ -1097,6 +1144,12 @@ pub fn verify_platform(
     PlatformReport {
         platform: platform.to_string(),
         state: state.to_string(),
+        requirement: match requirement {
+            SigningRequirement::Required => "required",
+            SigningRequirement::Optional => "optional",
+            SigningRequirement::NotApplicable => "not_applicable",
+        }
+        .to_string(),
         checks,
     }
 }
@@ -1474,5 +1527,29 @@ mod tests {
         let restored: SigningSecrets = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.get("ios", "p12").as_deref(), Some("secret"));
         assert_eq!(restored.get("android", "store").as_deref(), Some("pw"));
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+
+    /// The stores decide this, not us: Apple and Play reject unsigned uploads,
+    /// Windows accepts an unsigned .exe, and a Linux AppImage has no signature.
+    #[test]
+    fn requirements_match_what_each_store_enforces() {
+        assert_eq!(signing_requirement("ios"), SigningRequirement::Required);
+        assert_eq!(signing_requirement("macos"), SigningRequirement::Required);
+        assert_eq!(signing_requirement("android"), SigningRequirement::Required);
+        assert_eq!(signing_requirement("windows"), SigningRequirement::Optional);
+        assert_eq!(
+            signing_requirement("linux"),
+            SigningRequirement::NotApplicable
+        );
+        // An unknown target must not be treated as needing keys we cannot name.
+        assert_eq!(
+            signing_requirement("plan9"),
+            SigningRequirement::NotApplicable
+        );
     }
 }

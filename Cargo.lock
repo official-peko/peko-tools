@@ -5371,6 +5371,7 @@ dependencies = [
  "peko-core",
  "peko-llvm",
  "peko-lsp",
+ "rand 0.8.6",
  "regex",
  "reqwest",
  "rsa",

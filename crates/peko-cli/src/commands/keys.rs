@@ -73,7 +73,9 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         .collect();
 
     let Some(subcommand) = cli_info.arguments.get(1) else {
-        reporter.error("`peko keys` requires a subcommand: add, install, set-password, verify, list, or remove");
+        reporter.error(
+            "`peko keys` requires a subcommand: add, generate, p12, install, set-password, verify, list, or remove",
+        );
         reporter.help(format!("run '{} help keys' for usage", cli_info.executable));
         return ExitCode::FAILURE;
     };
@@ -85,6 +87,8 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         "verify" => verify(cli_info, reporter, &root, &bundle_id, &declared),
         "list" => list(reporter, &root, &bundle_id),
         "remove" => remove(cli_info, reporter, &root, &bundle_id),
+        "generate" => super::keygen::execute(cli_info, reporter, &root, &bundle_id),
+        "p12" => super::keygen::assemble_p12(cli_info, reporter, &root, &bundle_id),
         other => {
             reporter.error(format!("unknown keys subcommand '{other}'"));
             reporter.help(format!("run '{} help keys' for usage", cli_info.executable));
@@ -100,10 +104,14 @@ fn require_platform(cli_info: &CLIInfo, reporter: &Reporter) -> Option<String> {
         return None;
     };
     match platform.as_str() {
-        "android" | "ios" | "macos" | "windows" => Some(platform),
+        // "apple" is not a build target: it names the directory holding the key
+        // and certificate request shared by ios and macos, so it can be removed
+        // to start the Apple flow over. Removing ios or macos alone leaves that
+        // key in place, and `keys generate` then refuses to overwrite it.
+        "android" | "ios" | "macos" | "windows" | "apple" => Some(platform),
         other => {
             reporter.error(format!(
-                "unknown platform '{other}'; expected android, ios, macos, or windows"
+                "unknown platform '{other}'; expected android, ios, macos, windows, or apple"
             ));
             None
         }
@@ -118,7 +126,7 @@ fn read_password(cli_info: &CLIInfo) -> Option<String> {
 /// Read a password from `--<name>-password` / `--<name>-password-file`, or the
 /// bare `--password` / `--password-file` when `name` is empty. The file form is
 /// preferred so a secret never lands in a process argument list.
-fn read_named_password(cli_info: &CLIInfo, name: &str) -> Option<String> {
+pub(crate) fn read_named_password(cli_info: &CLIInfo, name: &str) -> Option<String> {
     let prefix = if name.is_empty() {
         String::new()
     } else {
@@ -185,7 +193,7 @@ fn set_registry_alias(registry: &mut Value, platform: &str, alias: &str) {
 }
 
 /// Copy a key file into the platform key directory and record it.
-fn install_file(
+pub(crate) fn install_file(
     reporter: &Reporter,
     root: &Path,
     platform: &str,
@@ -208,7 +216,14 @@ fn install_file(
         return false;
     }
     let dest = dir.join(&filename);
-    if let Err(e) = std::fs::copy(source, &dest) {
+    // Registering a file that already lives at its destination must not copy it
+    // onto itself: fs::copy truncates the source before writing, which destroys
+    // the only copy of a signing key. This happens whenever a key is generated
+    // straight into the registry directory, or a user passes the registered path
+    // back to `keys add`.
+    if !is_same_file(source, &dest)
+        && let Err(e) = std::fs::copy(source, &dest)
+    {
         reporter.error(format!(
             "could not copy key file to {}: {e}",
             dest.display()
@@ -217,6 +232,34 @@ fn install_file(
     }
     set_registry_file(registry, platform, role, &filename);
     true
+}
+
+/// Whether two paths refer to the same file on disk.
+///
+/// Compares file identity rather than path text. Two names for one file — a
+/// symlink, or a hard link — must both count as the same file, because
+/// `fs::copy` truncates the destination before reading the source: copying a
+/// file onto itself leaves zero bytes. For a signing key that is the only copy,
+/// and for an Android upload key it is unrecoverable, since Play ties the app
+/// listing to it.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // Device plus inode identifies a file regardless of how it was reached.
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            // A destination that does not exist yet cannot be the source.
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        }
+    }
 }
 
 /// Encode the App Store Connect API key used for notarization from its
@@ -608,7 +651,7 @@ fn verify(
     let secrets = signing::SigningSecrets::load(bundle_id);
     let reports: Vec<signing::PlatformReport> = platforms
         .iter()
-        .filter(|p| matches!(p.as_str(), "android" | "ios" | "macos" | "windows"))
+        .filter(|p| matches!(p.as_str(), "android" | "ios" | "macos" | "windows" | "linux"))
         .map(|p| signing::verify_platform(root, cli_info.get_peko_root(), &secrets, p))
         .collect();
 
@@ -623,10 +666,25 @@ fn verify(
     let mut all_ok = true;
     for report in &reports {
         reporter.info(format!("{}: {}", report.platform, report.state));
+        if report.state == "not_required" {
+            reporter.info("  this platform does not use signing keys");
+            continue;
+        }
         for check in &report.checks {
-            let mark = if check.ok { "ok" } else { "FAIL" };
+            // On an optional platform, absent material is a choice rather than a
+            // failure, so it must not be marked FAIL.
+            let mark = if check.ok {
+                "ok"
+            } else if report.state == "optional" {
+                "--"
+            } else {
+                "FAIL"
+            };
             reporter.info(format!("  [{mark}] {}: {}", check.role, check.detail));
         }
+        // "optional" and "not_required" are not failures: Windows ships unsigned
+        // and Linux does not sign at all. "invalid" always is — the material was
+        // registered and does not work.
         if report.state == "invalid" || report.state == "missing" {
             all_ok = false;
         }
@@ -748,4 +806,88 @@ fn remove(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str)
 
     reporter.success(format!("removed {platform} signing key"));
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    /// Registering a key that already sits at its destination must not copy it
+    /// onto itself. `fs::copy` truncates the destination before reading the
+    /// source, so without this guard the file is left at zero bytes — and for an
+    /// Android upload key that is unrecoverable, since Play ties the app listing
+    /// to that key and updates cannot be signed with a different one.
+    ///
+    /// Reached two ways: generating a key straight into the registry directory,
+    /// and passing an already-registered path back to `keys add`.
+    #[test]
+    fn registering_a_file_in_place_preserves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let platform_dir = signing::platform_dir(root, "android");
+        std::fs::create_dir_all(&platform_dir).unwrap();
+
+        let key = platform_dir.join("upload.keystore");
+        let contents = b"pretend-keystore-bytes";
+        std::fs::write(&key, contents).unwrap();
+
+        let reporter = Reporter::new();
+        let mut registry = Value::Object(Default::default());
+        assert!(install_file(
+            &reporter,
+            root,
+            "android",
+            "keystore",
+            &key,
+            &mut registry
+        ));
+
+        assert_eq!(
+            std::fs::read(&key).unwrap(),
+            contents,
+            "the key was truncated by copying it onto itself"
+        );
+        assert!(role_registered(&registry, "android", "keystore"));
+    }
+
+    /// A hard link is a second name for the same bytes, so it must be treated as
+    /// the same file even though the paths differ.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_counts_as_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("key.p12");
+        std::fs::write(&original, b"bytes").unwrap();
+        let linked = dir.path().join("linked.p12");
+        std::fs::hard_link(&original, &linked).unwrap();
+
+        assert!(is_same_file(&original, &linked));
+        assert!(!is_same_file(&original, &dir.path().join("absent.p12")));
+    }
+
+    /// The ordinary case still copies: a key from elsewhere lands in the registry.
+    #[test]
+    fn registering_a_file_from_elsewhere_copies_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = dir.path().join("downloaded.keystore");
+        std::fs::write(&source, b"from-downloads").unwrap();
+
+        let reporter = Reporter::new();
+        let mut registry = Value::Object(Default::default());
+        assert!(install_file(
+            &reporter,
+            &root,
+            "android",
+            "keystore",
+            &source,
+            &mut registry
+        ));
+
+        let installed = signing::platform_dir(&root, "android").join("downloaded.keystore");
+        assert_eq!(std::fs::read(installed).unwrap(), b"from-downloads");
+        // The original is left alone.
+        assert_eq!(std::fs::read(&source).unwrap(), b"from-downloads");
+    }
 }

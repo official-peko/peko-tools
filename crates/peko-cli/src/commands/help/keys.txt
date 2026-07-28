@@ -1,10 +1,33 @@
-peko keys <add|list|remove> [OPTIONS]
+peko keys <add|generate|p12|verify|list|remove|install|set-password> [OPTIONS]
 
 Manages the per-project signing keys used to sign release builds. Key
 files are copied into .peko/keys/<platform>/ and passwords are stored
 in the operating system keychain. The add subcommand registers a
 platform's key files and password, list shows the registered keys, and
 remove deletes a platform's keys.
+
+`generate` creates signing material rather than registering material you
+already have, and `p12` completes the Apple flow. Both work from any host:
+
+    peko keys generate --platform android --password-file pw.txt
+        Creates an upload keystore with the bundled JDK's keytool, then
+        registers it. Back this file up: Play ties the app listing to it,
+        and updates cannot be signed with a different key.
+
+    peko keys generate --platform apple --email you@example.com
+        Creates an RSA key and a certificate signing request. Upload the
+        .certSigningRequest at developer.apple.com > Certificates, then
+        download the .cer it issues.
+
+    peko keys p12 --platform ios --cer downloaded.cer --password-file pw.txt
+        Pairs that .cer with the key kept from the request, producing the
+        .p12 the bundler signs with, and registers it. Add --installer for
+        the macOS Mac Installer Distribution certificate.
+
+Not every platform signs. `verify` reports each platform's requirement:
+Apple and Android must be signed to ship, Windows Authenticode is
+optional (an unsigned .exe still runs), and Linux has no signing model.
+Only a required platform can fail the command.
 
 OPTIONS
     --platform <PLATFORM>     target platform: android, ios, macos, or
@@ -27,6 +50,15 @@ OPTIONS
     --notary-p8 <PATH>        macos: App Store Connect API .p8 private key
                               (optional; required with the notary id flags)
     --pfx <PATH>              windows: code signing certificate as a .pfx
+    --cer <PATH>              p12: the certificate downloaded from Apple
+    --installer               p12: build the macOS installer certificate
+                              instead of the app signing one
+    --email <ADDRESS>         generate: the Apple ID the request is for
+    --name <NAME>             generate: common name (defaults to --email)
+    --country <CODE>          generate: two-letter country (defaults to US)
+    --dname <DN>              generate: android distinguished name
+    --validity <DAYS>         generate: android key validity (default 10000)
+    --out <PATH>              generate and p12: write the output here
 
 EXAMPLES
     peko keys add --platform android --keystore upload.keystore --alias upload --password secret

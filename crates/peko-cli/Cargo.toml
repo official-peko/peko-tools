@@ -75,6 +75,8 @@ cms = { version = "0.2", features = ["builder"] }
 x509-cert = "0.2"
 der = "0.7"
 rsa = { version = "0.9", features = ["sha2"] }
+# The RNG rsa 0.9 expects (rand_core 0.6), for key generation.
+rand = "0.8"
 p12 = "0.6"
 object = "0.39"
 spki = "0.7"

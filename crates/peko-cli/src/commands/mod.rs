@@ -25,6 +25,8 @@ use std::process::ExitCode;
 
 use peko_core::target::OperatingSystem;
 
+pub mod keygen;
+
 use crate::cli::CLIInfo;
 use crate::cli::reporting::Reporter;
 
@@ -83,7 +85,7 @@ commands! {
     format     => "normalize the indentation and spacing of Pekoscript files",
     icon       => "generate the per-platform app icon set from the icon source" [ "platform", "out" ],
     install    => "resolve, download, and lock the project's dependencies",
-    keys       => "manage per-project signing keys" [ "platform", "password", "password-file", "keystore", "alias", "store-password", "key-password", "cert", "profile", "entitlements", "installer-cert", "installer-password", "installer-password-file", "pfx", "notary-issuer", "notary-key-id", "notary-p8", "role", "file", "filename" ],
+    keys       => "manage per-project signing keys" [ "platform", "password", "password-file", "keystore", "alias", "store-password", "key-password", "cert", "profile", "entitlements", "installer-cert", "installer-password", "installer-password-file", "pfx", "notary-issuer", "notary-key-id", "notary-p8", "role", "file", "filename", "cer", "email", "name", "country", "dname", "validity", "out" ],
     link       => "link the project to a platform app id for deploys",
     login      => "authenticate the cli with the Peko platform" [ "base" ],
     logout     => "clear the stored platform session",
