@@ -242,6 +242,17 @@ async fn id_token(cli_info: &CLIInfo, reporter: &Reporter, json: bool) -> Option
     let session = auth::Session::load()?;
     match auth::fresh_id_token(&session).await {
         Ok(token) => Some(token),
+        // A refusal from the identity service means the refresh token was
+        // revoked (a web sign-out does that), so the session is cleared in
+        // both modes and only the human one is told to sign in again.
+        Err(auth::AuthError::Unauthorized) => {
+            if json {
+                auth::forget_session();
+            } else {
+                auth::report_signed_out(reporter);
+            }
+            None
+        }
         Err(e) => {
             if !json {
                 reporter.error(format!("could not refresh the session: {e}"));

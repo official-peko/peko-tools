@@ -7,6 +7,7 @@
 //! checksum, rejects a duplicate version, and queues the version for admin
 //! review. Authentication is the bearer ID token from `peko login`.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -52,6 +53,10 @@ pub enum PublishError {
     #[error("could not upload the package (HTTP {0})")]
     Upload(u16),
 
+    /// The headers the platform signed into the upload URL could not be sent.
+    #[error("{0}")]
+    UploadHeaders(String),
+
     /// The platform declined the package with an explanation.
     #[error("the platform rejected the package: {0}")]
     Rejected(String),
@@ -68,6 +73,12 @@ struct StartResponse {
     request_id: String,
     #[serde(rename = "uploadUrl")]
     upload_url: String,
+    /// Headers the platform signed into the upload URL, forwarded verbatim on
+    /// the PUT. Storage refuses the upload with `403` without them. An older
+    /// server that signs none omits the field, which is the same as an empty
+    /// set.
+    #[serde(default, rename = "uploadHeaders")]
+    upload_headers: BTreeMap<String, String>,
 }
 
 /// The response from `POST /api/publish/complete`.
@@ -152,10 +163,15 @@ pub async fn publish(
     let start: StartResponse = start.json().await.map_err(PublishError::Decode)?;
 
     // 2. Upload the raw container to the presigned URL. This request goes to
-    // storage directly and carries no platform bearer token.
+    // storage directly and carries no platform bearer token: the signature is
+    // the auth, and it covers the headers the platform signed in (a size cap
+    // today), so those have to go out with it or storage answers 403.
+    let headers =
+        crate::auth::signed_upload_headers(Some("application/octet-stream"), &start.upload_headers)
+            .map_err(PublishError::UploadHeaders)?;
     let upload = http
         .put(&start.upload_url)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .headers(headers)
         .body(bytes.to_vec())
         .send()
         .await

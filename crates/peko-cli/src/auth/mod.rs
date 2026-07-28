@@ -9,6 +9,7 @@
 //! operating system keychain. Later calls exchange the refresh token for a
 //! fresh ID token and send it as a bearer token.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,65 @@ pub fn platform_base(override_url: Option<String>) -> String {
     raw.trim_end_matches('/').to_owned()
 }
 
+/// What the user is told when the platform no longer accepts the stored
+/// session, and the step that fixes it.
+///
+/// Signing out on the web revokes the account's Firebase refresh tokens, which
+/// invalidates any CLI session established before it. Every path that sees that
+/// reports the same two lines, so the state reads as "sign in again" rather
+/// than as an unrelated HTTP failure.
+pub const SIGNED_OUT_MESSAGE: &str = "your session was signed out";
+pub const SIGNED_OUT_HELP: &str = "run `peko login` to reconnect";
+
+/// Forget a session the platform has rejected.
+///
+/// A revoked refresh token is terminal: it can never mint another ID token, so
+/// keeping it only reproduces the same 401 on every later command. Dropping it
+/// here means the next command reports a clean signed-out state instead.
+pub fn forget_session() {
+    // A keychain that refuses the delete is not worth failing the command
+    // over. The user is being sent to `peko login`, which overwrites the entry.
+    Session::clear().ok();
+}
+
+/// Clear the rejected session and tell the user to sign in again.
+pub fn report_signed_out(reporter: &Reporter) {
+    forget_session();
+    reporter.error(SIGNED_OUT_MESSAGE);
+    reporter.help(SIGNED_OUT_HELP);
+}
+
+/// Build the header map for a PUT to a signed storage URL: the content type the
+/// platform named, plus every header it signed into the URL.
+///
+/// The signed headers are forwarded verbatim and by iteration, never by name.
+/// The platform decides that set (today a `x-goog-content-length-range` size
+/// cap on the upload), and storage answers `403` unless the request carries
+/// exactly what was signed, so naming a header here would break the moment the
+/// platform signs a different one. They are applied last, letting a signed
+/// value win if it ever names the same header as `content_type`.
+pub fn signed_upload_headers(
+    content_type: Option<&str>,
+    signed: &BTreeMap<String, String>,
+) -> Result<reqwest::header::HeaderMap, String> {
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+
+    let mut headers = HeaderMap::new();
+    if let Some(content_type) = content_type {
+        let value = HeaderValue::from_str(content_type)
+            .map_err(|_| format!("the platform named an unusable content type `{content_type}`"))?;
+        headers.insert(CONTENT_TYPE, value);
+    }
+    for (name, value) in signed {
+        let header = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("the platform signed an unusable upload header `{name}`"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| format!("the platform signed an unusable value for `{name}`"))?;
+        headers.insert(header, value);
+    }
+    Ok(headers)
+}
+
 /// A platform error body. Routes report either `{"error"}` or `{"message"}`,
 /// and may carry a machine-readable `code`.
 #[derive(Debug, Default, Deserialize)]
@@ -140,6 +200,14 @@ pub struct PlatformFailure {
 pub async fn explain_failure(response: reqwest::Response) -> PlatformFailure {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    // A 401 means the bearer token the call just sent was refused, so the
+    // stored session is spent — most often because a web sign-out revoked the
+    // account's refresh tokens. Drop it here, at the one funnel every
+    // authenticated call already reports through, rather than leaving a dead
+    // credential behind for the next command to retry.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        forget_session();
+    }
     explain_parts(status, &body)
 }
 
@@ -169,8 +237,8 @@ fn explain_parts(status: reqwest::StatusCode, body: &str) -> PlatformFailure {
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return PlatformFailure {
             status,
-            message: "the platform rejected the session; it is missing or expired".to_owned(),
-            help: Some("run `peko login`".to_owned()),
+            message: SIGNED_OUT_MESSAGE.to_owned(),
+            help: Some(SIGNED_OUT_HELP.to_owned()),
         };
     }
     PlatformFailure {
@@ -615,7 +683,8 @@ mod failure_tests {
             r#"{"message":"This request could not be verified. Reload the app and try again."}"#,
         );
         assert!(!failure.message.contains("Reload the app"));
-        assert_eq!(failure.help.as_deref(), Some("run `peko login`"));
+        assert_eq!(failure.message, SIGNED_OUT_MESSAGE);
+        assert_eq!(failure.help.as_deref(), Some(SIGNED_OUT_HELP));
     }
 
     /// An expired token fails attestation the same way, so the body varies but
@@ -623,7 +692,7 @@ mod failure_tests {
     #[test]
     fn unauthorized_with_an_empty_body_still_guides_to_login() {
         let failure = explain_parts(StatusCode::UNAUTHORIZED, "");
-        assert_eq!(failure.help.as_deref(), Some("run `peko login`"));
+        assert_eq!(failure.help.as_deref(), Some(SIGNED_OUT_HELP));
     }
 
     /// The legal gate shares 403 with the wrong-account case, so it is branched
@@ -646,5 +715,67 @@ mod failure_tests {
             r#"{"error":"You do not have access to this app."}"#,
         );
         assert_eq!(failure.message, "You do not have access to this app.");
+    }
+}
+
+#[cfg(test)]
+mod upload_header_tests {
+    use super::*;
+    use reqwest::header::CONTENT_TYPE;
+
+    fn signed(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// The whole point: whatever the platform signed goes out verbatim. The
+    /// name is never matched against, so a cap under a different header keeps
+    /// working without a CLI release.
+    #[test]
+    fn signed_headers_are_forwarded_whatever_they_are_named() {
+        let headers = signed_upload_headers(
+            Some("application/octet-stream"),
+            &signed(&[
+                ("x-goog-content-length-range", "0,3221225472"),
+                ("x-some-future-cap", "42"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(headers["x-goog-content-length-range"], "0,3221225472");
+        assert_eq!(headers["x-some-future-cap"], "42");
+        assert_eq!(headers[CONTENT_TYPE], "application/octet-stream");
+    }
+
+    /// An older server sends no headers at all, which must behave exactly as
+    /// the CLI did before: content type only.
+    #[test]
+    fn no_signed_headers_leaves_just_the_content_type() {
+        let headers =
+            signed_upload_headers(Some("application/octet-stream"), &BTreeMap::new()).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[CONTENT_TYPE], "application/octet-stream");
+    }
+
+    /// A signed header wins over the separately-named content type: the
+    /// signature covers the former, so sending both would be a 403.
+    #[test]
+    fn a_signed_content_type_replaces_the_named_one() {
+        let headers = signed_upload_headers(
+            Some("application/octet-stream"),
+            &signed(&[("content-type", "application/zstd")]),
+        )
+        .unwrap();
+        assert_eq!(headers.get_all(CONTENT_TYPE).iter().count(), 1);
+        assert_eq!(headers[CONTENT_TYPE], "application/zstd");
+    }
+
+    /// A malformed header is reported rather than silently dropped: dropping it
+    /// would produce an opaque 403 from storage instead.
+    #[test]
+    fn an_unusable_header_name_is_an_error() {
+        let result = signed_upload_headers(None, &signed(&[("bad header", "1")]));
+        assert!(result.unwrap_err().contains("bad header"));
     }
 }

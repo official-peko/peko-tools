@@ -273,11 +273,7 @@ async fn deploy_package(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let id_token = match crate::auth::fresh_id_token(&session).await {
         Ok(token) => token,
         Err(crate::auth::AuthError::Unauthorized) => {
-            reporter.error("session expired or revoked");
-            reporter.help(format!(
-                "run '{} login' to authenticate again",
-                cli_info.executable
-            ));
+            crate::auth::report_signed_out(reporter);
             return ExitCode::FAILURE;
         }
         Err(e) => {
@@ -321,15 +317,9 @@ async fn deploy_package(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
                          verify it from your account page on the Peko web app, then publish again",
                     );
                 }
-                // A 401 now comes from the platform's verification gate; treat
-                // it as an invalid session and point at re-login.
-                PublishError::Unauthorized => {
-                    reporter.error("the platform could not verify this session");
-                    reporter.help(format!(
-                        "run '{} login' to authenticate again",
-                        cli_info.executable
-                    ));
-                }
+                // A 401 means the session is spent — a web sign-out revokes it
+                // server-side — so clear it and send the user back to login.
+                PublishError::Unauthorized => crate::auth::report_signed_out(reporter),
                 other => reporter.error(format!("publish failed: {other}")),
             }
             ExitCode::FAILURE
@@ -433,11 +423,7 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
     let id_token = match crate::auth::fresh_id_token(&session).await {
         Ok(token) => token,
         Err(crate::auth::AuthError::Unauthorized) => {
-            reporter.error("session expired or revoked");
-            reporter.help(format!(
-                "run '{} login' to authenticate again",
-                cli_info.executable
-            ));
+            crate::auth::report_signed_out(reporter);
             return ExitCode::FAILURE;
         }
         Err(e) => {
@@ -555,13 +541,7 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
                          verify it from your account page on the Peko web app, then deploy again",
                     );
                 }
-                DeployError::Unauthorized => {
-                    reporter.error("the platform could not verify this session");
-                    reporter.help(format!(
-                        "run '{} login' to authenticate again",
-                        cli_info.executable
-                    ));
-                }
+                DeployError::Unauthorized => crate::auth::report_signed_out(reporter),
                 DeployError::NotConfigured => {
                     reporter.error("server hosting is not available on the platform yet");
                     reporter

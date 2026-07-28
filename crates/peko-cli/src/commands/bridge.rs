@@ -67,8 +67,7 @@ async fn token(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     let id_token = match crate::auth::fresh_id_token(&session).await {
         Ok(token) => token,
         Err(crate::auth::AuthError::Unauthorized) => {
-            reporter.error("session expired or revoked");
-            reporter.help(format!("run '{} login' again", cli_info.executable));
+            crate::auth::report_signed_out(reporter);
             return ExitCode::FAILURE;
         }
         Err(e) => {
@@ -106,10 +105,7 @@ async fn token(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
                         "verify your email from your account page on the Peko web app, then retry",
                     );
                 }
-                BridgeTokenError::Unauthorized => {
-                    reporter.error("the platform could not verify this session");
-                    reporter.help(format!("run '{} login' again", cli_info.executable));
-                }
+                BridgeTokenError::Unauthorized => crate::auth::report_signed_out(reporter),
                 BridgeTokenError::NotFound => {
                     reporter.error("that app was not found on your account");
                     reporter.help("check [project].app_id and that you own the app");

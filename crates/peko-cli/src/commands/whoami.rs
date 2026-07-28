@@ -57,12 +57,15 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(auth::AuthError::Unauthorized) => {
+            // The stored credentials are spent, so drop them in both modes: a
+            // host that renders the sign-in prompt from `authenticated: false`
+            // would otherwise keep a session that can never authenticate again.
             if json {
+                auth::forget_session();
                 print_identity_json(&serde_json::json!({ "authenticated": false }));
                 return ExitCode::SUCCESS;
             }
-            reporter.error("session expired or revoked");
-            reporter.help(format!("run '{} login' to authenticate again", cli_info.executable));
+            auth::report_signed_out(reporter);
             ExitCode::FAILURE
         }
         Err(e) => {

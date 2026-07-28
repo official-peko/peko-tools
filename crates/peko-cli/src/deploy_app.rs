@@ -574,6 +574,16 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
             }));
             ExitCode::SUCCESS
         }
+        PushOutcome::SignedOut => {
+            crate::auth::report_signed_out(reporter);
+            reporter.help(format!("the bundle is kept at {}", bundle_path.display()));
+            reporter.emit_json(serde_json::json!({
+                "type": "result", "ok": false, "kind": "app", "state": "signed_out",
+                "app": project.name, "error": crate::auth::SIGNED_OUT_MESSAGE,
+                "bundle": bundle_path.display().to_string(),
+            }));
+            ExitCode::FAILURE
+        }
         PushOutcome::Failed(message) => {
             reporter.error(format!("deploy upload failed: {message}"));
             reporter.help(format!("the bundle is kept at {}", bundle_path.display()));
@@ -653,6 +663,15 @@ async fn runner_public_key(cli_info: &CLIInfo, reporter: &Reporter) -> Option<Ru
     };
     let id_token = match crate::auth::fresh_id_token(&session).await {
         Ok(token) => token,
+        Err(crate::auth::AuthError::Unauthorized) => {
+            crate::auth::forget_session();
+            reporter.warning(crate::auth::SIGNED_OUT_MESSAGE);
+            reporter.help(format!(
+                "{}, or pass --runner-key <age1…>",
+                crate::auth::SIGNED_OUT_HELP
+            ));
+            return None;
+        }
         Err(e) => {
             reporter.warning(format!(
                 "could not refresh the session for the runner key: {e}"
@@ -823,6 +842,11 @@ struct UploadTarget {
     method: String,
     #[serde(rename = "contentType")]
     content_type: Option<String>,
+    /// Headers the platform signed into the URL, forwarded verbatim on the PUT.
+    /// Storage refuses the upload with `403` without them. An older server that
+    /// signs none omits the field, which is the same as an empty set.
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
 }
 
 fn default_put_method() -> String {
@@ -843,6 +867,10 @@ enum PushOutcome {
     Uploaded,
     /// The platform intake is not available yet; the local bundle is kept.
     Skipped,
+    /// The platform no longer accepts the stored session, so the user has to
+    /// sign in again before this can work. Kept apart from `Failed` so it is
+    /// reported as a sign-in state rather than buried in an upload error.
+    SignedOut,
     /// The upload failed for a reason the user should see.
     Failed(String),
 }
@@ -876,6 +904,7 @@ async fn push_bundle(
     };
     let id_token = match crate::auth::fresh_id_token(&session).await {
         Ok(token) => token,
+        Err(crate::auth::AuthError::Unauthorized) => return PushOutcome::SignedOut,
         Err(e) => return PushOutcome::Failed(format!("could not refresh the session: {e}")),
     };
 
@@ -901,6 +930,11 @@ async fn push_bundle(
         Ok(resp) => resp,
         Err(e) => return PushOutcome::Failed(format!("network error starting the deploy: {e}")),
     };
+    // A 401 on any authenticated leg means the session was revoked (a web
+    // sign-out invalidates it), not that the deploy itself is malformed.
+    if start_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return PushOutcome::SignedOut;
+    }
     if !start_resp.status().is_success() {
         let status = start_resp.status().as_u16();
         return PushOutcome::Failed(
@@ -932,11 +966,20 @@ async fn push_bundle(
     );
     let method =
         reqwest::Method::from_bytes(start.upload.method.as_bytes()).unwrap_or(reqwest::Method::PUT);
-    let mut put = http.request(method, &start.upload.url).body(bundle);
-    if let Some(content_type) = &start.upload.content_type {
-        put = put.header(reqwest::header::CONTENT_TYPE, content_type);
-    }
-    let put_resp = match put.send().await {
+    let headers = match crate::auth::signed_upload_headers(
+        start.upload.content_type.as_deref(),
+        &start.upload.headers,
+    ) {
+        Ok(headers) => headers,
+        Err(e) => return PushOutcome::Failed(e),
+    };
+    let put_resp = match http
+        .request(method, &start.upload.url)
+        .headers(headers)
+        .body(bundle)
+        .send()
+        .await
+    {
         Ok(resp) => resp,
         Err(e) => return PushOutcome::Failed(format!("network error uploading to storage: {e}")),
     };
@@ -964,6 +1007,9 @@ async fn push_bundle(
         Ok(resp) => resp,
         Err(e) => return PushOutcome::Failed(format!("network error finalizing the upload: {e}")),
     };
+    if complete_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return PushOutcome::SignedOut;
+    }
     if !complete_resp.status().is_success() {
         let status = complete_resp.status().as_u16();
         return PushOutcome::Failed(
@@ -982,6 +1028,16 @@ async fn push_bundle(
         let Ok(resp) = http.get(&status_url).bearer_auth(&id_token).send().await else {
             continue;
         };
+        // Only the progress check is refused here: the upload and the complete
+        // call both landed, so the deploy stands and this is not a failure.
+        // Drop the dead session and stop polling rather than spending the full
+        // two-minute budget on a token that can never be accepted again.
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            crate::auth::forget_session();
+            reporter.warning(crate::auth::SIGNED_OUT_MESSAGE);
+            reporter.help(crate::auth::SIGNED_OUT_HELP);
+            break;
+        }
         if !resp.status().is_success() {
             continue;
         }
