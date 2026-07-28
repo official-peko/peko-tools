@@ -43,8 +43,17 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         Manifest::Package(_) => None,
     };
 
-    // With no id, report the current link and stop.
+    // With no id, report the current link and stop. A host reads this to decide
+    // whether to offer an app picker or a deploy button, so being unlinked is a
+    // normal result in JSON mode rather than an error.
     let Some(app_id) = cli_info.arguments.get(1) else {
+        if reporter.is_json() {
+            println!(
+                "{}",
+                serde_json::json!({ "linked": current.is_some(), "appId": current })
+            );
+            return ExitCode::SUCCESS;
+        }
         match current {
             Some(id) => reporter.info(format!("linked to app {id}")),
             None => {
@@ -71,6 +80,13 @@ pub async fn execute(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if reporter.is_json() {
+        println!(
+            "{}",
+            serde_json::json!({ "linked": true, "appId": app_id })
+        );
+        return ExitCode::SUCCESS;
+    }
     if current.as_deref() == Some(app_id) {
         reporter.info(format!("already linked to app {app_id}"));
     } else {
