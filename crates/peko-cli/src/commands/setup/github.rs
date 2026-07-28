@@ -91,20 +91,10 @@ impl GithubClient {
             .await
     }
 
-    /// The highest-versioned (non-nightly) release in the repo.
+    /// The highest-versioned stable release in the repo.
     async fn latest_versioned(&self, repo: &str) -> Result<Release> {
         let releases = self.list_releases(repo).await?;
-        let mut best: Option<(Version, Release)> = None;
-        for release in releases {
-            let Some(version) = version_in_tag(&release.tag_name) else {
-                continue;
-            };
-            let better = best.as_ref().is_none_or(|(current, _)| version > *current);
-            if better {
-                best = Some((version, release));
-            }
-        }
-        best.map(|(_, release)| release)
+        pick_latest_versioned(releases)
             .ok_or_else(|| SetupError::ReleaseNotFound(format!("no versioned release in {repo}")))
     }
 
@@ -137,4 +127,79 @@ pub fn version_in_tag(tag: &str) -> Option<Version> {
         .or_else(|| tag.strip_prefix('V'))
         .unwrap_or(tag);
     Version::parse(trimmed).ok()
+}
+
+/// The highest stable release among `releases`.
+///
+/// Tags that are not semver at all — `nightly` — are skipped, and so are
+/// prerelease versions. Ordering by semver alone would rank `v2.2.0-rc1` above
+/// `v2.1.0` and hand every `peko setup` a release candidate; a prerelease is
+/// something to opt into with `--peko-version`/`--sdk-version`, never the
+/// default.
+fn pick_latest_versioned(releases: Vec<Release>) -> Option<Release> {
+    let mut best: Option<(Version, Release)> = None;
+    for release in releases {
+        let Some(version) = version_in_tag(&release.tag_name) else {
+            continue;
+        };
+        if !version.pre.is_empty() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(current, _)| version > *current) {
+            best = Some((version, release));
+        }
+    }
+    best.map(|(_, release)| release)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn releases(tags: &[&str]) -> Vec<Release> {
+        tags.iter()
+            .map(|tag| Release {
+                tag_name: (*tag).to_owned(),
+                assets: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn pick(tags: &[&str]) -> Option<String> {
+        pick_latest_versioned(releases(tags)).map(|r| r.tag_name)
+    }
+
+    /// Releases come back newest-first but that is not a version order, so the
+    /// highest version wins regardless of position.
+    #[test]
+    fn picks_the_highest_version_not_the_first() {
+        assert_eq!(pick(&["v2.0.3", "v2.1.0", "v2.0.0"]).as_deref(), Some("v2.1.0"));
+    }
+
+    /// `nightly` is a real tag on the repo and is not a version.
+    #[test]
+    fn skips_tags_that_are_not_versions() {
+        assert_eq!(pick(&["nightly", "v2.0.0"]).as_deref(), Some("v2.0.0"));
+    }
+
+    /// The release workflow publishes any `-` suffixed tag as a prerelease, so
+    /// one must never become the default install.
+    #[test]
+    fn skips_prereleases_even_when_they_sort_highest() {
+        assert_eq!(pick(&["v2.2.0-rc1", "v2.1.0"]).as_deref(), Some("v2.1.0"));
+    }
+
+    /// A repo with nothing but prereleases resolves to nothing rather than
+    /// silently installing one.
+    #[test]
+    fn a_prerelease_only_repo_resolves_to_nothing() {
+        assert_eq!(pick(&["v2.2.0-rc1", "nightly"]), None);
+    }
+
+    #[test]
+    fn parses_versions_with_or_without_a_v_prefix() {
+        assert_eq!(version_in_tag("v2.1.0"), Version::parse("2.1.0").ok());
+        assert_eq!(version_in_tag("2.1.0"), Version::parse("2.1.0").ok());
+        assert_eq!(version_in_tag("nightly"), None);
+    }
 }
