@@ -26,6 +26,8 @@ example `std::collections` or `std::json`.
 - `process` - spawn child processes, stream their output, and wait on them.
 - `runtime` - low-level bridges to the garbage collector and runtime.
 - `lexer` - a lexer used by tooling.
+- `bundle` - the paths the compiler injects for a built app, so code can find
+  its own bundled resources at runtime.
 
 ## Native code
 

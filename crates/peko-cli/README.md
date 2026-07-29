@@ -1,18 +1,19 @@
-# peko_cli
+# peko-cli
 
-Console interface for the Pekoscript toolchain. Wraps `peko_core` and
-`peko_llvm` into a single `peko` binary that drives every common
-workflow: building projects for one or more platforms, compiling and
-running individual files, managing packages, scaffolding new projects,
-and signing release builds.
+Console interface for the Pekoscript toolchain. Wraps `peko-core`, `peko-llvm`,
+and `peko-lsp` into a single `peko` binary that drives every common workflow:
+installing the toolchain, building projects for one or more platforms, compiling
+and running files, managing packages, scaffolding projects, signing releases, and
+deploying to the Peko platform.
 
-`peko_cli` is one of three crates in the Pekoscript compiler workspace:
+`peko-cli` is one of four crates in the Pekoscript compiler workspace:
 
 ```
-compiler/
-├── peko_core/   compiler frontend: parser, AST, type checker, simulator
-├── peko_llvm/   LLVM-backed codegen + linker
-└── peko_cli/    this crate
+crates/
+  peko-core/   compiler front end: lexer, parser, types, analysis, formatter
+  peko-llvm/   LLVM-backed codegen and linker
+  peko-lsp/    language server, run as `peko lsp`
+  peko-cli/    this crate
 ```
 
 ## Building
@@ -20,7 +21,7 @@ compiler/
 The cli is built as part of the workspace:
 
 ```sh
-cargo build --release -p peko_cli
+cargo build --release -p peko-cli
 ```
 
 The resulting binary lives at `target/release/peko`. The cli expects a
@@ -32,18 +33,37 @@ healthy.
 ## Commands at a glance
 
 ```
-peko add        install a package from the registry
-peko addkey     add a code-signing key to the project
-peko build      build the project for one or more target platforms
+peko setup      install or update the Peko development environment
 peko check      verify the Peko toolchain installation is healthy
-peko clangflags print clang flags peko_core would pass to the C compiler
-peko compile    compile a single Pekoscript file to an object or binary
-peko pkg        package a host package for distribution
+peko toolchain  inspect and install build toolchains
+
 peko project    create or inspect a Pekoscript project
-peko remove     uninstall a package from the project
-peko run        build and run the project, with optional hot reload
+peko build      build the project for one or more target platforms
+peko run        build and run the project
 peko test       type-check a Pekoscript file without producing output
-peko update     update an installed package to a newer version
+peko compile    compile a single Pekoscript file to an object or binary
+peko format     normalize the indentation and spacing of Pekoscript files
+peko clean      remove the project's build cache and output
+peko clangflags print clang flags peko-core would pass to the C compiler
+peko search     search or replace text across the project
+peko lsp        run the language server over stdio
+
+peko add        add a dependency to peko.toml and install it
+peko remove     remove a dependency and re-resolve
+peko install    resolve, download, and lock the project's dependencies
+peko update     re-resolve dependencies and refresh peko.lock
+peko verify     scan a .pkpkg container and verify its structure and keys
+
+peko login      authenticate the cli with the Peko platform
+peko logout     clear the stored platform session
+peko whoami     print the identity behind the stored session
+peko apps       list the platform apps this account owns
+peko link       link the project to a platform app id
+peko keys       manage per-project signing keys
+peko deploy     publish a package, or deploy the app or its server
+peko bridge     mint a native-bridge token for the current app
+peko icon       generate the per-platform app icon set
+peko demo       run the app's demo shots to verify the automation flow
 peko version    print the cli version and exit
 ```
 
@@ -97,27 +117,28 @@ peko add my_pkg
 peko build
 ```
 
-Set up release signing for Android:
+Set up release signing for Android. `keys generate` builds an upload keystore
+with the bundled JDK and registers it, so nothing has to be installed first:
 
 ```sh
-peko addkey --android ./my-release.keystore
-echo '.peko/project/keystores/' >> .gitignore
+peko keys generate --platform android --password-file pw.txt
+peko keys list
 ```
 
 ## Source layout
 
 ```
 src/
-├── main.rs              argv parsing, global flags, dispatch
-├── cli/                 CLIInfo, Flags, Reporter (terminal output)
-├── commands/            one file per subcommand, plus help text
-│   ├── mod.rs           dispatcher table + shared helpers
-│   ├── add.rs           ...
-│   ├── help/<cmd>.txt   per-command help, included at compile time
-├── execution/           orchestrates peko_core: compile / test / incremental
-├── packager/            installer + .pkpkg binary builder
-├── bundler/             per-platform app bundling (apk, ipa, .app, .exe, AppImage)
-└── project/             PekoProject struct + binary config format
+  main.rs              argv parsing, global flags, dispatch
+  cli/                 CLIInfo, Flags, Reporter (terminal output)
+  commands/            one file per subcommand, plus help text
+    mod.rs           dispatcher table + shared helpers
+    add.rs           ...
+    help/<cmd>.txt   per-command help, included at compile time
+  execution/           orchestrates peko-core: compile / test / incremental
+  packager/            installer + .pkpkg binary builder
+  bundler/             per-platform app bundling (apk, ipa, .app, .exe, AppImage)
+  project/             PekoProject struct + binary config format
 ```
 
 ## Adding a new subcommand

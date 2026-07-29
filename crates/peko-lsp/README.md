@@ -1,37 +1,60 @@
-# Pekoscript Language Server
+# peko-lsp
 
-The official language server for [Pekoscript](https://pekoui.comt), implementing the [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) over stdio. It provides rich editor integration for `.peko` files.
+The language server for [Pekoscript](https://pekoui.com), implementing the
+[Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
+over stdio for `.peko` files.
 
----
-
-## Features
-
-| Feature | Description |
-|---|---|
-| **Diagnostics** | Real-time errors and warnings as you type |
-| **Hover** | Type information and documentation on symbol hover |
-| **Completions** | Context-aware completion with snippet support |
-| **Signature Help** | Parameter hints when calling functions |
-| **Go to Definition** | Jump to where a symbol is declared |
-| **Find References** | Find all usages of a symbol across the project |
-| **Document Symbols** | Outline view of functions, classes, and variables in the current file |
-| **Workspace Symbols** | Search for symbols across the entire project |
-| **Formatting** | Format the current file using the Pekoscript formatter |
-
----
-
-## Installation
-
-Requires [Rust](https://rustup.rs/) 1.75 or later.
+This is a library crate compiled into the `peko` binary rather than a separate
+executable. Editors start it by running:
 
 ```bash
-git clone https://github.com/official-peko/peko-tools
-cd pekoscript-lsp
+peko lsp
+```
+
+It reuses the `peko-core` analysis engine, so the diagnostics an editor shows are
+the ones the compiler produces.
+
+## Requests handled
+
+| Request | Behavior |
+|---|---|
+| Diagnostics | Errors and warnings, published as a file is edited. |
+| Hover | Type information and doc comments for the symbol under the cursor. |
+| Completion | Context-aware completions, including snippets. |
+| Signature help | Parameter hints while writing a call. |
+| Go to definition | Jumps to where a symbol is declared. |
+| Find references | Locates a symbol's uses across the project. |
+| Document symbols | The outline of functions, classes, and variables in a file. |
+| Workspace symbols | Symbol search across the project. |
+| Formatting | Formats a file through the `peko-core` formatter, the same one `peko format` uses. |
+
+Positions are exchanged in whatever encoding the client negotiates. The server's
+canonical representation is character offsets, transcoded at the wire boundary,
+so files containing characters outside the Basic Multilingual Plane map
+correctly.
+
+## Editor setup
+
+Any LSP-capable editor can use it by registering `peko lsp` as the server command
+for the `.peko` file type. Peko Studio wires this up already: its native host
+spawns `peko lsp` and frames the protocol between the editor and the server.
+
+The `peko` binary has to be on `PATH`, which `peko setup` configures.
+
+## Building
+
+The crate builds as part of the workspace:
+
+```bash
 cargo build --release
 ```
 
-The compiled binary will be at `target/release/pekoscript-lsp`. Optionally install it to your system:
+There is no separate language server binary to install. See the
+[workspace README](../../README.md) for the LLVM 18 prerequisite that building
+the workspace requires.
 
-```bash
-cargo install --path .
-```
+## License
+
+MIT. See [LICENSE](../../LICENSE) in the project root for the full text.
+
+Copyright 2026 Peko UI Technologies LLC.

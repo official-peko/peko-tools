@@ -6,10 +6,10 @@ are kept here for reference and reuse.
 
 Two grammars live side by side:
 
-- **Tree-sitter** - `grammar.js` is the source of truth; `src/` holds the
+- Tree-sitter: `grammar.js` is the source of truth and `src/` holds the
   generated parser. Run `tree-sitter generate` after editing `grammar.js`.
-- **TextMate** - `pekoscript.tmLanguage.json`, edited directly. Used by editors
-  and highlighters that consume TextMate grammars.
+- TextMate: `pekoscript.tmLanguage.json`, edited directly. Used by editors and
+  highlighters that consume TextMate grammars.
 
 ## Tree-sitter
 

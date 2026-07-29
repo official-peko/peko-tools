@@ -30,6 +30,8 @@ let app = ui::app::from_bundle();
 - `keychain` - secure secret storage backed by the OS keychain.
 - `menu` - the native application menu bar, with accelerators, on each platform.
 - `dialog` - native file and message dialogs.
+- `env` - environment variables and process information for the running app.
+- `paths` - the per-app directories an app writes to, resolved per platform.
 
 ## Client SDK
 

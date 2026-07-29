@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/official-peko/peko-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/official-peko/peko-tools/actions/workflows/ci.yml)
 [![Nightly](https://github.com/official-peko/peko-tools/actions/workflows/nightly.yml/badge.svg)](https://github.com/official-peko/peko-tools/actions/workflows/nightly.yml)
-[![Status](https://img.shields.io/badge/status-prerelease-orange.svg)](#status)
+[![Release](https://img.shields.io/github/v/release/official-peko/peko-tools.svg)](https://github.com/official-peko/peko-tools/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 The core toolchain for Pekoscript: the compiler front end, the LLVM code
@@ -18,10 +18,10 @@ per-platform native toolchains, both under [`toolkit/`](#standard-library-and-to
 
 | Crate | Role |
 |---|---|
-| [`peko_core`](peko_core/README.md) | Lexer, parser, AST, type system, static analysis, and the simple package registry. |
-| [`peko_llvm`](peko_llvm/README.md) | LLVM IR code generation and linking, built on top of `peko_core`. Links libLLVM through llvm-sys and inkwell. |
-| [`peko_cli`](peko_cli/README.md) | The user facing command line tool: compiling, bundling, project management, and package management. |
-| [`peko_lsp`](peko_lsp/README.md) | A language server library exposing the `peko_core` analysis engine to editors. Built into the CLI and run as `peko lsp`. |
+| [`peko-core`](crates/peko-core/README.md) | Lexer, parser, AST, type system, static analysis, the formatter, and package discovery. |
+| [`peko-llvm`](crates/peko-llvm/README.md) | LLVM IR code generation and linking, built on `peko-core`. Links libLLVM through llvm-sys and inkwell. |
+| [`peko-cli`](crates/peko-cli/README.md) | The command line tool: compiling, bundling, project and package management, signing, and deploys. |
+| [`peko-lsp`](crates/peko-lsp/README.md) | A language server library exposing the `peko-core` analysis engine to editors. Built into the CLI and run as `peko lsp`. |
 
 Each crate documents its own internals in its own README. This file covers the
 workspace as a whole.
@@ -33,16 +33,19 @@ from the Rust crates that build the toolchain itself:
 
 | Path | Contents |
 |---|---|
-| `toolkit/std` | The Pekoscript standard library, written in Pekoscript with C interop: `core`, `collections`, `io`, `fs`, `random`, `crypto`, `threads`, `sockets`, `json`, `xml`, `lexer`, `runtime`, and `webview`. |
-| `toolkit/toolchains` | The per-platform clang and lld toolchains, one directory each for `macos`, `linux`, `windows`, `ios`, and `android`. |
+| [`toolkit/std`](toolkit/std/README.md) | The Pekoscript standard library: `core`, `collections`, `io`, `fs`, `random`, `crypto`, `threads`, `sockets`, `process`, `json`, `xml`, `lexer`, `bundle`, and `runtime`. |
+| [`toolkit/pekoui`](toolkit/pekoui/README.md) | The UI framework: a native webview host, the bridge to the web front end, storage, keychain, menus, and dialogs, plus the `@peko/client` JavaScript SDK. |
+| `toolkit/toolchains` | The per-platform toolchain descriptors, one directory each for `macos`, `linux`, `windows`, `ios`, and `android`. Each `toolchain.toml` describes its target triple, compile flags, includes, and link step. |
 | `toolkit/peko.h` | The FFI umbrella header the standard library's C sources compile against. |
 
-Each standard library module pairs Pekoscript with native C under
-`toolkit/std/c`. `std::webview`, for example, wraps a native webview on every
-platform: WKWebView on macOS, WebKitGTK on Linux, and WebView2 on Windows for
-the desktop, UIKit and WebKit on iOS, and an `android.webkit.WebView` driven
-through JNI on Android. A single JavaScript-to-native binding protocol is shared
-across all of them.
+Several modules pair Pekoscript with native C under `c/`. `pekoui`, for example,
+wraps a different webview on each platform: WKWebView on macOS, WebKitGTK on
+Linux, WebView2 on Windows, UIKit and WebKit on iOS, and an
+`android.webkit.WebView` driven through JNI on Android. One JavaScript-to-native
+binding protocol is shared across all of them.
+
+`std` and `pekoui` are published to the package registry and installed globally
+by `peko setup`, so projects import them without vendoring anything.
 
 Peko programs compile to native code for both the desktop platforms and the
 mobile platforms, iOS and Android; the CLI drives the C compilation and the
@@ -51,20 +54,36 @@ final link through the matching toolchain.
 ## Architecture
 
 ```
-peko_core    lexing, parsing, AST, static analysis, package registry
+peko-core    lexing, parsing, AST, static analysis, formatting, packages
    |
-   +-- peko_llvm   LLVM IR codegen and lld linking, built on peko_core
+   +-- peko-llvm   LLVM IR codegen and lld linking, built on peko-core
    |        |
-   |        +-- peko_cli   compiler driver, bundling, project and package tooling
+   |        +-- peko-cli   compiler driver, bundling, project and package tooling
    |
-   +-- peko_lsp   language server backed by the peko_core analysis engine
+   +-- peko-lsp   language server backed by the peko-core analysis engine
 ```
 
-`peko_core` is the foundation. `peko_llvm` consumes its AST and type
-information to emit LLVM IR and produce native objects. `peko_cli` drives the
+`peko-core` is the foundation. `peko-llvm` consumes its AST and type
+information to emit LLVM IR and produce native objects. `peko-cli` drives the
 front end and the code generator end to end and adds the project and package
-workflows. `peko_lsp` reuses the same analysis engine so editor diagnostics
+workflows. `peko-lsp` reuses the same analysis engine so editor diagnostics
 match the compiler.
+
+## Installing the toolchain
+
+Building this repository is only needed to work on the toolchain itself. To use
+Peko, install a release and let it lay down the rest of the environment:
+
+```bash
+peko setup
+```
+
+That downloads the compiler SDK and the linux and android toolchains, links the
+Apple SDKs through `xcrun` on a macOS host, installs `std` and `pekoui`
+globally, writes the toolchain descriptors, and configures `PATH`, all under
+`~/.Peko`. Re-running it refreshes only the components whose release changed.
+The Windows toolchain (the MSVC CRT and Windows SDK) is optional and comes
+through xwin, so it needs `--windows --accept-microsoft-license`.
 
 ## Toolchain host platforms
 
@@ -113,7 +132,7 @@ cargo build --release
 ```
 
 The release binaries land in `target/release/`. Build a single crate with
-`cargo build --release -p peko_cli` and so on.
+`cargo build --release -p peko-cli` and so on.
 
 ## Development
 
