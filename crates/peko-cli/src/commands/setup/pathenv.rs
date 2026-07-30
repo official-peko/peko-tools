@@ -11,19 +11,26 @@ use super::{Result, SetupError};
 
 #[cfg(not(windows))]
 const MARKER: &str = "# added by peko setup";
-#[cfg(not(windows))]
-const ENV_CONTENTS: &str =
-    "export PEKO_ROOT_PATH=\"$HOME/.Peko\"\nexport PATH=\"$HOME/.Peko/Compiler/bin/peko:$PATH\"\n";
-
 /// Configure PATH on a Unix host: write the `env` sourcing script and add a
 /// source line to the shell rc files.
+///
+/// The paths are written from the install root rather than a fixed `~/.Peko`,
+/// so an install directed elsewhere by `PEKO_ROOT_PATH` produces a script that
+/// points at the root it actually installed to.
 #[cfg(not(windows))]
 pub fn configure(layout: &Layout) -> Result<()> {
     let env_file = layout.env_file();
-    std::fs::write(&env_file, ENV_CONTENTS)
+    let root = layout.root().to_path_buf();
+    let bin = layout.bin_peko();
+    let contents = format!(
+        "export PEKO_ROOT_PATH=\"{}\"\nexport PATH=\"{}:$PATH\"\n",
+        root.display(),
+        bin.display()
+    );
+    std::fs::write(&env_file, contents)
         .map_err(|e| SetupError::io(format!("write {}", env_file.display()), e))?;
 
-    let source_line = format!("{MARKER}\n. \"$HOME/.Peko/env\"\n");
+    let source_line = format!("{MARKER}\n. \"{}\"\n", env_file.display());
     if let Some(home) = dirs::home_dir() {
         for name in [".zshrc", ".bashrc", ".profile"] {
             ensure_source_line(&home.join(name), &source_line)?;
