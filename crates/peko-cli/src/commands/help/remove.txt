@@ -8,3 +8,11 @@ appears.
 
 EXAMPLES
     peko remove sockets
+
+OPTIONS
+    --global          remove from the global manifest at the Peko root
+                      instead of the project
+
+EXAMPLES
+    peko remove sockets
+    peko remove pekoui --global

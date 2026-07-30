@@ -4,10 +4,12 @@ USAGE
     peko format <file.peko> [more.peko ...] [flags]
 
 DESCRIPTION
-    Re-indents each file to its bracket-nesting depth, trims trailing
-    whitespace, and collapses runs of blank lines. Only leading indentation is
-    rewritten, so comments and string contents are preserved exactly. By
-    default each file is formatted in place.
+    Reprints each file from its parsed syntax tree in canonical form:
+    indentation, spacing, and line breaks are all rewritten, and long
+    constructs are wrapped to the standard width. Comments are preserved,
+    including doc comments and comments inside class, trait, and enum
+    bodies. String contents are never altered. By default each file is
+    formatted in place.
 
 FLAGS
     --check     Report files that are not formatted and write nothing. Exits

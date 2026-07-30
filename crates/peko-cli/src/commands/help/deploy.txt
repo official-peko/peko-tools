@@ -8,6 +8,10 @@ TARGETS
     package   pack the enclosing library package and upload it to the registry
     server    build the app and deploy it to Peko server hosting
 
+    runner-keygen   create the age key a remote Apple build host unseals with
+    runner-pubkey   print the public half of an existing runner key
+    unseal          decrypt a sealed signing bundle on a build host
+
 DEPLOY APP
 
 Builds the app for every platform in [project].target_platforms and ships
@@ -58,9 +62,11 @@ Router, Astro, and Angular. (Next must emit a standalone build —
 `output: 'standalone'` in next.config.js — which `peko project new` sets
 up automatically.)
 
-The app must set `framework = "server"` under [ui], carry its SSR
-framework ([ui].server_framework, default "next"), and be linked to a
-platform app id ([project].app_id, or --app-id for a one-off).
+The app names its SSR framework in [ui].framework directly: one of next,
+nuxt, sveltekit, remix, astro, or angular. A bare "server" means next.
+There is no [ui].server_framework key; writing one is a parse error. The
+app must also be linked to a platform app id ([project].app_id, or
+--app-id for a one-off).
 
 Deploying and publishing require a session (run `peko login` first) and a
 verified email. If your email is unverified the platform returns a message
@@ -83,6 +89,28 @@ OPTIONS
     --base <url>         override the platform base URL for this run
                          (default: the PEKO_PLATFORM_URL environment
                          variable, else https://app.pekoui.com)
+    --runner-key <key>   (app) seal the signing material to this age
+                         recipient instead of the one registered with the
+                         platform. Also read from PEKO_RUNNER_KEY.
+
+REMOTE BUILD KEYS
+
+Apple targets requested from a non-Mac host are built on a remote Mac. The
+signing material travels in the deploy bundle encrypted to that host's age
+key, so it is never readable in transit.
+
+    peko deploy runner-keygen [--out <path>] [--force]
+        Create the build host's key. Writes the secret to --out (default
+        $HOME/.peko/runner.key) and prints the public age1... recipient to
+        register with the platform. Refuses to overwrite without --force,
+        because replacing the key makes every sealed bundle undecryptable.
+
+    peko deploy runner-pubkey [--key <path>]
+        Print the public half of an existing key.
+
+    peko deploy unseal --sealed <blob> [--key <path>] [--out <dir>]
+        Decrypt a sealed bundle and print the paths and passwords as JSON,
+        for feeding into `peko build --release`'s signing flags.
 
 EXAMPLES
     peko login

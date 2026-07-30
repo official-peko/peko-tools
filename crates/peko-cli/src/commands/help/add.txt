@@ -6,11 +6,19 @@ Writes <PACKAGE> into the [dependencies] table, preserving the file's
 formatting, then re-resolves and refreshes peko.lock. With no version flag
 the requirement defaults to "*".
 
+A version may also be written inline as `name@version`. Precedence when
+more than one is given: --path, then --version, then the inline form.
+
 OPTIONS
     --version <REQ>   pin a registry version requirement, e.g. ^1.2
     --path <DIR>      add a local path dependency instead of a registry one
+    --global          add to the global manifest at the Peko root instead
+                      of the project, making the package available to
+                      every project on the machine
 
 EXAMPLES
     peko add sockets
     peko add sockets --version ^1.2
+    peko add std@0.1.3
     peko add local_dep --path ../local_dep
+    peko add pekoui --global

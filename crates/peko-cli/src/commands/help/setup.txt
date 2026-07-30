@@ -14,21 +14,36 @@ through xwin. It is distributed under the Microsoft license, so it is
 installed only when requested with --windows and the license is accepted
 with --accept-microsoft-license.
 
+The running peko binary places itself; setup never downloads a CLI. It
+also writes LICENSE and THIRD-PARTY-NOTICES.txt into the root, and on a
+Unix host writes <root>/env and adds a source line to .zshrc, .bashrc,
+and .profile. On Windows it sets PEKO_ROOT_PATH and the user PATH.
+
+Both version flags select the newest stable release when omitted.
+Prereleases and non-version tags are skipped, so a release candidate is
+only installed by naming its tag.
+
 OPTIONS
-    --peko-version <TAG>  install a specific peko CLI release (default:
-                          the latest release)
+    --peko-version <TAG>  take the toolchain descriptors from a specific
+                          peko-tools release (default: the latest
+                          stable). This does not change which peko
+                          binary is installed.
     --sdk-version <TAG>   install a specific SDK / toolchain release
-                          (default: the latest release)
-    --windows             also install the Windows toolchain via xwin
+                          (default: the latest stable)
+    --windows             also install the Windows toolchain via xwin,
+                          and the WebView2 SDK headers from NuGet
     --accept-microsoft-license
                           accept the Microsoft license for the Windows
-                          toolchain (required with --windows)
+                          toolchain. Required with --windows; without it
+                          setup stops rather than skipping Windows.
     --force               reinstall every component even when its release
                           is already current
     --check               report whether a newer release is available
                           without installing anything, then exit
     --json                emit newline-delimited JSON progress events for
-                          tooling (used by Peko Studio)
+                          tooling (used by Peko Studio). --check reports
+                          its result as a JSON event only when this is
+                          also passed.
 
 EXAMPLES
     peko setup

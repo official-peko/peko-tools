@@ -1,17 +1,27 @@
 peko run [OPTIONS]
 
-Builds the current project and runs it. For CLI projects this is a
-single-shot compile-then-execute. For UI projects this enters a hot
-reload loop: source changes are detected, the appserver is rebuilt,
-and the running app is updated without a full restart. SCSS source
-changes are recompiled and pushed to the running app over a local
-update channel.
+Builds the current project and runs it. For a CLI project this is a
+single-shot compile-then-execute.
+
+For a UI project this enters a dev loop. It starts the web framework's
+own dev server with `npm run dev` and points the native window at that
+URL, so JS, CSS, and component edits reload through the framework's own
+hot reload. A change to a .peko source recompiles the native binary
+incrementally, then relaunches the window and restores the route that
+was open. A UI project therefore needs a `dev` script in package.json;
+without one the command stops and directs you to `peko build`.
 
 OPTIONS
     --release             build with release optimizations
-    --quiet               suppress per-change reload notifications in
-                          the console
+    --demo                run in demo mode: include `demo { ... }` blocks
+                          and demo-scoped dependencies
+    --devtools            open a diagnostics window alongside the app,
+                          driving the same dev loop
+    --ide                 run under IDE control, reporting progress as
+                          newline-delimited JSON on stdout
+    --quiet               suppress per-change reload notifications
 
 EXAMPLES
     peko run
-    peko run --quiet
+    peko run --release
+    peko run --devtools

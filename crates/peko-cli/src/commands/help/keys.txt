@@ -1,5 +1,18 @@
 peko keys <add|generate|p12|verify|list|remove|install|set-password> [OPTIONS]
 
+SUBCOMMANDS
+    add            register key files and a password you already have
+    generate       create new signing material (android keystore, or an
+                   Apple key and certificate request)
+    p12            combine an Apple .cer with the kept key into a .p12
+    verify         check each platform's material and report what is
+                   required, present, and valid
+    list           show the registered keys
+    remove         delete a platform's keys
+    install        register a key file by path, or by name with its bytes
+                   on stdin (used by the IDE's drag and drop)
+    set-password   store or replace a role's password
+
 Manages the per-project signing keys used to sign release builds. Key
 files are copied into .peko/keys/<platform>/ and passwords are stored
 in the operating system keychain. The add subcommand registers a
@@ -59,6 +72,17 @@ OPTIONS
     --dname <DN>              generate: android distinguished name
     --validity <DAYS>         generate: android key validity (default 10000)
     --out <PATH>              generate and p12: write the output here
+    --installer-cert <PATH>   add: macos Mac Installer Distribution
+                              certificate, for the App Store .pkg
+    --installer-password <V>  add: password for --installer-cert
+    --installer-password-file <PATH>  read it from a file
+    --role <NAME>             install and set-password: which slot to
+                              write (keystore, p12, profile, pfx,
+                              installer-p12)
+    --file <PATH>             install: the file to register
+    --filename <NAME>         install: the name to store the bytes read
+                              from stdin under
+    --json                    verify: print the report as JSON
 
 EXAMPLES
     peko keys add --platform android --keystore upload.keystore --alias upload --password secret

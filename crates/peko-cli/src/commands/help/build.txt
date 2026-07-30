@@ -32,6 +32,9 @@ OPTIONS
     --target <LIST>       with --prebuild, a comma-separated os-arch list
                           to prebuild for (default: all platforms), e.g.
                           macos-arm,windows-x86_64
+    --web-dist <DIR>      use an already-built web frontend from DIR
+                          instead of running npm. Used by a remote build
+                          host that has no Node installed.
 
 HEADLESS APPLE SIGNING (with --release, for CI runners)
 

@@ -13,9 +13,31 @@ DESCRIPTION
     With no name, every declared shot runs in turn. With a name, only that
     shot runs.
 
-    The project's demo module (see the [demo] section of peko.toml) declares
-    the fixtures and shots. The app must depend on pekoshots and call
-    pekoshots::runtime::attach from its entry.
+    The project's demo module declares the target devices, the fixtures, and
+    the shots. The app depends on pekoshots as an ordinary dependency and
+    calls pekoshots::driver::attach from that module.
+
+    The entry reaches the module only from inside `demo { ... }` blocks, and
+    the import goes inside one too, so a normal or release build links
+    neither the module nor pekoshots:
+
+        import pekoui as ui;
+
+        demo {
+            import appdemo;
+        }
+
+        fn on_start() {
+            let app = ui::app::from_bundle();
+            demo {
+                appdemo::install(app);
+            }
+            app.run();
+        }
+
+    Pass the callbacks that attach and shots take as explicit closures. A
+    bare function reference is coerced into a broken thunk and crashes when
+    it is called.
 
 OPTIONS
     Value options take their value as the next argument, for example --delay 1.

@@ -1,10 +1,15 @@
 peko toolchain <SUBCOMMAND>
 
-Inspects and installs build toolchains.
+Inspects the installed build toolchains.
 
 Toolchains are recorded in versions.json at the Peko root and live under
-Compiler/toolchains/<os>/<arch>. Each carries a toolchain.toml describing its
-target triple, compile flags, includes, and the link step.
+Compiler/toolchains. The layout differs by target: macos/<arch> and
+linux/<arch> are per-architecture, ios splits into ios/arm/device,
+ios/arm/simulator, and ios/x86_64, while android and windows are flat.
+Each directory carries a toolchain.toml describing its target triple,
+compile flags, includes, and the link step.
+
+Toolchains are installed by `peko setup`, not by this command.
 
 SUBCOMMANDS
     list                  load every installed toolchain's toolchain.toml and

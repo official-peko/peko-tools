@@ -1,11 +1,15 @@
 peko check
 
-Performs a deep checkup of the Peko toolchain installation, verifying
-that all expected directories and binaries are present. Use this when
-something seems wrong with your install.
+Performs a deep checkup of the Peko toolchain installation. It confirms
+the root exists, then recomputes a hash over the installed tree and
+compares it to the one recorded at install time. Use this when something
+seems wrong with your install.
 
-This command takes no options.
-
+The vendored subtrees (toolchains, llvm18, java, and the peko binary
+itself) are excluded from the hash, so this verifies the installation
+layout rather than the contents of every SDK.
 
 OPTIONS
-    --rehash              rehashes the root toolchain
+    --rehash              recompute and record the root hash, certifying
+                          the installation as it currently stands. `peko
+                          setup` runs this as its final step.
