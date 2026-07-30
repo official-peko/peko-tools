@@ -3,16 +3,16 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2.1.0"
+version = "2.1.1"
 edition = "2024"
 license = "MIT"
 authors = ["Peko UI Technologies LLC"]
 repository = "https://github.com/official-peko/peko-tools"
 
 [workspace.dependencies]
-peko-core = { version = "2.1.0", path = "crates/peko-core" }
-peko-llvm = { version = "2.1.0", path = "crates/peko-llvm" }
-peko-lsp = { version = "2.1.0", path = "crates/peko-lsp" }
+peko-core = { version = "2.1.1", path = "crates/peko-core" }
+peko-llvm = { version = "2.1.1", path = "crates/peko-llvm" }
+peko-lsp = { version = "2.1.1", path = "crates/peko-lsp" }
 
 tokio = { version = "1.47" }
 thiserror = "2"
