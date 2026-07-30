@@ -206,7 +206,7 @@ fn wire_client_dependencies(
 }
 
 /// Recursively copy `src` onto `dest`, clearing `dest` first.
-fn replace_dir(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn replace_dir(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
     if dest.exists() {
         std::fs::remove_dir_all(dest)?;
     }

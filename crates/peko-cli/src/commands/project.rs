@@ -964,15 +964,28 @@ fn adopt_current_directory(
 }
 
 /// Add `@peko/client` to the scaffolded package.json as a local `file:`
-/// dependency pointing at the installed pekoui package's client directory, so
-/// `import { peko } from '@peko/client'` resolves after npm install.
+/// dependency, so `import { peko } from '@peko/client'` resolves after npm
+/// install.
+///
+/// The SDK is staged under `.peko/client/pekoui` and the dependency recorded as
+/// that project-relative path, which is exactly what a build writes (see
+/// `wire_client_dependencies`). Recording the absolute registry path instead
+/// would work on this machine only: it bakes a home directory and a pinned
+/// pekoui version into package.json, and an `npm install` run before the first
+/// build writes that path into package-lock.json too, so a scaffolded project
+/// could not be shared or committed as-is.
 fn add_client_dependency(project_root: &Path, pekoui_path: &Path) -> std::io::Result<()> {
+    // Stage the SDK where a build stages it, so the relative path resolves
+    // immediately rather than only after the first build.
+    const CLIENT_REL: &str = ".peko/client/pekoui";
+    super::build::replace_dir(&pekoui_path.join("client"), &project_root.join(CLIENT_REL))?;
+
     let package_path = project_root.join("package.json");
     let source = std::fs::read_to_string(&package_path)?;
     let mut package: serde_json::Value = serde_json::from_str(&source)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let dependency = format!("file:{}", config_path_string(&pekoui_path.join("client")));
+    let dependency = format!("file:{CLIENT_REL}");
     let object = package
         .as_object_mut()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "package.json is not an object"))?;
@@ -1125,16 +1138,6 @@ fn confirmation_prompt(rl: &mut Editor<(), FileHistory>, prompt: &str, default_y
             _ => println!(">> please type either yes or no"),
         }
     }
-}
-
-/// Render a filesystem path for a manifest or config file using forward
-/// slashes. A path built by joining a forward-slash literal onto a Windows base
-/// otherwise mixes separators (`C:\Users\me\.Peko\registry/src/...`). Backslashes
-/// are also escape characters in a TOML double-quoted string, so a raw Windows
-/// path is fragile there. Forward slashes avoid both problems and are accepted
-/// on every platform when the path is read back.
-fn config_path_string(path: &Path) -> String {
-    path.display().to_string().replace('\\', "/")
 }
 
 /// Expand a leading `~` (or `~/...`, `~\...`) in a directory argument to the
