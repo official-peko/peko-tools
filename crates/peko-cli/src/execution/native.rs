@@ -385,23 +385,74 @@ pub(crate) fn llvm18_tool(peko_root: &Path, tool: &str) -> PathBuf {
     llvm18_bin(peko_root).join(name)
 }
 
-/// The clang binary used to compile native C sources.
+/// The clang binary used to compile native C sources: the system clang when it
+/// can build the target, and the bundled LLVM 18 clang otherwise.
 ///
-/// The bundled LLVM 18 clang for the host compiles for every non-Apple target
-/// through `-target`, shipping its resource directory (the builtin headers such
-/// as stddef.h) at the sibling `../lib/clang`.
-///
-/// Apple targets are the exception. Recent iOS SDKs ship module maps that
-/// `requires` Apple clang features (for example
+/// The system compiler is preferred because it is the one that matches the
+/// system headers. Peko does not vendor the Apple SDK: the toolchain's
+/// `MacOSX.sdk` points into the host's Xcode, so its libc++ advances with
+/// whatever Xcode the machine has while a pinned clang does not. A libc++ recent
+/// enough to call `__builtin_ctzg` and `__builtin_clzg` unguarded (they arrived
+/// in clang 19) cannot be compiled by clang 18 at all, and it fails on any
+/// translation unit that reaches `<bit>`, which `<array>` and `<algorithm>` both
+/// do. Taking the compiler that shipped beside the headers keeps the two in
+/// step. iOS needs Apple clang for a second reason: recent SDKs ship module maps
+/// that `requires` Apple clang features (for example
 /// `found_incompatible_headers__check_search_paths`) which upstream LLVM lacks,
-/// and their frameworks are module-only, so the bundled clang cannot build
-/// them. The host's Apple clang, matched to the installed SDK, is used for iOS.
-/// The host is always macOS when an Apple target is built.
+/// and their frameworks are module-only.
+///
+/// Cross-compiled targets always use the bundled clang, which is the reason it
+/// ships. A system clang cannot stand in for it: Apple's builds Apple targets
+/// only, and the bundle carries the resource directory (the builtin headers such
+/// as stddef.h, at the sibling `../lib/clang`) and the sysroots the other triples
+/// need. Android is cross-compiled from every host.
+///
+/// Falling back is safe. Only this compile-to-object step is affected, the link
+/// is driven separately by the toolchain's own driver, and nothing links bitcode
+/// (no LTO), so objects from either compiler link together.
 fn host_clang(peko_root: &Path, operating_system: OperatingSystem) -> PathBuf {
-    if matches!(operating_system, OperatingSystem::IOS) {
-        return PathBuf::from("clang");
+    let host = OperatingSystem::from_name(std::env::consts::OS);
+    // iOS counts as native here: it is built on a macOS host with Apple's clang,
+    // even though the target OS is not the host's.
+    let apple_on_macos = matches!(
+        operating_system,
+        OperatingSystem::MacOS | OperatingSystem::IOS
+    ) && host == OperatingSystem::MacOS;
+    if (operating_system == host || apple_on_macos)
+        && let Some(system) = system_clang(peko_root)
+    {
+        return system;
     }
     llvm18_tool(peko_root, "clang")
+}
+
+/// The first `clang` on `PATH`, or `None` when there is none.
+fn system_clang(peko_root: &Path) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    system_clang_in(std::env::split_paths(&path), peko_root)
+}
+
+/// The first directory in `dirs` holding a `clang`, as a full path.
+///
+/// Anything inside `peko_root` is skipped. An install whose bin directory is on
+/// PATH would otherwise hand back the bundled compiler as though it were the
+/// system one, which makes the preference meaningless and the diagnostics
+/// misleading.
+fn system_clang_in<I>(dirs: I, peko_root: &Path) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let name = if cfg!(windows) { "clang.exe" } else { "clang" };
+    for dir in dirs {
+        if dir.as_os_str().is_empty() || dir.starts_with(peko_root) {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// A filesystem-safe, package-scoped object name for a native source. Two
@@ -426,4 +477,62 @@ fn is_up_to_date(object_file: &Path, source_file: &Path) -> bool {
         Err(_) => return false,
     };
     object_modified >= source_modified
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cross-compiled target must keep the bundled clang whatever is on PATH:
+    /// a system clang cannot build Android, and choosing one would break the
+    /// build on a machine that happens to have it.
+    #[test]
+    fn cross_targets_use_the_bundled_clang() {
+        let root = Path::new("/tmp/peko-root-for-test");
+        assert_eq!(
+            host_clang(root, OperatingSystem::Android),
+            llvm18_tool(root, "clang")
+        );
+    }
+
+    /// The install's own bin directory on PATH must not be reported as the
+    /// system clang, or the preference silently picks the compiler it is meant
+    /// to avoid.
+    #[test]
+    fn system_clang_skips_the_install_directory() {
+        let temp = std::env::temp_dir().join("peko-clang-skip-test");
+        let inside = temp.join("Compiler/llvm18/host/bin");
+        let outside = temp.join("usr/bin");
+        std::fs::create_dir_all(&inside).expect("create inside");
+        std::fs::create_dir_all(&outside).expect("create outside");
+        let name = if cfg!(windows) { "clang.exe" } else { "clang" };
+        std::fs::write(inside.join(name), b"").expect("write inside clang");
+        std::fs::write(outside.join(name), b"").expect("write outside clang");
+
+        // The install directory comes first, is skipped, and the one outside it
+        // is taken instead.
+        let found = system_clang_in(
+            vec![inside.clone(), outside.clone()],
+            &temp.join("Compiler"),
+        );
+        assert_eq!(found, Some(outside.join(name)));
+
+        // Every candidate under peko_root leaves nothing to choose.
+        let found = system_clang_in(vec![inside.clone()], &temp);
+        assert_eq!(found, None, "everything under peko_root is skipped");
+
+        // The same directory is eligible once it is not under the install root.
+        let found = system_clang_in(vec![inside.clone()], &temp.join("not-the-install"));
+        assert_eq!(found, Some(inside.join(name)));
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    /// No clang anywhere means the bundled one, not a bare "clang" that would
+    /// fail at exec with a less useful message.
+    #[test]
+    fn no_system_clang_falls_back_to_the_bundle() {
+        let root = Path::new("/tmp/peko-root-for-test");
+        assert_eq!(system_clang_in(Vec::new(), root), None);
+    }
 }
