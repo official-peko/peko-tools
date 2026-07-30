@@ -1953,7 +1953,7 @@ impl
 
         // State-change notification: if this method mutates state on a
         // primary object that has an accessed state, notify the primary
-        // object's `onStateChanged`. Skip when we are inside a
+        // object's `on_state_changed`. Skip when we are inside a
         // constructor since the object is not fully initialized.
         if !self.in_constructor
             && method.visibility.mutates
@@ -1964,7 +1964,7 @@ impl
                 self.create_string(self.accessed_state.as_ref().unwrap().clone());
             let _ = self.call_object_method(
                 &self.primary_object.clone().unwrap(),
-                "onStateChanged",
+                "on_state_changed",
                 vec![method_name_value],
                 None,
             );
@@ -2016,7 +2016,7 @@ impl
             let attribute_name_value = self.create_string(accessed_state);
             let _ = self.call_object_method(
                 &primary_object,
-                "onStateChanged".to_owned(),
+                "on_state_changed".to_owned(),
                 vec![attribute_name_value],
                 None,
             );

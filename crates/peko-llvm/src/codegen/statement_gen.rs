@@ -170,7 +170,7 @@ impl PekoValueBuilder for VariableReassignmentAST {
         codegen_context.build_managed_store(&variable_reference, &value);
 
         // If this assignment is on an object state attribute, notify
-        // its `onStateChanged` (but not inside a constructor; the
+        // its `on_state_changed` (but not inside a constructor; the
         // object is not yet fully initialized).
         if !codegen_context.in_constructor
             && let Some(accessed_state) = &previous_accessed_state
@@ -179,7 +179,7 @@ impl PekoValueBuilder for VariableReassignmentAST {
             let attribute_name_value = codegen_context.create_string(accessed_state);
             let _ = codegen_context.call_object_method(
                 primary_object,
-                "onStateChanged".to_owned(),
+                "on_state_changed".to_owned(),
                 vec![attribute_name_value],
                 None,
             );
