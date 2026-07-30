@@ -329,6 +329,18 @@ fn add(cli_info: &CLIInfo, reporter: &Reporter, root: &Path, bundle_id: &str) ->
         return ExitCode::FAILURE;
     };
 
+    // "apple" names the directory holding the certificate request shared by ios
+    // and macos, so it is a valid target for `remove` but has no key files or
+    // password of its own to register. Rejecting it here keeps the per-platform
+    // role lookup below, which has no entry for it, from indexing an empty list.
+    if platform == "apple" {
+        reporter.error("`keys add` needs a build platform: android, ios, macos, or windows");
+        reporter.help(
+            "`apple` holds the shared certificate request; create it with `keys generate --platform apple`, then register the certificate it produces with `keys p12 --platform ios` or `--platform macos`",
+        );
+        return ExitCode::FAILURE;
+    }
+
     let mut registry = match signing::load_registry(root) {
         Ok(value) => value,
         Err(e) => {
