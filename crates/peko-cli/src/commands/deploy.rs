@@ -395,6 +395,7 @@ pub(crate) async fn deploy_server(cli_info: &CLIInfo, reporter: &Reporter) -> Ex
         &project,
         cli_info.get_peko_root(),
         None,
+        false,
         reporter,
     ) {
         return code;

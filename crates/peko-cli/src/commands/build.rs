@@ -89,6 +89,7 @@ pub(crate) fn build_web_frontend(
     project: &PekoProject,
     peko_root: &std::path::Path,
     web_dist: Option<&std::path::Path>,
+    demo: bool,
     reporter: &Reporter,
 ) -> Result<(), ExitCode> {
     let root = project.get_root();
@@ -133,16 +134,209 @@ pub(crate) fn build_web_frontend(
     let mut npm = crate::proc::npm();
     crate::proc::route_stdout_to_stderr(&mut npm);
     match npm.args(["run", "build"]).current_dir(root).status() {
-        Ok(status) if status.success() => Ok(()),
+        Ok(status) if status.success() => {}
         Ok(_) => {
             reporter.error("web build failed (npm run build)");
-            Err(ExitCode::FAILURE)
+            return Err(ExitCode::FAILURE);
         }
         Err(e) => {
             reporter.error(format!("could not run npm run build: {e}"));
-            Err(ExitCode::FAILURE)
+            return Err(ExitCode::FAILURE);
         }
     }
+
+    if demo {
+        inject_demo_client_agents(root, peko_root, reporter)?;
+    }
+    Ok(())
+}
+
+/// Load the in-page half of every demo-only package into the built page.
+///
+/// A package like pekoshots is linked natively only in a demo build, and its
+/// native half does nothing on its own: the agent that installs
+/// `window.__PEKO_SHOTS__` and answers the bridge lives in the package's client
+/// JS. Without it the app launches, waits for an agent that never appears, and
+/// produces no assets at all.
+///
+/// The app cannot just import the package itself. That import would also land
+/// in the release bundle that goes to the stores, which must carry no
+/// automation code. So the script is added to the built page here, behind the
+/// same demo gate the native side uses, and a release build regenerates the
+/// page without it.
+fn inject_demo_client_agents(
+    root: &std::path::Path,
+    peko_root: &std::path::Path,
+    reporter: &Reporter,
+) -> Result<(), ExitCode> {
+    use peko_core::config::Manifest;
+
+    // Demo-only means reachable when demo code is linked but not otherwise, so
+    // a package the app uses normally is never injected twice.
+    let normal: std::collections::HashSet<std::path::PathBuf> =
+        execution::native::reachable_package_roots(peko_root, root, false)
+            .into_iter()
+            .collect();
+    let demo_only: Vec<std::path::PathBuf> =
+        execution::native::reachable_package_roots(peko_root, root, true)
+            .into_iter()
+            .filter(|candidate| !normal.contains(candidate))
+            .collect();
+    // A package that ships an in-page half but is not demo-scoped gets neither
+    // treatment: it is not injected here, and nothing in the app imports it, so
+    // its agent never reaches the page and the app captures nothing. That used
+    // to fail silently — the app simply sat there until the runner timed out —
+    // so it is called out here.
+    warn_unreachable_client_agents(root, &normal, reporter);
+
+    if demo_only.is_empty() {
+        return Ok(());
+    }
+
+    let page = root.join("assets/index.html");
+    let Ok(mut html) = std::fs::read_to_string(&page) else {
+        // A hand-authored frontend may not produce this page. Nothing to do,
+        // and failing the build over it would be wrong.
+        return Ok(());
+    };
+
+    let mut injected = Vec::new();
+    for package_root in demo_only {
+        let Ok(loaded) = Manifest::load(package_root.join("peko.toml")) else {
+            continue;
+        };
+        let Manifest::Package(pkg) = &loaded.manifest else {
+            continue;
+        };
+        let Some(client) = &pkg.client else {
+            continue;
+        };
+        let src = loaded.root.join(&client.root);
+        if !src.is_dir() {
+            continue;
+        }
+        let entry = client_entry(&src);
+        let dest_rel = format!("peko-client/{}", pkg.package.name);
+        let dest = root.join("assets").join(&dest_rel);
+        if let Err(e) = replace_dir(&src, &dest) {
+            reporter.error(format!(
+                "could not stage the {} demo agent: {e}",
+                client.name
+            ));
+            return Err(ExitCode::FAILURE);
+        }
+        let tag = format!("<script type=\"module\" src=\"./{dest_rel}/{entry}\"></script>");
+        if !html.contains(&tag) {
+            // Appended last so the app's own bundle has already defined the
+            // bridge the agent attaches to.
+            html = match html.rfind("</body>") {
+                Some(at) => format!("{}    {tag}\n  {}", &html[..at], &html[at..]),
+                None => format!("{html}\n{tag}\n"),
+            };
+        }
+        injected.push(client.name.clone());
+    }
+
+    if injected.is_empty() {
+        return Ok(());
+    }
+    if let Err(e) = std::fs::write(&page, html) {
+        reporter.error(format!("could not write {}: {e}", page.display()));
+        return Err(ExitCode::FAILURE);
+    }
+    reporter.status("Building", format!("demo agents: {}", injected.join(", ")));
+    Ok(())
+}
+
+
+/// Warn about a package that ships client JS which nothing will load.
+///
+/// `pekoshots = "*"` rather than `pekoshots = { version = "*", demo = true }`
+/// is the shape that causes it: the package links natively, but because it is
+/// not demo-scoped it is never injected, and because the app's own source does
+/// not import it the bundler never includes it either.
+fn warn_unreachable_client_agents(
+    root: &std::path::Path,
+    normal: &std::collections::HashSet<std::path::PathBuf>,
+    reporter: &Reporter,
+) {
+    use peko_core::config::Manifest;
+
+    let sources = frontend_sources(root);
+    for package_root in normal {
+        let Ok(loaded) = Manifest::load(package_root.join("peko.toml")) else {
+            continue;
+        };
+        let Manifest::Package(pkg) = &loaded.manifest else {
+            continue;
+        };
+        let Some(client) = &pkg.client else {
+            continue;
+        };
+        if sources.contains(&client.name) {
+            continue;
+        }
+        reporter.warning(format!(
+            "{} ships client JS that nothing loads, so its in-page half will be missing",
+            client.name
+        ));
+        reporter.help(format!(
+            "import '{}' in the frontend, or mark it demo-scoped in peko.toml: {} = {{ version = \"...\", demo = true }}",
+            client.name, pkg.package.name
+        ));
+    }
+}
+
+/// The text of the app's frontend sources, for checking whether a client
+/// package is imported. Bounded to the usual source directories so a large
+/// `node_modules` or build output is never walked.
+fn frontend_sources(root: &std::path::Path) -> String {
+    let mut text = String::new();
+    for dir in ["src", "app", "components", "pages"] {
+        collect_sources(&root.join(dir), 0, &mut text);
+    }
+    text
+}
+
+fn collect_sources(dir: &std::path::Path, depth: usize, out: &mut String) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sources(&path, depth + 1, out);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "ts" | "tsx" | "js" | "jsx" | "svelte" | "vue" | "html"))
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            out.push_str(&text);
+        }
+    }
+}
+
+/// The module a client package loads from, read from its package.json
+/// (`module`, else `main`), defaulting to index.js.
+fn client_entry(client_dir: &std::path::Path) -> String {
+    let manifest = client_dir.join("package.json");
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return "index.js".to_owned();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return "index.js".to_owned();
+    };
+    value
+        .get("module")
+        .or_else(|| value.get("main"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("index.js")
+        .trim_start_matches("./")
+        .to_owned()
 }
 
 /// Deliver the client npm package (`[client]`) of every reachable registry
@@ -437,6 +631,7 @@ fn build_ui_project(
                 .get_flag("web-dist")
                 .as_deref()
                 .map(std::path::Path::new),
+            cli_info.flags.has_flag("demo"),
             reporter,
         )
     {

@@ -384,23 +384,40 @@ pub async fn run(cli_info: &CLIInfo, reporter: &Reporter) -> ExitCode {
     // twice.
     let prebuilt_frontend = vendored && ui.framework == "static";
     if prebuilt_frontend {
-        reporter.status("Packaging", "prebuilding the web frontend");
-        if crate::commands::build::build_web_frontend(
-            &project,
-            cli_info.get_peko_root(),
-            None,
-            reporter,
-        )
-        .is_err()
-        {
-            return ExitCode::FAILURE;
-        }
-        let built = root.join("assets");
-        if built.is_dir()
-            && let Err(e) = deploy_pack::copy_dir_all(&built, &staging.join("prebuilt/web"))
-        {
-            reporter.error(format!("could not package the prebuilt web frontend: {e}"));
-            return ExitCode::FAILURE;
+        // Two variants, not one. The remote builder produces a generation build
+        // and a submission build from this same source, and their frontends
+        // must differ: the generation page carries the demo agents that drive
+        // store-asset capture, and the submission page must not, since that
+        // binary goes to the stores. Shipping a single frontend would either
+        // leave the farm with an app that captures nothing or put automation
+        // code in the released app.
+        for (demo, dest) in [(true, "prebuilt/web-demo"), (false, "prebuilt/web")] {
+            reporter.status(
+                "Packaging",
+                if demo {
+                    "prebuilding the web frontend (generation)"
+                } else {
+                    "prebuilding the web frontend (submission)"
+                },
+            );
+            if crate::commands::build::build_web_frontend(
+                &project,
+                cli_info.get_peko_root(),
+                None,
+                demo,
+                reporter,
+            )
+            .is_err()
+            {
+                return ExitCode::FAILURE;
+            }
+            let built = root.join("assets");
+            if built.is_dir()
+                && let Err(e) = deploy_pack::copy_dir_all(&built, &staging.join(dest))
+            {
+                reporter.error(format!("could not package the prebuilt web frontend: {e}"));
+                return ExitCode::FAILURE;
+            }
         }
         let _ = std::fs::remove_dir_all(staging.join("source/assets"));
     }
