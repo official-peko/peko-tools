@@ -404,6 +404,10 @@ impl Dependency {
 pub enum DependencySpec {
     /// A registry version requirement, for example `^1.2`.
     Version(String),
+    /// A registry version requirement linked only in demo builds
+    /// (`{ version = "…", demo = true }`), for a package like pekoshots whose
+    /// code must not reach the binary that ships to the stores.
+    DemoVersion(String),
     /// A local path dependency directory.
     Path(String),
 }
@@ -811,6 +815,12 @@ impl Manifest {
         match spec {
             DependencySpec::Version(version) => {
                 dependencies[name] = toml_edit::value(version.clone());
+            }
+            DependencySpec::DemoVersion(version) => {
+                let mut entry = toml_edit::InlineTable::new();
+                entry.insert("version", version.clone().into());
+                entry.insert("demo", true.into());
+                dependencies[name] = toml_edit::value(entry);
             }
             DependencySpec::Path(dir) => {
                 let mut entry = toml_edit::InlineTable::new();

@@ -147,9 +147,20 @@ fn dependency_spec(
         };
     }
 
+    // A demo-scoped dependency is linked only in demo builds, so its code never
+    // reaches the store binary and its client JS is injected into the demo page.
+    let demo = cli_info.flags.has_flag("demo");
+    let registry = |version: String| {
+        if demo {
+            DependencySpec::DemoVersion(version)
+        } else {
+            DependencySpec::Version(version)
+        }
+    };
+
     if cli_info.flags.has_flag("version") {
         return match cli_info.flags.get_flag("version") {
-            Some(version) => Ok(DependencySpec::Version(version)),
+            Some(version) => Ok(registry(version)),
             None => {
                 reporter.error("flag 'version' requires a value");
                 Err(ExitCode::FAILURE)
@@ -158,10 +169,10 @@ fn dependency_spec(
     }
 
     if let Some(version) = inline_version {
-        return Ok(DependencySpec::Version(version.to_string()));
+        return Ok(registry(version.to_string()));
     }
 
-    Ok(DependencySpec::Version(String::from("*")))
+    Ok(registry(String::from("*")))
 }
 
 /// Re-resolve the project after a manifest edit, reporting the outcome.
