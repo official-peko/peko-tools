@@ -31,6 +31,9 @@ rustyline = "15"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 open = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 tar = "0.4"
 flate2 = "1"
 zstd = "0.13"

@@ -31,8 +31,56 @@ use std::process::ExitCode;
 use crate::cli::CLIInfo;
 use crate::cli::reporting::{IndicatifSink, Reporter, Verbosity};
 
+/// Raise this process's open-file limit toward the kernel's per-process cap.
+///
+/// A deploy runs ten builds in one process (generation and submission for each
+/// of five platforms), and each one bundles hundreds of files, so descriptors
+/// accumulate in a way a single `peko build` never reaches. The default soft
+/// limit is low on macOS in particular, and lower still for a GUI-launched
+/// process, which is why this surfaced as "Too many open files" partway through
+/// a deploy rather than on the equivalent standalone build.
+///
+/// Raising the soft limit to the hard limit is what build tooling generally
+/// does; nothing here lowers a limit an operator set deliberately.
+#[cfg(unix)]
+fn raise_open_file_limit() {
+    // SAFETY: getrlimit/setrlimit on a zeroed rlimit are safe to call, and the
+    // struct is fully initialized before use.
+    unsafe {
+        let mut limit = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return;
+        }
+        // Not simply rlim_cur = rlim_max. macOS reports an unlimited hard
+        // limit but rejects an unlimited soft one for NOFILE, capping it at
+        // kern.maxfilesperproc, so that assignment fails silently in exactly
+        // the case this exists for. Walk down instead and keep the first value
+        // the kernel accepts.
+        let ceiling = if limit.rlim_max == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            limit.rlim_max as u64
+        };
+        for target in [61_440_u64, 10_240, 4_096, 1_024] {
+            if target <= limit.rlim_cur as u64 || target > ceiling {
+                continue;
+            }
+            let mut attempt = limit;
+            attempt.rlim_cur = target as libc::rlim_t;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &attempt) == 0 {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_open_file_limit() {}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    raise_open_file_limit();
+
     // ---- Parse argv into CLIInfo -----------------------------------------
     //
     // The invoked subcommand's declared value-flags tell the parser which bare
@@ -255,4 +303,36 @@ fn print_master_help(executable: &str) {
     println!("    --json                emit machine-readable JSON events (for tooling)");
     println!();
     println!("Run '{executable} help <command>' for per-command help.");
+}
+
+#[cfg(all(test, unix))]
+mod rlimit_tests {
+    /// Lower the soft limit, then confirm the raise takes it back to the hard
+    /// limit. A deploy runs ten builds in one process, so this is what keeps it
+    /// from running out of descriptors partway through.
+    #[test]
+    fn raises_the_soft_limit_to_the_hard_limit() {
+        unsafe {
+            let mut original = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut original), 0);
+
+            let mut lowered = original;
+            lowered.rlim_cur = 64;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &lowered), 0);
+
+            super::raise_open_file_limit();
+
+            let mut after = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut after), 0);
+            assert!(
+                after.rlim_cur > 64,
+                "the soft limit should have been raised, got {}",
+                after.rlim_cur
+            );
+            // Not asserted equal to rlim_max: macOS reports that as unlimited
+            // and caps the soft limit at kern.maxfilesperproc.
+
+            libc::setrlimit(libc::RLIMIT_NOFILE, &original);
+        }
+    }
 }
