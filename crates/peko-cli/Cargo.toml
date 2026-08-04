@@ -32,8 +32,6 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 open = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 tar = "0.4"
 flate2 = "1"
 zstd = "0.13"
@@ -93,3 +91,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
+
+# setrlimit, to raise this process's open-file limit at startup.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
