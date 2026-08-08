@@ -144,7 +144,7 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
     // one to use: nothing here pins a version, and naming one leaves the
     // compiler reaching for a release that a toolchain update has replaced.
     if let Some(installed_std) = peko_core::packages::latest_registry_source_dir(peko_root, "std")
-        && let Ok(loaded) = peko_core::config::Manifest::load(&installed_std.join("peko.toml"))
+        && let Ok(loaded) = peko_core::config::Manifest::load(installed_std.join("peko.toml"))
     {
         let info = loaded.manifest.to_external_module(&loaded.root);
         modules.insert(info.module_name.clone(), info);

@@ -323,9 +323,7 @@ pub(crate) fn reachable_package_roots(
     // when no global lockfile pins it. Fall back to the newest installed source
     // rather than to a named version, which goes stale as soon as a toolchain
     // update installs a newer std.
-    if !std_resolved
-        && let Some(installed_std) = latest_registry_source_dir(peko_root, "std")
-    {
+    if !std_resolved && let Some(installed_std) = latest_registry_source_dir(peko_root, "std") {
         add(installed_std, &mut roots, &mut seen);
     }
 
