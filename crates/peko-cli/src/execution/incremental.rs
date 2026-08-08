@@ -1133,6 +1133,33 @@ fn compile_component(
 /// set (the caller should leave the bar in spinner mode for the duration
 /// of the entrypoint codegen).
 ///
+/// Identifies the build that an incremental cache belongs to, as recorded in
+/// the cache's `.build_mode` marker. Any difference here means the cache cannot
+/// be trusted and is discarded.
+///
+/// The compiler binary's own size and modification time stand in for "which
+/// compiler": a version number alone would not separate two builds of the same
+/// version, which is exactly what a developer working on the compiler, or anyone
+/// reinstalling the toolchain, ends up with. A compiler whose path cannot be
+/// read contributes nothing rather than failing the build, which at worst leaves
+/// the previous behaviour of trusting the cache.
+fn cache_identity(demo: bool, debug: bool) -> String {
+    let mode = if demo { "demo" } else { "normal" };
+    let optimization = if debug { "debug" } else { "release" };
+    let mut compiler = env!("CARGO_PKG_VERSION").to_string();
+    if let Ok(executable) = std::env::current_exe()
+        && let Ok(metadata) = std::fs::metadata(&executable)
+    {
+        compiler.push_str(&format!("+{}", metadata.len()));
+        if let Ok(modified) = metadata.modified()
+            && let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            compiler.push_str(&format!("+{}", since_epoch.as_secs()));
+        }
+    }
+    format!("{mode}|{optimization}|{compiler}")
+}
+
 /// `entitlements` is forwarded to the linker. Pass `Some(path)` to embed
 /// the entitlements plist as a Mach-O section at link time (used for iOS
 /// simulator bundles), or `None` for targets that do not embed
@@ -1170,23 +1197,35 @@ pub fn compile_project(
         .join(target.operating_system.to_string())
         .join(target.architecture.to_string());
 
-    // A demo build emits different code than a normal build (`demo { ... }`
-    // blocks are included or stripped), so a cache produced in the other mode
-    // must not be reused. A marker records the mode the cache was built in; on a
-    // mismatch, the incremental map and objects are discarded so the build
-    // starts fresh. The marker is written once the mode is known, so subsequent
-    // targets in the same invocation reuse the freshly-built cache.
+    // A cache is only meaningful to a build like the one that produced it. A
+    // demo build emits different code than a normal build (`demo { ... }` blocks
+    // are included or stripped), a release build differs from a debug one, and —
+    // the case that is easiest to miss — a cache written by one compiler is read
+    // by whichever compiler runs next. The cached file map records module and
+    // type structure that the reader has to agree with; where it does not, the
+    // mismatch surfaces far from its cause, as a type that resolves to nothing
+    // in the middle of code generation rather than as anything the user can act
+    // on.
+    //
+    // So the marker records the identity of the build that filled the cache:
+    // mode, optimization, compiler version, and a fingerprint of the compiler
+    // binary itself, since a locally rebuilt compiler keeps its version number
+    // while being a different compiler. On any mismatch the map and objects are
+    // discarded so the build starts fresh. The marker is written once the
+    // identity is known, so the remaining targets in this invocation reuse the
+    // freshly-built cache.
     let mode_marker = incremental_directory.join(".build_mode");
-    let current_mode = if demo { "demo" } else { "normal" };
-    if std::fs::read_to_string(&mode_marker).ok().as_deref() != Some(current_mode) {
+    let current_mode = cache_identity(demo, debug);
+    if std::fs::read_to_string(&mode_marker).ok().as_deref() != Some(current_mode.as_str()) {
         // Wipe the whole cache (every target's objects and the file map), not
         // just this target's, so a multi-target UI build can't reuse another
-        // target's stale objects from the previous mode. The marker is rewritten
-        // so the remaining targets in this invocation reuse the fresh cache.
+        // target's stale objects from the previous identity. The marker is
+        // rewritten so the remaining targets in this invocation reuse the fresh
+        // cache.
         let _ = std::fs::remove_dir_all(&incremental_directory);
         project.incremental_info = None;
         std::fs::create_dir_all(&incremental_directory).ok();
-        let _ = std::fs::write(&mode_marker, current_mode);
+        let _ = std::fs::write(&mode_marker, &current_mode);
     }
 
     if project.incremental_info.is_none() || !objects_directory.exists() {
