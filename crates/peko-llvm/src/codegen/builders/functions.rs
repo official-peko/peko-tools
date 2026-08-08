@@ -122,9 +122,29 @@ impl FunctionBuilder for PekoCodegenContext {
             .llvm_module;
         self.module_context.step_forward(post_stack);
 
-        let function_llvm_type = self
-            .get_llvm_type_full(&function_type, true, has_var_args)
-            .unwrap();
+        // A signature whose types cannot be resolved here is a compiler fault,
+        // not a source error: the simulator has already accepted this
+        // declaration. The one way it has been seen in the wild is an
+        // incremental cache that no longer matches the compiler that reads it,
+        // where a type recorded by an earlier build resolves to nothing. Report
+        // it and carry on with the error type, so the build ends with a message
+        // naming the remedy instead of an `unwrap` panic and a stack trace.
+        let function_llvm_type = match self.get_llvm_type_full(&function_type, true, has_var_args) {
+            Some(function_llvm_type) => function_llvm_type,
+            None => {
+                self.diagnostics
+                    .report_diagnostic(peko_core::diagnostics::PekoDiagnostic::new(
+                        PositionData::default(),
+                        PositionData::default(),
+                        format!(
+                            "internal error: could not resolve the type of `{name}` while generating code for it. This usually means the incremental build cache is stale; run `peko clean` and build again. If it persists, this is a compiler bug worth reporting",
+                        ),
+                        peko_core::diagnostics::DiagnosticType::Error,
+                        self.get_current_file(),
+                    ));
+                self.llvm_error_type()
+            }
+        };
         let owned_name = cstr(&name);
 
         let function_value =
