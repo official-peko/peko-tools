@@ -1254,6 +1254,16 @@ impl PekoValueSimulator for ClosureAST {
         let scope_reference = Arc::new(RwLock::new(new_closure_scope));
         simulator_context.current_scope = Some(Arc::clone(&scope_reference));
 
+        // A closure body is a run of statements whatever surrounds the literal,
+        // and a closure produces its value through `return` rather than through
+        // a tail expression. `expecting_value` describes the position the
+        // closure itself sits in, so it must not reach the body: in
+        // `let x: T = call(closure { ... })` the initializer leaves it set, and
+        // the body's statements are then read as expressions — an `if` with no
+        // `else` is rejected for not producing a value.
+        let expecting_value = simulator_context.expecting_value;
+        simulator_context.expecting_value = false;
+
         // Simulate the body and track reachability.
         let mut branch_exits = false;
         let mut branch_returns = false;
@@ -1309,6 +1319,7 @@ impl PekoValueSimulator for ClosureAST {
         simulator_context.current_this = current_this;
         simulator_context.local_scope = local_scope;
         simulator_context.current_return_type = current_return_type;
+        simulator_context.expecting_value = expecting_value;
 
         // Build the closure's type for the resulting value.
         let mut argument_types = Vec::new();

@@ -2781,6 +2781,69 @@ mod generic_bound_tests {
             "a generic class argument that implements the trait must satisfy the bound; got {messages:?}"
         );
     }
+
+    /// A closure body is a run of statements, whatever position the closure
+    /// literal itself sits in. When the enclosing call's result is used, the
+    /// value-expected state used to leak through the literal into the body, and
+    /// the first bare `if` in it was rejected for not producing a value.
+    ///
+    /// The `if` has to be the body's first statement: a preceding declaration
+    /// clears the leaked state on its way out, which hides the bug.
+    #[test]
+    fn closure_body_statements_are_not_expressions() {
+        let source = r#"
+[public] fn take(callback: closure(i64) => void) => i64 {
+    let zero: i64 = constant<i64>(0)
+    callback(zero)
+    return zero
+}
+
+[public] fn main() {
+    let code: i64 = take(
+        closure(value: i64) => void {
+            if value == constant<i64>(0) {
+                return;
+            }
+        },
+    )
+}
+"#;
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
+        assert!(
+            !messages.iter().any(|m| m.contains("used as an expression")),
+            "a statement `if` in a closure body must not be read as an expression; got {messages:?}"
+        );
+    }
+
+    /// The rule itself still holds inside such a closure: an `if` whose value is
+    /// consumed must produce one.
+    #[test]
+    fn value_position_if_in_closure_body_still_needs_else() {
+        let source = r#"
+[public] fn take(callback: closure(i64) => void) => i64 {
+    let zero: i64 = constant<i64>(0)
+    callback(zero)
+    return zero
+}
+
+[public] fn main() {
+    let code: i64 = take(
+        closure(value: i64) => void {
+            let chosen: i64 = if value == constant<i64>(0) { value }
+        },
+    )
+}
+"#;
+        let Some(messages) = diagnostics_for(source) else {
+            return;
+        };
+        assert!(
+            messages.iter().any(|m| m.contains("used as an expression")),
+            "an `if` whose value is consumed still needs an else; got {messages:?}"
+        );
+    }
 }
 
 #[cfg(test)]
