@@ -18,7 +18,7 @@ use std::process::Command;
 use peko_core::config::{
     LockSource, Lockfile, Manifest, PrebuiltManifest, Toolchain, resolve_flag,
 };
-use peko_core::packages::registry_source_dir;
+use peko_core::packages::{latest_registry_source_dir, registry_source_dir};
 use peko_core::target::{OperatingSystem, PekoTarget};
 
 /// The result of compiling the reachable packages' native C: the object and
@@ -320,12 +320,13 @@ pub(crate) fn reachable_package_roots(
     }
 
     // std is auto-imported and its runtime and GC C must always compile, even
-    // when no global lockfile pins it. Fall back to the installed 0.1.0 source.
-    if !std_resolved {
-        let installed_std = registry_source_dir(peko_root, "std", "0.1.0");
-        if installed_std.join("peko.toml").is_file() {
-            add(installed_std, &mut roots, &mut seen);
-        }
+    // when no global lockfile pins it. Fall back to the newest installed source
+    // rather than to a named version, which goes stale as soon as a toolchain
+    // update installs a newer std.
+    if !std_resolved
+        && let Some(installed_std) = latest_registry_source_dir(peko_root, "std")
+    {
+        add(installed_std, &mut roots, &mut seen);
     }
 
     if let Ok(Some(lockfile)) = Lockfile::load_from_root(project_root) {

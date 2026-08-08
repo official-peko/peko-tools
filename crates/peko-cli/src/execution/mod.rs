@@ -140,11 +140,12 @@ pub(crate) fn external_modules_for<P: AsRef<Path>>(
     // Resolve the auto-imported `std` package from the installed registry cache
     // under the Peko root, rather than requiring it in every project lockfile.
     // This makes std available on every path, including load_required_packages
-    // (which passes no compilation root). Remove once std is published and
-    // locked normally.
-    let installed_std =
-        peko_core::packages::registry_source_dir(peko_root, "std", "0.1.0").join("peko.toml");
-    if let Ok(loaded) = peko_core::config::Manifest::load(&installed_std) {
+    // (which passes no compilation root). The newest installed version is the
+    // one to use: nothing here pins a version, and naming one leaves the
+    // compiler reaching for a release that a toolchain update has replaced.
+    if let Some(installed_std) = peko_core::packages::latest_registry_source_dir(peko_root, "std")
+        && let Ok(loaded) = peko_core::config::Manifest::load(&installed_std.join("peko.toml"))
+    {
         let info = loaded.manifest.to_external_module(&loaded.root);
         modules.insert(info.module_name.clone(), info);
     }

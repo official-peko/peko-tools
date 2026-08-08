@@ -34,6 +34,48 @@ pub fn registry_source_dir(peko_root: &Path, name: &str, version: &str) -> PathB
         .join(format!("{name}-{version}"))
 }
 
+/// The newest installed version of a package's unpacked source, or `None` when
+/// none is installed.
+///
+/// Versions of one package coexist under `registry/src/<name>/`, so the newest
+/// is the one to compile against where nothing pins a version. Naming a version
+/// at the call site instead goes stale the moment that version is superseded,
+/// which is how the auto-imported `std` came to point at a release no longer
+/// installed. Ordering is by numeric version components, so 0.1.10 sorts above
+/// 0.1.9; a prerelease or build suffix is ignored for ordering, and an
+/// unparsable component sorts lowest.
+pub fn latest_registry_source_dir(peko_root: &Path, name: &str) -> Option<PathBuf> {
+    let package_root = registry_source_root(peko_root).join(name);
+    let prefix = format!("{name}-");
+    let mut newest: Option<(Vec<u64>, PathBuf)> = None;
+
+    for entry in std::fs::read_dir(&package_root).ok()?.flatten() {
+        let directory_name = entry.file_name().to_string_lossy().to_string();
+        let Some(version) = directory_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let path = entry.path();
+        if !path.join(MANIFEST_FILE).is_file() {
+            continue;
+        }
+        let components: Vec<u64> = version
+            .split(['-', '+'])
+            .next()
+            .unwrap_or(version)
+            .split('.')
+            .map(|component| component.parse::<u64>().unwrap_or(0))
+            .collect();
+        if newest
+            .as_ref()
+            .is_none_or(|(newest_components, _)| components > *newest_components)
+        {
+            newest = Some((components, path));
+        }
+    }
+
+    newest.map(|(_, path)| path)
+}
+
 /// Aggregated view of installed packages discoverable for import resolution.
 ///
 /// Constructed at startup by the compiler driver and the language server, then
@@ -200,4 +242,56 @@ fn read_version_dir(version_dir: &Path) -> Option<(String, ExternalModuleVersion
         entry_file,
     );
     Some((description, version))
+}
+
+#[cfg(test)]
+mod registry_source_tests {
+    use super::*;
+
+    /// Lay out `registry/src/<name>/<name>-<version>/peko.toml` for each
+    /// version, under a root of this test's own. Tests run on threads that share
+    /// the temp directory, so a root shared between them is a root one test
+    /// deletes while another reads it.
+    fn root_with_versions(scope: &str, name: &str, versions: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("peko_registry_latest_{scope}"));
+        let _ = std::fs::remove_dir_all(&root);
+        for version in versions {
+            let dir = registry_source_dir(&root, name, version);
+            std::fs::create_dir_all(&dir).expect("create package version directory");
+            std::fs::write(dir.join(MANIFEST_FILE), "[package]\n").expect("write manifest");
+        }
+        root
+    }
+
+    /// Versions order by number, not by name: 0.1.10 is newer than 0.1.9, which
+    /// sorts the other way as text.
+    #[test]
+    fn latest_version_orders_numerically() {
+        let root = root_with_versions("ordering", "std", &["0.1.9", "0.1.10", "0.1.2"]);
+        let latest = latest_registry_source_dir(&root, "std").expect("a version is installed");
+        assert!(
+            latest.ends_with("std-0.1.10"),
+            "expected std-0.1.10, got {latest:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory without a manifest is not an installed version, and a package
+    /// with nothing installed resolves to nothing rather than to a guess.
+    #[test]
+    fn latest_version_ignores_incomplete_and_missing() {
+        let root = root_with_versions("incomplete", "std", &["0.1.4"]);
+        std::fs::create_dir_all(registry_source_root(&root).join("std").join("std-0.2.0"))
+            .expect("create directory with no manifest");
+        let latest = latest_registry_source_dir(&root, "std").expect("a version is installed");
+        assert!(
+            latest.ends_with("std-0.1.4"),
+            "a directory with no manifest must not win; got {latest:?}"
+        );
+        assert!(
+            latest_registry_source_dir(&root, "pekoui").is_none(),
+            "a package with nothing installed resolves to nothing"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
