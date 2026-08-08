@@ -102,6 +102,12 @@ import threads;
     }
 
     /// Wait for the child to exit and return its exit code. Blocks.
+    ///
+    /// Reaping the child also releases its stdin pipe, since nothing can be
+    /// written to a process that has exited. Each output pipe is released as
+    /// soon as a read reports end of output. A caller that reads stdout and
+    /// stderr to the end and then waits therefore gives back every descriptor
+    /// the child cost, with no call to free.
     [public] fn wait() => number {
         return new number(danger_cast<f64>(c_process::peko_process_wait(this.handle)))
     }
@@ -124,8 +130,13 @@ import threads;
         c_process::peko_process_kill(this.handle)
     }
 
-    /// Free the process handle and close its pipes. Does not terminate the
-    /// child; call kill first to stop a running child.
+    /// Release the handle's memory, and any pipe still open. Does not terminate
+    /// the child; call kill first to stop a running child.
+    ///
+    /// Draining the output and waiting already returns the descriptors, so this
+    /// is for the leftovers: a child that was killed, or one whose output was
+    /// never read. It must not be called while another thread is still reading
+    /// this child, and the handle cannot be used afterwards.
     [public] fn free() {
         c_process::peko_process_free(this.handle)
     }

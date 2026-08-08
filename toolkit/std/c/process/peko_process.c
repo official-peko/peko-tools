@@ -100,6 +100,8 @@ typedef struct {
 static int stream_raw_read(PekoStream *s, unsigned char *buf, int len)
 {
     DWORD got = 0;
+    if (!s->handle)
+        return 0; /* released at end of output; nothing more can arrive */
     if (!ReadFile((HANDLE)s->handle, buf, (DWORD)len, &got, NULL))
         return 0; /* broken pipe reads as end of output */
     return (int)got;
@@ -240,6 +242,11 @@ void peko_process_close_stdin(void *handle)
     }
 }
 
+/* Reaping the child ends the conversation: nothing can be written to a process
+   that has exited, so the stdin pipe is released here rather than being held
+   until the handle is freed. Callers that drain both output streams to end of
+   output and then wait therefore give every descriptor back without having to
+   remember peko_process_free, which is what most callers do. */
 int peko_process_wait(void *handle)
 {
     PekoProcess *p = (PekoProcess *)handle;
@@ -252,6 +259,7 @@ int peko_process_wait(void *handle)
     GetExitCodeProcess((HANDLE)p->process, &code);
     p->done = 1;
     p->code = (int)code;
+    peko_process_close_stdin(handle);
     return p->code;
 }
 
@@ -310,6 +318,8 @@ void peko_process_free(void *handle)
 static int stream_raw_read(PekoStream *s, unsigned char *buf, int len)
 {
     ssize_t got;
+    if (s->fd < 0)
+        return 0; /* released at end of output; nothing more can arrive */
     do {
         got = read(s->fd, buf, (size_t)len);
     } while (got < 0 && errno == EINTR);
@@ -460,6 +470,11 @@ static int exit_code_of(int status)
     return -1;
 }
 
+/* Reaping the child ends the conversation: nothing can be written to a process
+   that has exited, so the stdin pipe is released here rather than being held
+   until the handle is freed. Callers that drain both output streams to end of
+   output and then wait therefore give every descriptor back without having to
+   remember peko_process_free, which is what most callers do. */
 int peko_process_wait(void *handle)
 {
     PekoProcess *p = (PekoProcess *)handle;
@@ -474,6 +489,7 @@ int peko_process_wait(void *handle)
     pgc_end_blocking();
     p->done = 1;
     p->code = exit_code_of(status);
+    peko_process_close_stdin(handle);
     return p->code;
 }
 
@@ -550,6 +566,7 @@ static int stream_read_line(PekoStream *s)
         int r = stream_raw_read(s, s->rbuf, (int)sizeof(s->rbuf));
         if (r <= 0) {
             s->eof = 1;
+            stream_close(s);
             break;
         }
         s->rpos = 0;
@@ -582,6 +599,7 @@ static int stream_read_bytes(PekoStream *s, int n)
         int r = stream_raw_read(s, (unsigned char *)s->line + got, n - got);
         if (r <= 0) {
             s->eof = 1;
+            stream_close(s);
             break;
         }
         got += r;
